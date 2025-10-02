@@ -1,7 +1,7 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
   "name": "io.github.cyanheads/protein-mcp-server",
-  "description": "MCP Server providing access to 3D protein structural data from RCSB PDB, PDBe, and UniProt. Features multi-provider orchestration, comprehensive structural analysis tools, and full observability.",
+  "description": "MCP Server for 3D protein structural data retrieval & analysis from RCSB PDB, PDBe, and UniProt.",
   "repository": {
     "url": "https://github.com/cyanheads/protein-mcp-server",
     "source": "github"
@@ -12,7 +12,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "protein-mcp-server",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "runtimeHint": "bun",
       "packageArguments": [
         {
