@@ -5,24 +5,24 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-1.0.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2025--06--18-8A2BE2.svg?style=flat-square)](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2025-06-18/changelog.mdx) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.18.2-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Status](https://img.shields.io/badge/Status-Development-orange.svg?style=flat-square)](https://github.com/cyanheads/protein-mcp-server/issues) [![TypeScript](https://img.shields.io/badge/TypeScript-^5.9.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.2.23-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-1.0.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2025--06--18-8A2BE2.svg?style=flat-square)](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2025-06-18/changelog.mdx) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.19.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Status](https://img.shields.io/badge/Status-Development-orange.svg?style=flat-square)](https://github.com/cyanheads/protein-mcp-server/issues) [![TypeScript](https://img.shields.io/badge/TypeScript-^5.9.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.2.23-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
 ---
 
-## 🛠️ Tools Overview
+## 🛠️ Tools Overview & Roadmap
 
-This server provides six powerful tools for accessing and analyzing protein structure data:
+This server provides a powerful suite of tools for accessing and analyzing protein structure data.
 
-| Tool Name                    | Status         | Description                                                                                               |
-| :--------------------------- | :------------- | :-------------------------------------------------------------------------------------------------------- |
-| `protein_search_structures`  | ✅ **Success** | Searches for protein structures using keywords, filters, pagination, and sorting.                         |
-| `protein_get_structure`      | ✅ **Success** | Fetches one or more protein structures by their PDB IDs, returning either full data or concise summaries. |
-| `protein_compare_structures` | ❌ **Failure** | Performs a detailed side-by-side comparison of 2-10 protein structures.                                   |
-| `protein_find_similar`       | ✅ **Success** | Find proteins with similar sequence or structure. _Note: Sequence identity values in results appear low._ |
-| `protein_track_ligands`      | ✅ **Success** | Find protein structures containing specific ligands, cofactors, or drugs.                                 |
-| `protein_analyze_collection` | ❌ **Failure** | Performs statistical analysis on the protein structure database.                                          |
+| Tool Name                    | Status                | Description                                                                                               |
+| :--------------------------- | :-------------------- | :-------------------------------------------------------------------------------------------------------- |
+| `protein_search_structures`  | ✅ **Stable**         | Searches for protein structures using keywords, filters, pagination, and sorting.                         |
+| `protein_get_structure`      | ✅ **Stable**         | Fetches one or more protein structures by their PDB IDs, returning either full data or concise summaries. |
+| `protein_find_similar`       | ✅ **Stable**         | Finds proteins with similar sequence or structure.                                                        |
+| `protein_track_ligands`      | ✅ **Stable**         | Finds protein structures containing specific ligands, cofactors, or drugs.                                |
+| `protein_compare_structures` | 🟡 **In Development** | Performs a detailed side-by-side comparison of 2-10 protein structures.                                   |
+| `protein_analyze_collection` | 🟡 **In Development** | Performs statistical analysis on the protein structure database.                                          |
 
 ### `protein_search_structures`
 
@@ -66,8 +66,6 @@ This server provides six powerful tools for accessing and analyzing protein stru
 
 **Compare and contrast multiple protein structures** to analyze conformational changes and structural relationships.
 
-> **Status**: ❌ **Failure**. This tool is currently non-functional and returned a "pairwise alignment failed" error during testing.
-
 **Key Features:**
 
 - Side-by-side comparison of 2 to 10 structures.
@@ -86,8 +84,6 @@ This server provides six powerful tools for accessing and analyzing protein stru
 ### `protein_find_similar`
 
 **Discover structurally or sequentially related proteins** based on a query.
-
-> **Status**: ✅ **Success**. _Note: During testing, the sequence identity percentage reported for matches was consistently low (e.g., 1.0%), which may indicate an issue with how this value is calculated or displayed._
 
 **Key Features:**
 
@@ -126,8 +122,6 @@ This server provides six powerful tools for accessing and analyzing protein stru
 ### `protein_analyze_collection`
 
 **Perform statistical analysis** on the entire Protein Data Bank to uncover trends and distributions.
-
-> **Status**: ❌ **Failure**. This tool is currently non-functional and returned a "400" error during testing.
 
 **Key Features:**
 
