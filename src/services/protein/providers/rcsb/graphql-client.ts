@@ -39,8 +39,10 @@ export async function enrichSearchResults(
         rcsb_accession_info {
           initial_release_date
         }
-        rcsb_entity_source_organism {
-          ncbi_scientific_name
+        polymer_entities {
+          rcsb_entity_source_organism {
+            ncbi_scientific_name
+          }
         }
       }
     }
@@ -70,22 +72,30 @@ export async function enrichSearchResults(
     }
 
     return (
-      data.data?.entries?.map((entry) => ({
-        pdbId: entry.rcsb_id,
-        title: entry.struct?.title ?? 'Unknown',
-        organism:
-          entry.rcsb_entity_source_organism?.map(
-            (o) => o.ncbi_scientific_name,
-          ) ?? [],
-        experimentalMethod: entry.exptl?.[0]?.method ?? 'Unknown',
-        resolution:
-          entry.rcsb_entry_info?.resolution_combined &&
-          entry.rcsb_entry_info.resolution_combined.length > 0
-            ? entry.rcsb_entry_info.resolution_combined[0]
-            : undefined,
-        releaseDate: entry.rcsb_accession_info?.initial_release_date ?? '',
-        molecularWeight: entry.rcsb_entry_info?.molecular_weight,
-      })) ?? []
+      data.data?.entries?.map((entry) => {
+        // Correctly extract organism names from the nested structure
+        const organismNames =
+          entry.polymer_entities?.flatMap(
+            (pe) =>
+              pe.rcsb_entity_source_organism?.map(
+                (org) => org.ncbi_scientific_name,
+              ) ?? [],
+          ) ?? [];
+        const uniqueOrganismNames = [...new Set(organismNames)];
+
+        return {
+          pdbId: entry.rcsb_id,
+          title: entry.struct?.title ?? 'Unknown',
+          organism: uniqueOrganismNames,
+          experimentalMethod: entry.exptl?.[0]?.method ?? 'Unknown',
+          resolution:
+            entry.rcsb_entry_info?.resolution_combined?.find(
+              (r) => r !== null,
+            ) ?? undefined,
+          releaseDate: entry.rcsb_accession_info?.initial_release_date ?? '',
+          molecularWeight: entry.rcsb_entry_info?.molecular_weight,
+        };
+      }) ?? []
     );
   } catch (error) {
     logger.error('Failed to enrich search results', { ...context, error });
@@ -196,8 +206,8 @@ export async function fetchStructureMetadata(
         entry.rcsb_entry_info.resolution_combined.length > 0
           ? entry.rcsb_entry_info.resolution_combined[0]
           : undefined,
-      rFree: entry.refine?.[0]?.ls_R_factor_R_free,
-      rFactor: entry.refine?.[0]?.ls_R_factor_R_work,
+      rFree: entry.refine?.[0]?.ls_R_factor_R_free ?? undefined,
+      rFactor: entry.refine?.[0]?.ls_R_factor_R_work ?? undefined,
       spaceGroup: entry.symmetry?.space_group_name_H_M,
       unitCell: entry.cell
         ? {
@@ -219,7 +229,9 @@ export async function fetchStructureMetadata(
               authors: entry.rcsb_primary_citation.rcsb_authors ?? [],
               journal: entry.rcsb_primary_citation.journal_abbrev,
               doi: entry.rcsb_primary_citation.pdbx_database_id_DOI,
-              pubmedId: entry.rcsb_primary_citation.pdbx_database_id_PubMed,
+              pubmedId: String(
+                entry.rcsb_primary_citation.pdbx_database_id_PubMed,
+              ),
               year: entry.rcsb_primary_citation.year,
             },
           ]
@@ -264,4 +276,90 @@ export async function getSequenceForPdbId(
     data.data?.entry?.polymer_entities?.[0]?.entity_poly
       ?.pdbx_seq_one_letter_code ?? ''
   );
+}
+
+/**
+ * Get binding site information for a ligand in a structure
+ */
+export async function getBindingSiteInfo(
+  pdbId: string,
+  ligandId: string,
+  context: RequestContext,
+): Promise<
+  Array<{
+    chain: string;
+    residues: Array<{ name: string; number: number; interactions: string[] }>;
+  }>
+> {
+  const query = `
+    query($id: String!) {
+      entry(entry_id: $id) {
+        polymer_entity_instances {
+          rcsb_polymer_entity_instance_container_identifiers {
+            asym_id
+          }
+          rcsb_ligand_neighbors {
+            ligand_comp_id
+            ligand_asym_id
+            target_asym_id
+            distance
+          }
+        }
+      }
+    }
+  `;
+
+  const response = await fetchWithTimeout(RCSB_GRAPHQL_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      query,
+      variables: { id: pdbId },
+    }),
+    timeout: REQUEST_TIMEOUT,
+  });
+
+  if (!response.ok) {
+    logger.warning('Failed to fetch binding site info', {
+      ...context,
+      pdbId,
+      ligandId,
+      status: response.status,
+    });
+    return [];
+  }
+
+  const data = (await response.json()) as RcsbGraphQLResponse;
+  const instances = data.data?.entry?.polymer_entity_instances || [];
+
+  // Group interactions by chain
+  const bindingSites = new Map<string, Set<string>>();
+
+  for (const instance of instances) {
+    const chainId =
+      instance.rcsb_polymer_entity_instance_container_identifiers?.asym_id?.[0];
+    if (!chainId) continue;
+
+    const neighbors = instance.rcsb_ligand_neighbors || [];
+    for (const neighbor of neighbors) {
+      if (neighbor.ligand_comp_id === ligandId.toUpperCase()) {
+        const targetChain = neighbor.target_asym_id;
+        if (targetChain) {
+          if (!bindingSites.has(targetChain)) {
+            bindingSites.set(targetChain, new Set());
+          }
+          // Store interaction info (simplified - would parse residue details in production)
+          bindingSites.get(targetChain)?.add(`${neighbor.distance}Å`);
+        }
+      }
+    }
+  }
+
+  // Convert to array format
+  return Array.from(bindingSites.entries()).map(([chain, _interactions]) => ({
+    chain,
+    residues: [], // Would need additional query for residue-level details
+  }));
 }

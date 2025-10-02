@@ -2,7 +2,7 @@
  * @fileoverview Resource definition for accessing protein search results via URI.
  * @module src/mcp-server/resources/definitions/protein-search.resource
  */
-import { inject, injectable } from 'tsyringe';
+import { container } from 'tsyringe';
 import { z } from 'zod';
 
 import { ProteinService } from '@/container/tokens.js';
@@ -47,11 +47,8 @@ const OutputSchema = z
 type SearchParams = z.infer<typeof ParamsSchema>;
 type SearchOutput = z.infer<typeof OutputSchema>;
 
-@injectable()
 class ProteinSearchResourceLogic {
-  constructor(
-    @inject(ProteinService) private proteinService: ProteinServiceClass,
-  ) {}
+  constructor(private proteinService: ProteinServiceClass) {}
 
   async execute(
     uri: URL,
@@ -134,11 +131,9 @@ export const proteinSearchResource: ResourceDefinition<
   logic: withResourceAuth(
     ['resource:protein:read'],
     async (uri, params, context) => {
-      const logic = new ProteinSearchResourceLogic(
-        (
-          globalThis as { container?: { resolve: (token: symbol) => unknown } }
-        ).container?.resolve(ProteinService) as ProteinServiceClass,
-      );
+      const proteinService =
+        container.resolve<ProteinServiceClass>(ProteinService);
+      const logic = new ProteinSearchResourceLogic(proteinService);
       return logic.execute(uri, params, context);
     },
   ),

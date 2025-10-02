@@ -1,7 +1,7 @@
 {
   "name": "protein-mcp-server",
-  "version": "1.0.1",
-  "mcpName": "protein-mcp-server",
+  "version": "1.0.2",
+  "mcpName": "io.github.cyanheads/protein-mcp-server",
   "description": "A powerful Model Context Protocol server providing programmatic access to 3D protein structural data from RCSB PDB, PDBe, and UniProt. Features multi-provider orchestration, comprehensive structural analysis tools, and full observability.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -22,12 +22,12 @@
   "sideEffects": false,
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/casey/protein-mcp-server.git"
+    "url": "git+https://github.com/cyanheads/protein-mcp-server.git"
   },
   "bugs": {
-    "url": "https://github.com/casey/protein-mcp-server/issues"
+    "url": "https://github.com/cyanheads/protein-mcp-server/issues"
   },
-  "homepage": "https://github.com/casey/protein-mcp-server#readme",
+  "homepage": "https://github.com/cyanheads/protein-mcp-server#readme",
   "scripts": {
     "build": "bun build ./src/index.ts --outdir ./dist --target node",
     "build:worker": "bun build ./src/worker.ts --outdir ./dist --target bun --no-external",
@@ -69,7 +69,7 @@
   "dependencies": {
     "@hono/mcp": "^0.1.4",
     "@hono/node-server": "^1.19.5",
-    "@modelcontextprotocol/sdk": "^1.18.2",
+    "@modelcontextprotocol/sdk": "^1.19.1",
     "@supabase/supabase-js": "^2.58.0",
     "axios": "^1.12.2",
     "chrono-node": "^2.9.0",
@@ -80,14 +80,14 @@
     "jose": "^6.1.0",
     "js-yaml": "^4.1.0",
     "node-cron": "^4.2.1",
-    "openai": "^6.0.1",
+    "openai": "^6.1.0",
     "papaparse": "^5.5.3",
     "partial-json": "^0.1.7",
     "pdf-lib": "^1.17.1",
     "pino": "^9.13.0",
     "pino-pretty": "^13.1.1",
     "reflect-metadata": "^0.2.2",
-    "repomix": "^1.6.0",
+    "repomix": "^1.6.1",
     "sanitize-html": "^2.17.0",
     "tslib": "^2.8.1",
     "tsyringe": "^4.10.0",

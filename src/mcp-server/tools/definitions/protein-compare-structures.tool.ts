@@ -69,35 +69,54 @@ const InputSchema = z
 
 const OutputSchema = z
   .object({
-    alignment: z.object({
-      method: z.string().describe('Alignment method used.'),
-      rmsd: z.number().describe('Root Mean Square Deviation in Angstroms.'),
-      alignedResidues: z.number().describe('Number of aligned residues.'),
-      sequenceIdentity: z.number().describe('Sequence identity percentage.'),
-      tmscore: z.number().optional().describe('TM-score (0-1, optional).'),
-    }),
-    pairwiseComparisons: z.array(
-      z.object({
-        pdbId1: z.string(),
-        pdbId2: z.string(),
-        rmsd: z.number(),
-        alignedLength: z.number(),
-      }),
-    ),
+    alignment: z
+      .object({
+        method: z.string().describe('Alignment method used.'),
+        rmsd: z.number().describe('Root Mean Square Deviation in Angstroms.'),
+        alignedResidues: z.number().describe('Number of aligned residues.'),
+        sequenceIdentity: z.number().describe('Sequence identity percentage.'),
+        tmscore: z.number().optional().describe('TM-score (0-1, optional).'),
+      })
+      .describe('Overall alignment statistics.'),
+    pairwiseComparisons: z
+      .array(
+        z.object({
+          pdbId1: z.string().describe('First PDB ID in comparison.'),
+          pdbId2: z.string().describe('Second PDB ID in comparison.'),
+          rmsd: z
+            .number()
+            .describe('RMSD between the two structures in Angstroms.'),
+          alignedLength: z
+            .number()
+            .describe('Number of aligned residues in the pair.'),
+        }),
+      )
+      .describe('Pairwise comparison results for all structure pairs.'),
     conformationalAnalysis: z
       .object({
-        flexibleRegions: z.array(
-          z.object({
-            residueRange: z.tuple([z.number(), z.number()]),
-            rmsd: z.number(),
-          }),
-        ),
-        rigidCore: z.object({
-          residueCount: z.number(),
-          rmsd: z.number(),
-        }),
+        flexibleRegions: z
+          .array(
+            z.object({
+              residueRange: z
+                .tuple([z.number(), z.number()])
+                .describe('Start and end residue numbers of flexible region.'),
+              rmsd: z
+                .number()
+                .describe('RMSD value for this flexible region in Angstroms.'),
+            }),
+          )
+          .describe('Regions with high structural variability.'),
+        rigidCore: z
+          .object({
+            residueCount: z
+              .number()
+              .describe('Number of residues in the rigid core.'),
+            rmsd: z.number().describe('RMSD of the rigid core in Angstroms.'),
+          })
+          .describe('Structurally conserved core region.'),
       })
-      .optional(),
+      .optional()
+      .describe('Analysis of flexible and rigid structural regions.'),
     visualization: z.string().optional().describe('Visualization script.'),
   })
   .describe('Structure comparison results.');

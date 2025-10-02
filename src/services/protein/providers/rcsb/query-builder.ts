@@ -18,13 +18,38 @@ export function buildSearchQuery(
   // Text search
   if (params.query) {
     queries.push({
-      type: 'terminal',
-      service: 'text',
-      parameters: {
-        attribute: 'struct.title',
-        operator: 'contains_phrase',
-        value: params.query,
-      },
+      type: 'group',
+      logical_operator: 'or',
+      nodes: [
+        {
+          type: 'terminal',
+          service: 'text',
+          parameters: {
+            operator: 'exact_match',
+            value: params.query,
+            attribute: 'rcsb_entry_container_identifiers.entry_id',
+          },
+        },
+        {
+          type: 'terminal',
+          service: 'text',
+          parameters: {
+            operator: 'contains_phrase',
+            value: params.query,
+            attribute: 'struct.title',
+          },
+        },
+        {
+          type: 'terminal',
+          service: 'text',
+          parameters: {
+            operator: 'contains_phrase',
+            value: params.query,
+            attribute:
+              'rcsb_polymer_entity.rcsb_macromolecular_names_combined.name',
+          },
+        },
+      ],
     });
   }
 
@@ -93,7 +118,7 @@ export function buildSearchQuery(
 export function getAnalysisFacet(analysisType: AnalysisType): string {
   switch (analysisType) {
     case AnalysisType.FOLD:
-      return 'rcsb_struct_symmetry.kind';
+      return 'rcsb_polymer_entity_container_identifiers.entry_id';
     case AnalysisType.FUNCTION:
       return 'rcsb_polymer_entity_annotation.type';
     case AnalysisType.ORGANISM:

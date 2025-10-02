@@ -43,7 +43,7 @@ const InputSchema = z
       .nativeEnum(StructureFormat)
       .default(StructureFormat.MMCIF)
       .describe(
-        'Structure file format: mmcif (modern), pdb (legacy), pdbml (XML), or json (metadata only).',
+        'Structure file format: mmcif (modern, recommended), bcif (binary, efficient), pdb (legacy), pdbml (XML), or json (metadata only).',
       ),
     includeCoordinates: z
       .boolean()
@@ -72,8 +72,10 @@ const OutputSchema = z
       .object({
         format: z.nativeEnum(StructureFormat).describe('Data format.'),
         data: z
-          .union([z.string(), z.record(z.unknown())])
-          .describe('Structure data (raw file or parsed JSON).'),
+          .union([z.string(), z.record(z.unknown()), z.instanceof(ArrayBuffer)])
+          .describe(
+            'Structure data (raw file, parsed JSON, or binary ArrayBuffer for BCIF).',
+          ),
         chains: z
           .array(
             z.object({

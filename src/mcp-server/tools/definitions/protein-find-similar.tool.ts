@@ -36,8 +36,15 @@ const InputSchema = z
   .object({
     query: z
       .object({
-        type: z.enum(['pdbId', 'sequence', 'structure']),
-        value: z.string().min(1),
+        type: z
+          .enum(['pdbId', 'sequence', 'structure'])
+          .describe(
+            'Query type: pdbId (4-char PDB code), sequence (FASTA), or structure (PDB/mmCIF data).',
+          ),
+        value: z
+          .string()
+          .min(1)
+          .describe('Query value corresponding to the specified type.'),
       })
       .describe('Query: PDB ID, FASTA sequence, or structure data.'),
     similarityType: z
@@ -45,10 +52,28 @@ const InputSchema = z
       .describe('Type of similarity search: sequence or structure.'),
     threshold: z
       .object({
-        sequenceIdentity: z.number().min(0).max(100).optional(),
-        eValue: z.number().positive().optional(),
-        tmscore: z.number().min(0).max(1).optional(),
-        rmsd: z.number().positive().optional(),
+        sequenceIdentity: z
+          .number()
+          .min(0)
+          .max(100)
+          .optional()
+          .describe('Minimum sequence identity percentage (0-100).'),
+        eValue: z
+          .number()
+          .positive()
+          .optional()
+          .describe('Maximum E-value for sequence similarity.'),
+        tmscore: z
+          .number()
+          .min(0)
+          .max(1)
+          .optional()
+          .describe('Minimum TM-score for structural similarity (0-1).'),
+        rmsd: z
+          .number()
+          .positive()
+          .optional()
+          .describe('Maximum RMSD for structural similarity in Angstroms.'),
       })
       .optional()
       .describe('Similarity thresholds for filtering results.'),
@@ -62,29 +87,54 @@ const InputSchema = z
   })
   .describe('Parameters for similarity search.');
 
-const OutputSchema = z.object({
-  query: z.object({
-    type: z.string(),
-    identifier: z.string(),
-  }),
-  similarityType: z.string(),
-  results: z.array(
-    z.object({
-      pdbId: z.string(),
-      title: z.string(),
-      organism: z.array(z.string()),
-      similarity: z.object({
-        sequenceIdentity: z.number().optional(),
-        eValue: z.number().optional(),
-        tmscore: z.number().optional(),
-        rmsd: z.number().optional(),
-      }),
-      alignmentLength: z.number().optional(),
-      coverage: z.number().optional(),
-    }),
-  ),
-  totalCount: z.number(),
-});
+const OutputSchema = z
+  .object({
+    query: z
+      .object({
+        type: z.string().describe('Query type that was used.'),
+        identifier: z.string().describe('Query identifier or value used.'),
+      })
+      .describe('Information about the search query.'),
+    similarityType: z.string().describe('Type of similarity search performed.'),
+    results: z
+      .array(
+        z.object({
+          pdbId: z.string().describe('4-character PDB identifier.'),
+          title: z.string().describe('Structure title/description.'),
+          organism: z
+            .array(z.string())
+            .describe('Source organism(s) scientific names.'),
+          similarity: z
+            .object({
+              sequenceIdentity: z
+                .number()
+                .optional()
+                .describe('Sequence identity percentage.'),
+              eValue: z.number().optional().describe('E-value for the match.'),
+              tmscore: z
+                .number()
+                .optional()
+                .describe('TM-score (0-1) for structural similarity.'),
+              rmsd: z
+                .number()
+                .optional()
+                .describe('RMSD in Angstroms for structural alignment.'),
+            })
+            .describe('Similarity metrics for this match.'),
+          alignmentLength: z
+            .number()
+            .optional()
+            .describe('Length of the alignment in residues.'),
+          coverage: z
+            .number()
+            .optional()
+            .describe('Percentage of query covered by alignment (0-100).'),
+        }),
+      )
+      .describe('Array of similar structures found.'),
+    totalCount: z.number().describe('Total number of results found.'),
+  })
+  .describe('Similarity search results.');
 
 type SimilarInput = z.infer<typeof InputSchema>;
 type SimilarOutput = z.infer<typeof OutputSchema>;

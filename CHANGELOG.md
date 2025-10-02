@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.2] - 2025-10-02
+
+### Feature
+- **Structural Alignment Service**: Implemented a new `alignment-service.ts` that integrates with the RCSB Alignment API (`https://alignment.rcsb.org`). This service submits pairwise alignment jobs, polls for completion, and processes the results.
+- **Ligand and Binding Site Analysis**: Significantly enhanced the `trackLigands` tool. It now supports chemical similarity searches via SMILES and InChI strings, name-based searching, and includes a `getBindingSiteInfo` function to retrieve binding site residues and interactions from the RCSB GraphQL API.
+- **BinaryCIF Support**: Added support for the `bcif` (BinaryCIF) format in `protein_get_structure` and the `protein://structure/{pdbId}` resource. This provides a more efficient, compressed binary alternative to mmCIF.
+
+### Fixed
+- **Structure Comparison (`protein_compare_structures`)**: Replaced the previous mock implementation with a fully functional one that uses the new `alignment-service.ts`. The tool now performs live structural alignments using the RCSB Alignment API.
+- **Collection Analysis (`protein_analyze_collection`)**: Corrected the query logic in `query-builder.ts` and added robust error logging in `search-client.ts` to address the "Collection analysis failed: 400" error. The tool now correctly constructs and sends facet queries.
+- **Data Parsing & Enrichment**:
+  - Implemented a robust `parseChainsFromCif` function in `enrichment-service.ts` to correctly parse chain ID, type, and sequence from complex mmCIF files, including those with multi-line sequences.
+  - Fixed organism name extraction in `graphql-client.ts` by correctly traversing the nested `polymer_entities` structure.
+  - Corrected `rFree`, `rFactor`, and `pubmedId` fields in `fetchStructureMetadata` to handle cases where they are `undefined` or need string conversion.
+- **RCSB Search Queries**: Broadened the text search in `query-builder.ts` to look for matches in entry ID, structure title, and macromolecular name, improving search accuracy.
+
+### Changed
+- **Dependencies**: Updated `@modelcontextprotocol/sdk`, `openai`, `repomix`, and other development dependencies in `bun.lock`.
+- **Project Identity**: Updated `mcpName` in `package.json` and `server.json` to `io.github.cyanheads/protein-mcp-server` for better namespacing.
+- **Schema Descriptions**: Added detailed `.describe()` calls to all Zod input and output schemas across all protein tools, improving discoverability and clarity for LLM agents.
+- **Known Issues Documentation**: Documented the solved `protein_compare_structures` and `protein_analyze_collection` issues in `AGENTS.md` for historical reference.
+
 ## [1.0.1] - 2025-10-02
 
 ### Refactor

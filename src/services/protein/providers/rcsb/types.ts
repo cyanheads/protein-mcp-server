@@ -99,8 +99,19 @@ export interface RcsbGraphQLEntry {
     rcsb_polymer_entity_container_identifiers?: {
       auth_asym_ids: string[];
     };
+    rcsb_entity_source_organism?: Array<{
+      ncbi_scientific_name: string;
+    }>;
   }>;
-  rcsb_entity_source_organism?: Array<{
-    ncbi_scientific_name: string;
+  polymer_entity_instances?: Array<{
+    rcsb_polymer_entity_instance_container_identifiers?: {
+      asym_id: string[];
+    };
+    rcsb_ligand_neighbors?: Array<{
+      ligand_comp_id: string;
+      ligand_asym_id: string;
+      target_asym_id: string;
+      distance: number;
+    }>;
   }>;
 }

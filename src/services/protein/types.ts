@@ -41,6 +41,7 @@ export enum StructureFormat {
   MMCIF = 'mmcif',
   PDBML = 'pdbml',
   JSON = 'json',
+  BCIF = 'bcif', // BinaryCIF - efficient binary encoding (recommended for compression)
 }
 
 /**
@@ -138,7 +139,7 @@ export interface Chain {
  */
 export interface StructureData {
   format: StructureFormat;
-  data: string | Record<string, unknown>;
+  data: string | Record<string, unknown> | ArrayBuffer;
   chains: Chain[];
 }
 
@@ -221,7 +222,7 @@ export interface AlignmentResult {
   rmsd: number;
   alignedResidues: number;
   sequenceIdentity: number;
-  tmscore?: number;
+  tmscore?: number | undefined;
 }
 
 /**
@@ -299,6 +300,7 @@ export interface SimilarityMetrics {
   eValue?: number;
   tmscore?: number;
   rmsd?: number;
+  shapeSimilarity?: number; // BioZernike 3D shape similarity score (RCSB structure search)
 }
 
 /**
@@ -319,6 +321,7 @@ export interface SimilarityResultEntry {
 export interface FindSimilarParams {
   query: SimilarityQuery;
   similarityType: SimilarityType;
+  chainId?: string | undefined; // Chain identifier for structure similarity (default: 'A')
   threshold?: SimilarityThreshold | undefined;
   limit?: number | undefined;
 }
@@ -340,8 +343,14 @@ export interface FindSimilarResult {
  * Ligand query types
  */
 export interface LigandQuery {
-  type: 'name' | 'chemicalId' | 'smiles';
+  type: 'name' | 'chemicalId' | 'smiles' | 'inchi';
   value: string;
+  matchType?:
+    | 'strict'
+    | 'relaxed'
+    | 'relaxed-stereo'
+    | 'fingerprint'
+    | undefined; // For SMILES/InChI
 }
 
 /**

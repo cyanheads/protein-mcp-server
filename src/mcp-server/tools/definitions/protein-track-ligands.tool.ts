@@ -35,16 +35,46 @@ const InputSchema = z
   .object({
     ligandQuery: z
       .object({
-        type: z.enum(['name', 'chemicalId', 'smiles']),
-        value: z.string().min(1),
+        type: z
+          .enum(['name', 'chemicalId', 'smiles', 'inchi'])
+          .describe(
+            'Ligand query type: name (common/IUPAC), chemicalId (PDB CCD ID), smiles (SMILES string), or inchi (InChI string).',
+          ),
+        value: z
+          .string()
+          .min(1)
+          .describe('Ligand identifier value corresponding to the type.'),
+        matchType: z
+          .enum(['strict', 'relaxed', 'relaxed-stereo', 'fingerprint'])
+          .optional()
+          .describe(
+            'Match type for SMILES/InChI: strict (exact match), relaxed (relaxed graph matching), relaxed-stereo (with stereoisomers), fingerprint (Tanimoto similarity). Default: relaxed.',
+          ),
       })
-      .describe('Ligand query: name (e.g., "ATP"), chemical ID, or SMILES.'),
+      .describe(
+        'Ligand query: name (e.g., "ATP"), chemical ID, SMILES, or InChI.',
+      ),
     filters: z
       .object({
-        proteinName: z.string().optional(),
-        organism: z.string().optional(),
-        experimentalMethod: z.string().optional(),
-        maxResolution: z.number().positive().optional(),
+        proteinName: z
+          .string()
+          .optional()
+          .describe('Filter by protein name or keyword.'),
+        organism: z
+          .string()
+          .optional()
+          .describe('Filter by source organism scientific name.'),
+        experimentalMethod: z
+          .string()
+          .optional()
+          .describe(
+            'Filter by experimental method (e.g., "X-RAY DIFFRACTION").',
+          ),
+        maxResolution: z
+          .number()
+          .positive()
+          .optional()
+          .describe('Maximum resolution in Angstroms.'),
       })
       .optional()
       .describe('Additional filters for protein selection.'),
@@ -58,42 +88,73 @@ const InputSchema = z
       .min(1)
       .max(100)
       .default(25)
-      .describe('Max results.'),
+      .describe('Maximum number of results to return (1-100).'),
   })
   .describe('Parameters for ligand tracking.');
 
-const OutputSchema = z.object({
-  ligand: z.object({
-    name: z.string(),
-    chemicalId: z.string(),
-    formula: z.string().optional(),
-    molecularWeight: z.number().optional(),
-  }),
-  structures: z.array(
-    z.object({
-      pdbId: z.string(),
-      title: z.string(),
-      organism: z.array(z.string()),
-      resolution: z.number().optional(),
-      ligandCount: z.number(),
-      bindingSites: z
-        .array(
-          z.object({
-            chain: z.string(),
-            residues: z.array(
+const OutputSchema = z
+  .object({
+    ligand: z
+      .object({
+        name: z.string().describe('Common or IUPAC name of the ligand.'),
+        chemicalId: z
+          .string()
+          .describe('PDB Chemical Component Dictionary ID.'),
+        formula: z.string().optional().describe('Molecular formula.'),
+        molecularWeight: z
+          .number()
+          .optional()
+          .describe('Molecular weight in Daltons.'),
+      })
+      .describe('Ligand identification and properties.'),
+    structures: z
+      .array(
+        z.object({
+          pdbId: z.string().describe('4-character PDB identifier.'),
+          title: z.string().describe('Structure title/description.'),
+          organism: z
+            .array(z.string())
+            .describe('Source organism(s) scientific names.'),
+          resolution: z
+            .number()
+            .optional()
+            .describe('Resolution in Angstroms (if applicable).'),
+          ligandCount: z
+            .number()
+            .describe('Number of ligand instances in this structure.'),
+          bindingSites: z
+            .array(
               z.object({
-                name: z.string(),
-                number: z.number(),
-                interactions: z.array(z.string()),
+                chain: z
+                  .string()
+                  .describe('Chain identifier containing the binding site.'),
+                residues: z
+                  .array(
+                    z.object({
+                      name: z
+                        .string()
+                        .describe('Three-letter residue name (e.g., "LEU").'),
+                      number: z.number().describe('Residue sequence number.'),
+                      interactions: z
+                        .array(z.string())
+                        .describe(
+                          'Types of interactions (e.g., "hydrogen-bond", "hydrophobic").',
+                        ),
+                    }),
+                  )
+                  .describe('Residues involved in binding.'),
               }),
-            ),
-          }),
-        )
-        .optional(),
-    }),
-  ),
-  totalCount: z.number(),
-});
+            )
+            .optional()
+            .describe('Binding site details (if requested).'),
+        }),
+      )
+      .describe('Protein structures containing the ligand.'),
+    totalCount: z
+      .number()
+      .describe('Total number of structures containing the ligand.'),
+  })
+  .describe('Ligand tracking results.');
 
 type LigandInput = z.infer<typeof InputSchema>;
 type LigandOutput = z.infer<typeof OutputSchema>;

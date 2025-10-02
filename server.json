@@ -1,18 +1,18 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
-  "name": "io.github.cyanheads/mcp-ts-template",
-  "description": "A production-grade TypeScript template for scalable MCP servers with built-in observability.",
+  "name": "io.github.cyanheads/protein-mcp-server",
+  "description": "MCP Server providing access to 3D protein structural data from RCSB PDB, PDBe, and UniProt. Features multi-provider orchestration, comprehensive structural analysis tools, and full observability.",
   "repository": {
-    "url": "https://github.com/cyanheads/mcp-ts-template",
+    "url": "https://github.com/cyanheads/protein-mcp-server",
     "source": "github"
   },
-  "version": "2.3.3",
+  "version": "1.0.2",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
-      "identifier": "mcp-ts-template",
-      "version": "2.3.3",
+      "identifier": "protein-mcp-server",
+      "version": "1.0.2",
       "runtimeHint": "bun",
       "packageArguments": [
         {
@@ -40,8 +40,8 @@
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
-      "identifier": "mcp-ts-template",
-      "version": "2.3.3",
+      "identifier": "protein-mcp-server",
+      "version": "1.0.2",
       "runtimeHint": "bun",
       "packageArguments": [
         {
@@ -96,5 +96,5 @@
       }
     }
   ],
-  "mcpName": "io.github.cyanheads/mcp-ts-template"
+  "mcpName": "io.github.cyanheads/protein-mcp-server"
 }

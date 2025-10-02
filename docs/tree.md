@@ -1,6 +1,6 @@
 # protein-mcp-server - Directory Structure
 
-Generated on: 2025-10-02 12:12:36
+Generated on: 2025-10-02 21:42:09
 
 ```
 protein-mcp-server
@@ -116,6 +116,7 @@ protein-mcp-server
 │   │   │   │   │   ├── search-client.ts
 │   │   │   │   │   └── types.ts
 │   │   │   │   ├── rcsb
+│   │   │   │   │   ├── alignment-service.ts
 │   │   │   │   │   ├── config.ts
 │   │   │   │   │   ├── enrichment-service.ts
 │   │   │   │   │   ├── graphql-client.ts

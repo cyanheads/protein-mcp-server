@@ -149,7 +149,7 @@ export async function findStructureSimilar(
     parameters: {
       value: {
         entry_id: params.query.value,
-        asym_id: 'A', // Simplified - would need chain selection
+        asym_id: params.chainId || 'A', // Allow chain selection, default to 'A'
       },
       operator: 'strict_shape_match',
     },
@@ -202,13 +202,14 @@ export async function findStructureSimilar(
       similarityType: 'structure',
       results: enriched.map((e) => {
         const score = scoreMap.get(e.pdbId);
-        // RCSB structure search doesn't return detailed TM-score/RMSD in search results
-        // These require detailed structural alignment which is not available from the search API
+        // RCSB structure search uses BioZernike 3D shape descriptors
+        // The score is a relevance/similarity score, NOT a TM-score from alignment
+        // TM-scores require explicit structural alignment (e.g., via RCSB Alignment API)
         const result: {
           pdbId: string;
           title: string;
           organism: string[];
-          similarity: { tmscore?: number };
+          similarity: { shapeSimilarity?: number };
         } = {
           pdbId: e.pdbId,
           title: e.title,
@@ -216,7 +217,8 @@ export async function findStructureSimilar(
           similarity: {},
         };
         if (score !== undefined) {
-          result.similarity.tmscore = score / 100; // Normalize score
+          // Store raw BioZernike shape similarity score (no normalization)
+          result.similarity.shapeSimilarity = score;
         }
         return result;
       }),
