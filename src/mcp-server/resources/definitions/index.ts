@@ -4,11 +4,16 @@
  * @module src/mcp-server/resources/definitions
  */
 
-import { echoResourceDefinition } from './echo.resource.js';
+import { proteinSearchResource } from './protein-search.resource.js';
+import { proteinStructureResource } from './protein-structure.resource.js';
 
 /**
  * An array containing all resource definitions for easy iteration.
  * This is used by the registration system to automatically discover and register
  * all available resources.
  */
-export const allResourceDefinitions = [echoResourceDefinition];
+export const allResourceDefinitions = [
+  // Protein resources
+  proteinStructureResource,
+  proteinSearchResource,
+];

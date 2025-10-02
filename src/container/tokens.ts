@@ -18,3 +18,7 @@ export const RateLimiterService = Symbol('RateLimiterService');
 export const TransportManagerToken = Symbol('TransportManager');
 export const SupabaseAdminClient = Symbol('SupabaseAdminClient');
 export const SpeechService = Symbol('SpeechService');
+export const ProteinService = Symbol('ProteinService');
+export const ProteinProviderPrimary = Symbol('ProteinProviderPrimary');
+export const ProteinProviderFallback = Symbol('ProteinProviderFallback');
+export const UniProtProvider = Symbol('UniProtProvider');

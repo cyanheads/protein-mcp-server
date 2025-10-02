@@ -1,7 +1,7 @@
 # Agent Protocol & Architectural Mandate
 
-**Version:** 2.3.2
-**Target Project:** mcp-ts-template
+**Version:** 1.0.0
+**Target Project:** protein-mcp-server
 **Last Updated:** 2025-10-02
 
 This document defines the operational rules for contributing to this codebase. Follow it exactly.
@@ -46,7 +46,7 @@ This document defines the operational rules for contributing to this codebase. F
 6.  **Use Elicitation for Missing Input**
     - If a tool requires a parameter that was not provided, use the `elicitInput` function from the `sdkContext`.
     - This allows the tool to interactively request the necessary information from the user instead of failing.
-    - See `template_madlibs_elicitation.tool.ts` for a canonical example.
+    - Elicitation is supported, but no current tools in this project use it.
 
 ---
 
@@ -93,7 +93,7 @@ This is the only approved workflow for authoring or modifying tools.
 
 - Place new tools in `src/mcp-server/tools/definitions/`.
 - Name files `[tool-name].tool.ts`.
-- Use `src/mcp-server/tools/definitions/template-echo-message.tool.ts` as the reference template.
+- Use `src/mcp-server/tools/definitions/protein-search-structures.tool.ts` as the reference template.
 
 #### Step 2 — Define the ToolDefinition
 
@@ -424,7 +424,7 @@ export const echoTool: ToolDefinition<typeof InputSchema, typeof OutputSchema> =
 
 ## V. Resource Development Workflow
 
-Resources mirror the tool pattern with a declarative `ResourceDefinition`. Use `src/mcp-server/resources/definitions/echo.resource.ts` as the reference template.
+Resources mirror the tool pattern with a declarative `ResourceDefinition`. Use `src/mcp-server/resources/definitions/protein-structure.resource.ts` as the reference template.
 
 #### Step 1 — File Location
 
@@ -548,8 +548,9 @@ export class SpeechService {
 
 #### Existing Service Examples
 
-- **`llm/`**: Single-provider pattern with direct DI injection
-- **`speech/`**: Multi-provider orchestration with service class
+- **`protein/`**: Multi-provider orchestration with a service class for failover and caching.
+- **`llm/`**: Single-provider pattern with direct DI injection.
+- **`speech/`**: Multi-provider orchestration with service class.
 
 ---
 

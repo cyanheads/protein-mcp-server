@@ -5,19 +5,22 @@
  * @module src/mcp-server/tools/definitions
  */
 
-import { catFactTool } from './template-cat-fact.tool.js';
-import { codeReviewSamplingTool } from './template-code-review-sampling.tool.js';
-import { echoTool } from './template-echo-message.tool.js';
-import { imageTestTool } from './template-image-test.tool.js';
-import { madlibsElicitationTool } from './template-madlibs-elicitation.tool.js';
+import { proteinAnalyzeCollectionTool } from './protein-analyze-collection.tool.js';
+import { proteinCompareStructuresTool } from './protein-compare-structures.tool.js';
+import { proteinFindSimilarTool } from './protein-find-similar.tool.js';
+import { proteinGetStructureTool } from './protein-get-structure.tool.js';
+import { proteinSearchStructuresTool } from './protein-search-structures.tool.js';
+import { proteinTrackLigandsTool } from './protein-track-ligands.tool.js';
 
 /**
  * An array containing all tool definitions for easy iteration.
  */
 export const allToolDefinitions = [
-  catFactTool,
-  codeReviewSamplingTool,
-  echoTool,
-  imageTestTool,
-  madlibsElicitationTool,
+  // Protein structure tools
+  proteinSearchStructuresTool,
+  proteinGetStructureTool,
+  proteinCompareStructuresTool,
+  proteinFindSimilarTool,
+  proteinTrackLigandsTool,
+  proteinAnalyzeCollectionTool,
 ];

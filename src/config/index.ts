@@ -216,6 +216,48 @@ const ConfigSchema = z.object({
         .optional(),
     })
     .optional(),
+  protein: z.object({
+    primaryProvider: z
+      .enum(['rcsb', 'pdbe'])
+      .default('rcsb')
+      .describe('Primary protein data provider'),
+    fallbackProvider: z
+      .enum(['rcsb', 'pdbe'])
+      .default('pdbe')
+      .describe('Fallback provider when primary fails'),
+    requestTimeout: z.coerce
+      .number()
+      .default(30000)
+      .describe('API request timeout in milliseconds'),
+    cacheTtl: z.coerce
+      .number()
+      .default(86400)
+      .describe('Structure data cache TTL in seconds (24 hours default)'),
+    searchCacheTtl: z.coerce
+      .number()
+      .default(3600)
+      .describe('Search results cache TTL in seconds (1 hour default)'),
+    maxSearchResults: z.coerce
+      .number()
+      .default(100)
+      .describe('Maximum number of search results to return'),
+    enableRateLimiting: z.coerce
+      .boolean()
+      .default(true)
+      .describe('Enable rate limiting for protein API requests'),
+    rcsbRateLimit: z.coerce
+      .number()
+      .default(10)
+      .describe('RCSB API rate limit (requests per second)'),
+    pdbeRateLimit: z.coerce
+      .number()
+      .default(10)
+      .describe('PDBe API rate limit (requests per second)'),
+    uniprotRateLimit: z.coerce
+      .number()
+      .default(10)
+      .describe('UniProt API rate limit (requests per second)'),
+  }),
 });
 
 // --- Parsing Logic ---
@@ -322,6 +364,18 @@ const parseConfig = () => {
               : undefined,
           }
         : undefined,
+    protein: {
+      primaryProvider: env.PROTEIN_PRIMARY_PROVIDER,
+      fallbackProvider: env.PROTEIN_FALLBACK_PROVIDER,
+      requestTimeout: env.PROTEIN_REQUEST_TIMEOUT,
+      cacheTtl: env.PROTEIN_CACHE_TTL,
+      searchCacheTtl: env.PROTEIN_SEARCH_CACHE_TTL,
+      maxSearchResults: env.PROTEIN_MAX_SEARCH_RESULTS,
+      enableRateLimiting: env.PROTEIN_ENABLE_RATE_LIMITING,
+      rcsbRateLimit: env.PROTEIN_RCSB_RATE_LIMIT,
+      pdbeRateLimit: env.PROTEIN_PDBE_RATE_LIMIT,
+      uniprotRateLimit: env.PROTEIN_UNIPROT_RATE_LIMIT,
+    },
     // The following fields will be derived and are not directly from env
     mcpServerName: env.MCP_SERVER_NAME,
     mcpServerVersion: env.MCP_SERVER_VERSION,

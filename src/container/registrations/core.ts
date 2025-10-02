@@ -13,14 +13,23 @@ import {
   AppConfig,
   LlmProvider,
   Logger,
+  ProteinProviderFallback,
+  ProteinProviderPrimary,
+  ProteinService,
   RateLimiterService,
   SpeechService,
   StorageService,
   StorageProvider,
   SupabaseAdminClient,
+  UniProtProvider as UniProtProviderToken,
 } from '@/container/tokens.js';
 import type { ILlmProvider } from '@/services/llm/core/ILlmProvider.js';
 import { OpenRouterProvider } from '@/services/llm/providers/openrouter.provider.js';
+import type { IProteinProvider } from '@/services/protein/core/IProteinProvider.js';
+import { ProteinService as ProteinServiceClass } from '@/services/protein/core/ProteinService.js';
+import { PdbeProteinProvider } from '@/services/protein/providers/pdbe.provider.js';
+import { RcsbProteinProvider } from '@/services/protein/providers/rcsb.provider.js';
+import { UniProtProvider } from '@/services/protein/providers/uniprot.provider.js';
 import { SpeechService as SpeechServiceClass } from '@/services/speech/index.js';
 import { StorageService as StorageServiceClass } from '@/storage/core/StorageService.js';
 import { createStorageProvider } from '@/storage/core/storageFactory.js';
@@ -135,6 +144,24 @@ export const registerCoreServices = () => {
 
       return new SpeechServiceClass(ttsConfig, sttConfig);
     },
+  });
+
+  // Protein Service Providers
+  container.register<IProteinProvider>(ProteinProviderPrimary, {
+    useClass: RcsbProteinProvider,
+  });
+
+  container.register<IProteinProvider>(ProteinProviderFallback, {
+    useClass: PdbeProteinProvider,
+  });
+
+  container.register<UniProtProvider>(UniProtProviderToken, {
+    useClass: UniProtProvider,
+  });
+
+  // Protein Service (orchestrator with multi-provider support)
+  container.register<ProteinServiceClass>(ProteinService, {
+    useClass: ProteinServiceClass,
   });
 
   logger.info('Core services registered with the DI container.');

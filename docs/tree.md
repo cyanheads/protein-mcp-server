@@ -1,9 +1,9 @@
-# mcp-ts-template - Directory Structure
+# protein-mcp-server - Directory Structure
 
-Generated on: 2025-09-30 22:32:32
+Generated on: 2025-10-02 11:26:14
 
 ```
-mcp-ts-template
+protein-mcp-server
 ├── .clinerules
 │   └── AGENTS.md
 ├── .github
@@ -12,13 +12,14 @@ mcp-ts-template
 │   └── FUNDING.yml
 ├── .husky
 │   └── pre-commit
-├── .storage
 ├── .vscode
 │   └── settings.json
 ├── changelog
 │   └── archive1.md
 ├── docs
+│   ├── idea.md
 │   ├── mcp-elicitation-summary.md
+│   ├── PROJECT_SPEC.md
 │   ├── publishing-mcp-server-registry.md
 │   └── tree.md
 ├── scripts
@@ -48,8 +49,9 @@ mcp-ts-template
 │   │   │   └── prompt-registration.ts
 │   │   ├── resources
 │   │   │   ├── definitions
-│   │   │   │   ├── echo.resource.ts
-│   │   │   │   └── index.ts
+│   │   │   │   ├── index.ts
+│   │   │   │   ├── protein-search.resource.ts
+│   │   │   │   └── protein-structure.resource.ts
 │   │   │   ├── utils
 │   │   │   │   ├── resourceDefinition.ts
 │   │   │   │   └── resourceHandlerFactory.ts
@@ -59,11 +61,12 @@ mcp-ts-template
 │   │   ├── tools
 │   │   │   ├── definitions
 │   │   │   │   ├── index.ts
-│   │   │   │   ├── template-cat-fact.tool.ts
-│   │   │   │   ├── template-code-review-sampling.tool.ts
-│   │   │   │   ├── template-echo-message.tool.ts
-│   │   │   │   ├── template-image-test.tool.ts
-│   │   │   │   └── template-madlibs-elicitation.tool.ts
+│   │   │   │   ├── protein-analyze-collection.tool.ts
+│   │   │   │   ├── protein-compare-structures.tool.ts
+│   │   │   │   ├── protein-find-similar.tool.ts
+│   │   │   │   ├── protein-get-structure.tool.ts
+│   │   │   │   ├── protein-search-structures.tool.ts
+│   │   │   │   └── protein-track-ligands.tool.ts
 │   │   │   ├── utils
 │   │   │   │   ├── toolDefinition.ts
 │   │   │   │   └── toolHandlerFactory.ts
@@ -99,6 +102,16 @@ mcp-ts-template
 │   │   │   │   └── ILlmProvider.ts
 │   │   │   ├── providers
 │   │   │   │   └── openrouter.provider.ts
+│   │   │   ├── index.ts
+│   │   │   └── types.ts
+│   │   ├── protein
+│   │   │   ├── core
+│   │   │   │   ├── IProteinProvider.ts
+│   │   │   │   └── ProteinService.ts
+│   │   │   ├── providers
+│   │   │   │   ├── pdbe.provider.ts
+│   │   │   │   ├── rcsb.provider.ts
+│   │   │   │   └── uniprot.provider.ts
 │   │   │   ├── index.ts
 │   │   │   └── types.ts
 │   │   └── speech
@@ -187,11 +200,6 @@ mcp-ts-template
 │   │   │       └── echo.resource.test.ts
 │   │   ├── tools
 │   │   │   └── definitions
-│   │   │       ├── template-cat-fact.tool.test.ts
-│   │   │       ├── template-code-review-sampling.tool.test.ts
-│   │   │       ├── template-echo-message.tool.test.ts
-│   │   │       ├── template-image-test.tool.test.ts
-│   │   │       └── template-madlibs-elicitation.tool.test.ts
 │   │   └── transports
 │   │       └── auth
 │   │           └── lib
