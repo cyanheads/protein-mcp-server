@@ -1,6 +1,6 @@
 {
   "name": "protein-mcp-server",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "mcpName": "protein-mcp-server",
   "description": "A powerful Model Context Protocol server providing programmatic access to 3D protein structural data from RCSB PDB, PDBe, and UniProt. Features multi-provider orchestration, comprehensive structural analysis tools, and full observability.",
   "main": "dist/index.js",

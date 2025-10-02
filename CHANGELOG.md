@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.0.1] - 2025-10-02
+
+### Refactor
+
+- **Protein Service Modularity**: Restructured the protein service layer (`src/services/protein/`) by breaking down monolithic provider files into a domain-driven directory structure. Each provider (`rcsb`, `pdbe`, `uniprot`) now contains its own modules for clients, configuration, and types, improving separation of concerns and maintainability.
+- **Tool Definition Simplification**: Refactored all protein tool definitions (`src/mcp-server/tools/definitions/`) to remove injectable logic classes. The `ProteinService` is now resolved directly from the `tsyringe` dependency injection container within the tool's logic function, simplifying the code and reducing boilerplate.
+
+### Changed
+
+- **Dependencies & Versioning**: Bumped the package version to `1.0.1` in `package.json`.
+- **DI Registration**: Made `ProteinService` a singleton in `src/container/registrations/core.ts` to ensure a single instance is shared across the application.
+
+### Docs
+
+- **README Update**: Updated `README.md` table formatting and content for clarity.
+- **Directory Tree**: Regenerated `docs/tree.md` to reflect the new modular service architecture.
+
 ## [1.0.0] - 2025-10-02
 
 ### Feature

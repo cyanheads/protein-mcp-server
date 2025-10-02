@@ -15,14 +15,14 @@
 
 This server provides six powerful tools for accessing and analyzing protein structure data:
 
-| Tool Name                        | Description                                                                                                                              |
-| :------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------- |
-| `protein_search_structures`  | Searches for protein structures using keywords, filters, pagination, and sorting. |
-| `protein_get_structure`       | Fetches one or more protein structures by their PDB IDs, returning either full data or concise summaries.               |
-| `protein_compare_structures` | Performs a detailed side-by-side comparison of 2-10 protein structures.      |
-| `protein_find_similar` | Find proteins with similar sequence or structure. |
-| `protein_track_ligands` | Find protein structures containing specific ligands, cofactors, or drugs. |
-| `protein_analyze_collection` | Performs statistical analysis on the protein structure database.                 |
+| Tool Name                    | Description                                                                                               |
+| :--------------------------- | :-------------------------------------------------------------------------------------------------------- |
+| `protein_search_structures`  | Searches for protein structures using keywords, filters, pagination, and sorting.                         |
+| `protein_get_structure`      | Fetches one or more protein structures by their PDB IDs, returning either full data or concise summaries. |
+| `protein_compare_structures` | Performs a detailed side-by-side comparison of 2-10 protein structures.                                   |
+| `protein_find_similar`       | Find proteins with similar sequence or structure.                                                         |
+| `protein_track_ligands`      | Find protein structures containing specific ligands, cofactors, or drugs.                                 |
+| `protein_analyze_collection` | Performs statistical analysis on the protein structure database.                                          |
 
 ### `protein_search_structures`
 
@@ -39,7 +39,7 @@ This server provides six powerful tools for accessing and analyzing protein stru
 
 - "Find all human kinase structures with resolution better than 2.0 Å"
 - "Show me all cryo-EM structures of the SARS-CoV-2 spike protein"
-- "List structures of hemoglobin from *Escherichia coli*"
+- "List structures of hemoglobin from _Escherichia coli_"
 
 ---
 
@@ -120,14 +120,17 @@ This server provides six powerful tools for accessing and analyzing protein stru
 ---
 
 ### `protein_analyze_collection`
+
 **Perform statistical analysis** on the entire Protein Data Bank to uncover trends and distributions.
 
 **Key Features:**
+
 - Aggregate data based on `fold` classification, `function`, `organism`, or experimental `method`.
 - Apply filters to narrow the analysis to specific subsets of the database.
 - Group results by a secondary dimension (e.g., year) to visualize trends over time.
 
 **Example Use Cases:**
+
 - "What are the most common structural folds found in membrane proteins?"
 - "Show a yearly trend of the number of structures determined by cryo-EM"
 - "Which organisms are most represented in the PDB for the years 2020-2023?"
@@ -192,16 +195,15 @@ bun install
 
 All configuration is centralized and validated at startup in `src/config/index.ts`. Key environment variables in your `.env` file include:
 
-| Variable                | Description                                                                    | Default     |
-| :---------------------- | :----------------------------------------------------------------------------- | :---------- |
-| `MCP_TRANSPORT_TYPE`    | The transport to use: `stdio` or `http`.                                       | `http`      |
-| `MCP_HTTP_PORT`         | The port for the HTTP server.                                                  | `3010`      |
-| `MCP_AUTH_MODE`         | Authentication mode: `none`, `jwt`, or `oauth`.                                | `none`      |
-| `STORAGE_PROVIDER_TYPE` | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv`, `r2`. | `in-memory` |
-| `PROTEIN_PRIMARY_PROVIDER` | The primary data source for protein data. | `rcsb` |
-| `OTEL_ENABLED`          | Set to `true` to enable OpenTelemetry.                                         | `false`     |
-| `LOG_LEVEL`             | The minimum level for logging.                                                 | `info`      |
-
+| Variable                   | Description                                                                    | Default     |
+| :------------------------- | :----------------------------------------------------------------------------- | :---------- |
+| `MCP_TRANSPORT_TYPE`       | The transport to use: `stdio` or `http`.                                       | `http`      |
+| `MCP_HTTP_PORT`            | The port for the HTTP server.                                                  | `3010`      |
+| `MCP_AUTH_MODE`            | Authentication mode: `none`, `jwt`, or `oauth`.                                | `none`      |
+| `STORAGE_PROVIDER_TYPE`    | Storage backend: `in-memory`, `filesystem`, `supabase`, `cloudflare-kv`, `r2`. | `in-memory` |
+| `PROTEIN_PRIMARY_PROVIDER` | The primary data source for protein data.                                      | `rcsb`      |
+| `OTEL_ENABLED`             | Set to `true` to enable OpenTelemetry.                                         | `false`     |
+| `LOG_LEVEL`                | The minimum level for logging.                                                 | `info`      |
 
 ## ▶️ Running the Server
 
@@ -250,13 +252,12 @@ bun deploy:prod
 | :------------------------------------- | :----------------------------------------------------------------------------------- |
 | `src/mcp-server/tools/definitions`     | Your tool definitions (`*.tool.ts`). This is where you add new capabilities.         |
 | `src/mcp-server/resources/definitions` | Your resource definitions (`*.resource.ts`). This is where you add new data sources. |
-| `src/services/protein`                 | Orchestration and provider logic for protein data sources (RCSB, PDBe).            |
+| `src/services/protein`                 | Orchestration and provider logic for protein data sources (RCSB, PDBe).              |
 | `src/storage`                          | The `StorageService` abstraction and all storage provider implementations.           |
 | `src/container`                        | Dependency injection container registrations and tokens.                             |
 | `src/utils`                            | Core utilities for logging, error handling, performance, security, and telemetry.    |
 | `src/config`                           | Environment variable parsing and validation with Zod.                                |
 | `tests/`                               | Unit and integration tests, mirroring the `src/` directory structure.                |
-
 
 ## 🧑‍💻 Agent Development Guide
 

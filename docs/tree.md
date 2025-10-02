@@ -1,6 +1,6 @@
 # protein-mcp-server - Directory Structure
 
-Generated on: 2025-10-02 11:26:14
+Generated on: 2025-10-02 12:12:36
 
 ```
 protein-mcp-server
@@ -109,9 +109,26 @@ protein-mcp-server
 │   │   │   │   ├── IProteinProvider.ts
 │   │   │   │   └── ProteinService.ts
 │   │   │   ├── providers
-│   │   │   │   ├── pdbe.provider.ts
-│   │   │   │   ├── rcsb.provider.ts
-│   │   │   │   └── uniprot.provider.ts
+│   │   │   │   ├── pdbe
+│   │   │   │   │   ├── config.ts
+│   │   │   │   │   ├── enrichment-service.ts
+│   │   │   │   │   ├── index.ts
+│   │   │   │   │   ├── search-client.ts
+│   │   │   │   │   └── types.ts
+│   │   │   │   ├── rcsb
+│   │   │   │   │   ├── config.ts
+│   │   │   │   │   ├── enrichment-service.ts
+│   │   │   │   │   ├── graphql-client.ts
+│   │   │   │   │   ├── index.ts
+│   │   │   │   │   ├── query-builder.ts
+│   │   │   │   │   ├── search-client.ts
+│   │   │   │   │   ├── similarity-service.ts
+│   │   │   │   │   └── types.ts
+│   │   │   │   └── uniprot
+│   │   │   │       ├── config.ts
+│   │   │   │       ├── index.ts
+│   │   │   │       ├── search-client.ts
+│   │   │   │       └── types.ts
 │   │   │   ├── index.ts
 │   │   │   └── types.ts
 │   │   └── speech
@@ -197,7 +214,6 @@ protein-mcp-server
 │   ├── mcp-server
 │   │   ├── resources
 │   │   │   └── definitions
-│   │   │       └── echo.resource.test.ts
 │   │   ├── tools
 │   │   │   └── definitions
 │   │   └── transports
