@@ -158,12 +158,27 @@ export async function fetchStructureFile(
     url = `${RCSB_FILES_URL}/${pdbId}.${extension}`;
   }
 
+  logger.debug('Fetching structure file from RCSB', {
+    ...context,
+    pdbId,
+    format,
+    url,
+  });
+
   const response = await fetchWithTimeout(url, {
     method: 'GET',
     timeout: REQUEST_TIMEOUT,
   });
 
   if (!response.ok) {
+    logger.error('Failed to download structure file', {
+      ...context,
+      pdbId,
+      format,
+      url,
+      status: response.status,
+      statusText: response.statusText,
+    });
     throw new McpError(
       JsonRpcErrorCode.ServiceUnavailable,
       `Failed to download structure file: ${response.status}`,
@@ -177,16 +192,45 @@ export async function fetchStructureFile(
       ? await response.arrayBuffer()
       : await response.text();
 
+  logger.debug('Structure file downloaded successfully', {
+    ...context,
+    pdbId,
+    format,
+    dataSize:
+      typeof data === 'string'
+        ? data.length
+        : data instanceof ArrayBuffer
+          ? data.byteLength
+          : 0,
+    isBinary: format === StructureFormat.BCIF,
+  });
+
   let chains: ProteinStructure['structure']['chains'] = [];
   if (format === StructureFormat.MMCIF && typeof data === 'string') {
     try {
+      logger.debug('Parsing chains from mmCIF file', {
+        ...context,
+        pdbId,
+        dataLength: data.length,
+      });
       chains = parseChainsFromCif(data);
+      logger.debug('Successfully parsed chains from mmCIF', {
+        ...context,
+        pdbId,
+        chainCount: chains.length,
+        chains: chains.map((c) => ({
+          id: c.id,
+          type: c.type,
+          length: c.length,
+        })),
+      });
     } catch (e) {
       const errorMessage = e instanceof Error ? e.message : String(e);
       logger.error('Failed to parse CIF file', {
         ...context,
         pdbId,
         error: errorMessage,
+        dataPreview: data.substring(0, 500),
       });
     }
   }

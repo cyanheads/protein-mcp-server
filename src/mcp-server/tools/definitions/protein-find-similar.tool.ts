@@ -28,8 +28,8 @@ const TOOL_DESCRIPTION =
 
 const TOOL_ANNOTATIONS: ToolAnnotations = {
   readOnlyHint: true,
-  idempotentHint: false,
-  openWorldHint: true,
+  idempotentHint: true,
+  openWorldHint: false,
 };
 
 const InputSchema = z
@@ -84,6 +84,12 @@ const InputSchema = z
       .max(100)
       .default(25)
       .describe('Maximum number of results.'),
+    chainId: z
+      .string()
+      .optional()
+      .describe(
+        'Specific chain ID for structural similarity (default: auto-select first chain "A").',
+      ),
   })
   .describe('Parameters for similarity search.');
 
@@ -119,6 +125,12 @@ const OutputSchema = z
                 .number()
                 .optional()
                 .describe('RMSD in Angstroms for structural alignment.'),
+              shapeSimilarity: z
+                .number()
+                .optional()
+                .describe(
+                  'BioZernike 3D shape similarity score for structural search.',
+                ),
             })
             .describe('Similarity metrics for this match.'),
           alignmentLength: z
@@ -154,6 +166,7 @@ async function proteinFindSimilarLogic(
     similarityType: input.similarityType,
     threshold: input.threshold,
     limit: input.limit,
+    chainId: input.chainId,
   };
 
   const proteinService = container.resolve<ProteinServiceClass>(ProteinService);
@@ -171,7 +184,7 @@ async function proteinFindSimilarLogic(
 }
 
 function responseFormatter(result: SimilarOutput): ContentBlock[] {
-  const summary = `Found ${result.totalCount} similar structure(s) using ${result.similarityType} search`;
+  const summary = `Found ${result.totalCount} similar structure(s) using ${result.similarityType} search\nQuery: ${result.query.type} = ${result.query.identifier.substring(0, 50)}`;
 
   const preview =
     result.results.length > 0
@@ -179,13 +192,17 @@ function responseFormatter(result: SimilarOutput): ContentBlock[] {
           .slice(0, 5)
           .map((r) => {
             const metrics = [];
-            if (r.similarity.sequenceIdentity)
+            if (r.similarity.sequenceIdentity !== undefined)
               metrics.push(`${r.similarity.sequenceIdentity.toFixed(1)}% ID`);
-            if (r.similarity.tmscore)
+            if (r.similarity.tmscore !== undefined)
               metrics.push(`TM=${r.similarity.tmscore.toFixed(2)}`);
-            if (r.similarity.rmsd)
+            if (r.similarity.rmsd !== undefined)
               metrics.push(`RMSD=${r.similarity.rmsd.toFixed(2)}Å`);
-            return `• ${r.pdbId}: ${r.title.slice(0, 60)} (${metrics.join(', ')})`;
+            if (r.similarity.shapeSimilarity !== undefined)
+              metrics.push(`Shape=${r.similarity.shapeSimilarity.toFixed(2)}`);
+            if (r.similarity.eValue !== undefined)
+              metrics.push(`E=${r.similarity.eValue.toExponential(1)}`);
+            return `• ${r.pdbId}: ${r.title.slice(0, 50)} ${metrics.length > 0 ? `(${metrics.join(', ')})` : ''}`;
           })
           .join('\n')
       : 'No similar structures found.';
@@ -193,7 +210,7 @@ function responseFormatter(result: SimilarOutput): ContentBlock[] {
   return [
     {
       type: 'text',
-      text: `${summary}\n\n${preview}`,
+      text: `${summary}\n\n${preview}${result.results.length > 5 ? `\n... and ${result.totalCount - 5} more` : ''}`,
     },
   ];
 }

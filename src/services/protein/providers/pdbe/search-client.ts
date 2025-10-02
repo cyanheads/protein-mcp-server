@@ -33,6 +33,13 @@ export async function searchStructures(
   // PDBe search API is more limited - use simple text search
   try {
     const searchUrl = `${PDBE_API_URL}/pdb/entry/summary/${params.query.toLowerCase()}`;
+
+    logger.debug('Fetching from PDBe search API', {
+      ...context,
+      query: params.query,
+      url: searchUrl,
+    });
+
     const response = await fetchWithTimeout(searchUrl, {
       method: 'GET',
       timeout: REQUEST_TIMEOUT,
@@ -41,12 +48,24 @@ export async function searchStructures(
     if (!response.ok) {
       // Return empty results for 404
       if (response.status === 404) {
+        logger.debug('PDBe search returned 404, no results', {
+          ...context,
+          query: params.query,
+        });
         return {
           results: [],
           totalCount: 0,
           hasMore: false,
         };
       }
+
+      const errorBody = await response.text();
+      logger.error('PDBe search API error', {
+        ...context,
+        status: response.status,
+        url: searchUrl,
+        responseBody: errorBody,
+      });
 
       throw new McpError(
         JsonRpcErrorCode.ServiceUnavailable,
@@ -56,6 +75,12 @@ export async function searchStructures(
     }
 
     const data = (await response.json()) as Record<string, PdbeEntrySummary>;
+
+    logger.debug('PDBe search response received', {
+      ...context,
+      entryCount: Object.keys(data).length,
+      rawResponse: JSON.stringify(data, null, 2),
+    });
     const entries = Object.entries(data);
 
     const results = entries
@@ -106,6 +131,12 @@ export async function trackLigands(
     const compoundId = params.ligandQuery.value.toUpperCase();
     const url = `${PDBE_API_URL}/pdb/compound/in_pdb/${compoundId}`;
 
+    logger.debug('Fetching ligands from PDBe compound API', {
+      ...context,
+      compoundId,
+      url,
+    });
+
     const response = await fetchWithTimeout(url, {
       method: 'GET',
       timeout: REQUEST_TIMEOUT,
@@ -113,6 +144,10 @@ export async function trackLigands(
 
     if (!response.ok) {
       if (response.status === 404) {
+        logger.debug('PDBe ligand search returned 404, no structures found', {
+          ...context,
+          compoundId,
+        });
         return {
           ligand: {
             name: params.ligandQuery.value,
@@ -123,6 +158,14 @@ export async function trackLigands(
         };
       }
 
+      const errorBody = await response.text();
+      logger.error('PDBe ligand search API error', {
+        ...context,
+        status: response.status,
+        url,
+        responseBody: errorBody,
+      });
+
       throw new McpError(
         JsonRpcErrorCode.ServiceUnavailable,
         `PDBe ligand search failed: ${response.status}`,
@@ -131,6 +174,13 @@ export async function trackLigands(
     }
 
     const data = (await response.json()) as Record<string, string[]>;
+
+    logger.debug('PDBe ligand search response received', {
+      ...context,
+      compoundId,
+      pdbIdCount: data[compoundId]?.length ?? 0,
+      rawResponse: JSON.stringify(data, null, 2),
+    });
     const pdbIds = data[compoundId] ?? [];
 
     // Fetch details for each structure (limited by params.limit)

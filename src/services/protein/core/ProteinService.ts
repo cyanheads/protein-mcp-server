@@ -53,21 +53,51 @@ export class ProteinService {
     });
 
     try {
-      return await this.primaryProvider.searchStructures(params, context);
+      logger.debug('Attempting search with primary provider', {
+        ...context,
+        provider: this.primaryProvider.name,
+      });
+      const result = await this.primaryProvider.searchStructures(
+        params,
+        context,
+      );
+      logger.info('Primary provider search succeeded', {
+        ...context,
+        provider: this.primaryProvider.name,
+        resultCount: result.results.length,
+        totalCount: result.totalCount,
+      });
+      return result;
     } catch (error) {
       logger.warning('Primary provider failed, trying fallback', {
         ...context,
-        error,
+        error: error instanceof Error ? error.message : String(error),
         primaryProvider: this.primaryProvider.name,
+        fallbackProvider: this.fallbackProvider.name,
       });
 
       try {
-        return await this.fallbackProvider.searchStructures(params, context);
+        const result = await this.fallbackProvider.searchStructures(
+          params,
+          context,
+        );
+        logger.info('Fallback provider search succeeded', {
+          ...context,
+          provider: this.fallbackProvider.name,
+          resultCount: result.results.length,
+          totalCount: result.totalCount,
+        });
+        return result;
       } catch (_fallbackError) {
         logger.error('Both providers failed for search', {
           ...context,
-          primaryError: error,
-          fallbackError: _fallbackError,
+          primaryProvider: this.primaryProvider.name,
+          fallbackProvider: this.fallbackProvider.name,
+          primaryError: error instanceof Error ? error.message : String(error),
+          fallbackError:
+            _fallbackError instanceof Error
+              ? _fallbackError.message
+              : String(_fallbackError),
         });
 
         throw new McpError(
@@ -94,24 +124,67 @@ export class ProteinService {
     });
 
     try {
-      return await this.primaryProvider.getStructure(pdbId, options, context);
+      logger.debug('Attempting getStructure with primary provider', {
+        ...context,
+        provider: this.primaryProvider.name,
+        pdbId,
+      });
+      const result = await this.primaryProvider.getStructure(
+        pdbId,
+        options,
+        context,
+      );
+      logger.info('Primary provider getStructure succeeded', {
+        ...context,
+        provider: this.primaryProvider.name,
+        pdbId,
+      });
+      return result;
     } catch (error) {
       logger.warning('Primary provider failed, trying fallback', {
         ...context,
-        error,
+        error: error instanceof Error ? error.message : String(error),
         pdbId,
         primaryProvider: this.primaryProvider.name,
+        fallbackProvider: this.fallbackProvider.name,
       });
 
       try {
-        return await this.fallbackProvider.getStructure(
+        const result = await this.fallbackProvider.getStructure(
           pdbId,
           options,
           context,
         );
+        logger.info('Fallback provider getStructure succeeded', {
+          ...context,
+          provider: this.fallbackProvider.name,
+          pdbId,
+        });
+        return result;
       } catch (_fallbackError) {
         // If both fail, throw the original error (likely NotFound)
-        if (error instanceof McpError) throw error;
+        if (error instanceof McpError) {
+          logger.error('Both providers failed, throwing primary error', {
+            ...context,
+            pdbId,
+            primaryError: error.message,
+            fallbackError:
+              _fallbackError instanceof Error
+                ? _fallbackError.message
+                : String(_fallbackError),
+          });
+          throw error;
+        }
+
+        logger.error('Both providers failed for getStructure', {
+          ...context,
+          pdbId,
+          primaryError: error instanceof Error ? error.message : String(error),
+          fallbackError:
+            _fallbackError instanceof Error
+              ? _fallbackError.message
+              : String(_fallbackError),
+        });
 
         throw new McpError(
           JsonRpcErrorCode.ServiceUnavailable,

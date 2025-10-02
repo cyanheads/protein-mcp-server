@@ -786,18 +786,19 @@ That’s it. Follow this document precisely.
 - **Status:** Consistently fails with "All pairwise alignments failed."
 - **Root Cause:** The underlying RCSB Alignment API (`https://alignment.rcsb.org/api/v1/structures/submit`) is returning a `400 Bad Request`.
 - **Debugging Summary:**
-  - Initial failures were due to incorrect chain selection. This was resolved by fixing a chain parsing bug in `enrichment-service.ts`.
-  - Subsequent failures were traced to an incorrect request payload structure. The RCSB API expects a URL-encoded form with a `query` parameter containing a JSON string.
-  - Multiple attempts were made to fix the payload structure in `alignment-service.ts`, including wrapping the JSON in a `context` object, but all attempts have failed with schema validation errors from the API.
+  - Initial failures were due to incorrect chain selection.
+  - Subsequent failures, even with valid homologous chains from the same PDB entry (e.g., 1A3N Chain A vs. Chain C), point to a fundamental issue with how the request payload is structured or sent to the alignment service.
 - **Next Steps:**
-  - The exact expected payload structure for the RCSB Alignment API remains unknown.
-  - Further investigation requires either direct access to the API's documentation or more trial-and-error.
+  - The exact expected payload structure for the RCSB Alignment API needs to be verified against its documentation.
+  - The implementation in `alignment-service.ts` should be reviewed to ensure it correctly formats the request as `application/x-www-form-urlencoded` with a JSON string payload.
 
 ### `protein_analyze_collection` - FAILING
 
 - **Status:** Consistently fails with "Collection analysis failed: 400"
-- **Root Cause:** The underlying RCSB Search API is returning a `400 Bad Request`.
+- **Root Cause:** The underlying RCSB Search API is returning a `400 Bad Request` when performing a facet query.
 - **Debugging Summary:**
-  - The tool fails when constructing a facet query. I added logging to capture the request and error details, but have been instructed to move on before fully debugging.
+  - The tool fails on basic analysis types like `organism` and `method`.
+  - The error suggests an issue in how the facet query is being constructed in `search-client.ts`.
 - **Next Steps:**
-  - The `logs/combined.log` file contains the detailed error and the exact request body. This will be the starting point for a future debugging session.
+  - Inspect the exact request body being sent to the RCSB Search API during an analysis query. The error logs may contain this information.
+  - Compare the failing request structure to the expected format in the RCSB PDB Search API documentation.

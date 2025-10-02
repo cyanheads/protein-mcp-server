@@ -83,7 +83,13 @@ async function submitAlignmentJob(
 
   logger.debug('Submitting alignment job as form data', {
     ...context,
+    pdbId1,
+    pdbId2,
+    chainId1,
+    chainId2,
+    algorithm,
     formData: formData.toString(),
+    url: `${RCSB_ALIGNMENT_API_URL}/submit`,
   });
 
   const response = await fetchWithTimeout(`${RCSB_ALIGNMENT_API_URL}/submit`, {
@@ -96,7 +102,13 @@ async function submitAlignmentJob(
     const errorBody = await response.text();
     logger.error('RCSB Alignment job submission failed', {
       ...context,
+      pdbId1,
+      pdbId2,
+      chainId1,
+      chainId2,
+      algorithm,
       status: response.status,
+      statusText: response.statusText,
       requestBody: formData.toString(),
       responseBody: errorBody,
     });
@@ -106,6 +118,14 @@ async function submitAlignmentJob(
     );
   }
   const ticket = (await response.json()) as AlignmentTicket;
+
+  logger.debug('Alignment job submitted successfully', {
+    ...context,
+    pdbId1,
+    pdbId2,
+    ticketId: ticket.query_id,
+  });
+
   return ticket.query_id;
 }
 
@@ -158,10 +178,19 @@ async function getAlignmentResults(
         {},
       );
 
-      return {
+      const alignmentResponse = {
         ...scores,
         'aligned-residues': alignmentData.summary.n_aln_residue_pairs,
       } as RcsbAlignmentResponse;
+
+      logger.debug('Alignment results retrieved', {
+        ...context,
+        ticket,
+        alignmentResponse: JSON.stringify(alignmentResponse, null, 2),
+        rawStatus: JSON.stringify(status, null, 2),
+      });
+
+      return alignmentResponse;
     } else if (status.info.status === 'ERROR') {
       logger.error('Alignment job failed on RCSB side', {
         ...context,

@@ -6,7 +6,7 @@
     "url": "https://github.com/cyanheads/protein-mcp-server",
     "source": "github"
   },
-  "version": "1.0.2",
+  "version": "1.0.3",
   "packages": [
     {
       "registryType": "npm",
@@ -41,7 +41,7 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "protein-mcp-server",
-      "version": "1.0.2",
+      "version": "1.0.3",
       "runtimeHint": "bun",
       "packageArguments": [
         {

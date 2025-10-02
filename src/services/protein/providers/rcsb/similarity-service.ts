@@ -42,6 +42,18 @@ export async function findSequenceSimilar(
   context: RequestContext,
 ): Promise<FindSimilarResult> {
   // Sequence similarity search using RCSB sequence search
+  const sequenceValue =
+    params.query.type === 'sequence'
+      ? params.query.value
+      : await getSequenceForPdbId(params.query.value, context);
+
+  logger.debug('Resolved sequence for similarity search', {
+    ...context,
+    queryType: params.query.type,
+    sequenceLength: sequenceValue.length,
+    sequencePreview: sequenceValue.substring(0, 50),
+  });
+
   const query = {
     type: 'terminal',
     service: 'sequence',
@@ -49,12 +61,33 @@ export async function findSequenceSimilar(
       evalue_cutoff: params.threshold?.eValue ?? 0.001,
       identity_cutoff: (params.threshold?.sequenceIdentity ?? 30) / 100,
       target: 'pdb_protein_sequence',
-      value:
-        params.query.type === 'sequence'
-          ? params.query.value
-          : await getSequenceForPdbId(params.query.value, context),
+      value: sequenceValue,
     },
   };
+
+  const requestBody = {
+    query,
+    return_type: 'entry',
+    request_options: {
+      paginate: {
+        start: 0,
+        rows: params.limit ?? 25,
+      },
+      scoring_strategy: 'sequence',
+      sort: [
+        {
+          sort_by: 'score',
+          direction: 'desc',
+        },
+      ],
+    },
+  };
+
+  logger.debug('Built RCSB sequence similarity request', {
+    ...context,
+    requestBody: JSON.stringify(requestBody, null, 2),
+    url: RCSB_SEARCH_URL,
+  });
 
   try {
     const response = await fetchWithTimeout(RCSB_SEARCH_URL, {
@@ -62,27 +95,18 @@ export async function findSequenceSimilar(
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        query,
-        return_type: 'entry',
-        request_options: {
-          paginate: {
-            start: 0,
-            rows: params.limit ?? 25,
-          },
-          scoring_strategy: 'sequence',
-          sort: [
-            {
-              sort_by: 'score',
-              direction: 'desc',
-            },
-          ],
-        },
-      }),
+      body: JSON.stringify(requestBody),
       timeout: REQUEST_TIMEOUT,
     });
 
     if (!response.ok) {
+      const errorBody = await response.text();
+      logger.error('RCSB sequence similarity search failed', {
+        ...context,
+        status: response.status,
+        requestBody: JSON.stringify(requestBody, null, 2),
+        responseBody: errorBody,
+      });
       throw new McpError(
         JsonRpcErrorCode.ServiceUnavailable,
         `Sequence search failed: ${response.status}`,
@@ -91,6 +115,13 @@ export async function findSequenceSimilar(
     }
 
     const data = (await response.json()) as RcsbSearchResponse;
+
+    logger.debug('RCSB sequence similarity response received', {
+      ...context,
+      totalCount: data.total_count,
+      resultCount: data.result_set?.length ?? 0,
+      rawResponse: JSON.stringify(data, null, 2),
+    });
 
     // Create a map of PDB ID to score for quick lookup
     const scoreMap = new Map(
@@ -101,6 +132,12 @@ export async function findSequenceSimilar(
       data.result_set?.map((r) => r.identifier) ?? [],
       context,
     );
+
+    logger.info('Sequence similarity search completed', {
+      ...context,
+      totalCount: data.total_count ?? 0,
+      enrichedCount: enriched.length,
+    });
 
     return {
       query: {
@@ -155,26 +192,43 @@ export async function findStructureSimilar(
     },
   };
 
+  const requestBody = {
+    query,
+    return_type: 'entry',
+    request_options: {
+      paginate: {
+        start: 0,
+        rows: params.limit ?? 25,
+      },
+    },
+  };
+
+  logger.debug('Built RCSB structural similarity request', {
+    ...context,
+    pdbId: params.query.value,
+    chainId: params.chainId || 'A',
+    requestBody: JSON.stringify(requestBody, null, 2),
+    url: RCSB_SEARCH_URL,
+  });
+
   try {
     const response = await fetchWithTimeout(RCSB_SEARCH_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        query,
-        return_type: 'entry',
-        request_options: {
-          paginate: {
-            start: 0,
-            rows: params.limit ?? 25,
-          },
-        },
-      }),
+      body: JSON.stringify(requestBody),
       timeout: REQUEST_TIMEOUT,
     });
 
     if (!response.ok) {
+      const errorBody = await response.text();
+      logger.error('RCSB structural similarity search failed', {
+        ...context,
+        status: response.status,
+        requestBody: JSON.stringify(requestBody, null, 2),
+        responseBody: errorBody,
+      });
       throw new McpError(
         JsonRpcErrorCode.ServiceUnavailable,
         `Structure search failed: ${response.status}`,
@@ -183,6 +237,13 @@ export async function findStructureSimilar(
     }
 
     const data = (await response.json()) as RcsbSearchResponse;
+
+    logger.debug('RCSB structural similarity response received', {
+      ...context,
+      totalCount: data.total_count,
+      resultCount: data.result_set?.length ?? 0,
+      rawResponse: JSON.stringify(data, null, 2),
+    });
 
     // Create a map of PDB ID to score for quick lookup
     const scoreMap = new Map(
@@ -193,6 +254,12 @@ export async function findStructureSimilar(
       data.result_set?.map((r) => r.identifier) ?? [],
       context,
     );
+
+    logger.info('Structural similarity search completed', {
+      ...context,
+      totalCount: data.total_count ?? 0,
+      enrichedCount: enriched.length,
+    });
 
     return {
       query: {

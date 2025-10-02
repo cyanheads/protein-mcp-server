@@ -54,6 +54,12 @@ export async function searchStructures(
     return_type: 'entry',
   };
 
+  logger.debug('Built RCSB search request', {
+    ...context,
+    requestBody: JSON.stringify(requestOptions, null, 2),
+    url: RCSB_SEARCH_URL,
+  });
+
   try {
     const response = await fetchWithTimeout(RCSB_SEARCH_URL, {
       method: 'POST',
@@ -65,6 +71,14 @@ export async function searchStructures(
     });
 
     if (!response.ok) {
+      const errorBody = await response.text();
+      logger.error('RCSB search API returned error', {
+        ...context,
+        status: response.status,
+        statusText: response.statusText,
+        requestBody: JSON.stringify(requestOptions, null, 2),
+        responseBody: errorBody,
+      });
       throw new McpError(
         JsonRpcErrorCode.ServiceUnavailable,
         `RCSB search failed: ${response.status} ${response.statusText}`,
@@ -74,11 +88,24 @@ export async function searchStructures(
 
     const data = (await response.json()) as RcsbSearchResponse;
 
+    logger.debug('RCSB search API response received', {
+      ...context,
+      totalCount: data.total_count,
+      resultCount: data.result_set?.length ?? 0,
+      rawResponse: JSON.stringify(data, null, 2),
+    });
+
     // Fetch details for each result
     const results = await enrichSearchResults(
       data.result_set?.map((r) => r.identifier) ?? [],
       context,
     );
+
+    logger.info('RCSB search completed successfully', {
+      ...context,
+      totalCount: data.total_count ?? 0,
+      enrichedResultCount: results.length,
+    });
 
     return {
       results,
@@ -172,26 +199,42 @@ export async function trackLigands(
       ? 'entry'
       : 'entry';
 
+  const ligandRequestBody = {
+    query,
+    return_type: returnType,
+    request_options: {
+      paginate: {
+        start: 0,
+        rows: params.limit ?? 25,
+      },
+    },
+  };
+
+  logger.debug('Built RCSB ligand search request', {
+    ...context,
+    ligandQuery: params.ligandQuery,
+    requestBody: JSON.stringify(ligandRequestBody, null, 2),
+    url: RCSB_SEARCH_URL,
+  });
+
   try {
     const response = await fetchWithTimeout(RCSB_SEARCH_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        query,
-        return_type: returnType,
-        request_options: {
-          paginate: {
-            start: 0,
-            rows: params.limit ?? 25,
-          },
-        },
-      }),
+      body: JSON.stringify(ligandRequestBody),
       timeout: REQUEST_TIMEOUT,
     });
 
     if (!response.ok) {
+      const errorBody = await response.text();
+      logger.error('RCSB ligand search API returned error', {
+        ...context,
+        status: response.status,
+        requestBody: JSON.stringify(ligandRequestBody, null, 2),
+        responseBody: errorBody,
+      });
       throw new McpError(
         JsonRpcErrorCode.ServiceUnavailable,
         `Ligand search failed: ${response.status}`,
@@ -200,6 +243,13 @@ export async function trackLigands(
     }
 
     const data = (await response.json()) as RcsbSearchResponse;
+
+    logger.debug('RCSB ligand search API response received', {
+      ...context,
+      totalCount: data.total_count,
+      resultCount: data.result_set?.length ?? 0,
+      rawResponse: JSON.stringify(data, null, 2),
+    });
     const pdbIds = data.result_set?.map((r) => r.identifier) ?? [];
 
     // Enrich with structure details
@@ -231,10 +281,17 @@ export async function trackLigands(
                 ligandIdForBinding,
                 context,
               );
+              logger.debug('Retrieved binding site info', {
+                ...context,
+                pdbId: s.pdbId,
+                ligandId: ligandIdForBinding,
+                bindingSiteCount: bindingSites?.length ?? 0,
+              });
             } catch (error) {
               logger.warning('Failed to get binding site info', {
                 ...context,
                 pdbId: s.pdbId,
+                ligandId: ligandIdForBinding,
                 error,
               });
               bindingSites = [];
@@ -251,6 +308,13 @@ export async function trackLigands(
           };
         }),
       );
+
+    logger.info('RCSB ligand tracking completed', {
+      ...context,
+      ligandName: params.ligandQuery.value,
+      totalCount: data.total_count ?? 0,
+      structureCount: structuresWithBindingSites.length,
+    });
 
     return {
       ligand: {

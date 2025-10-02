@@ -4,7 +4,11 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
-import { fetchWithTimeout, type RequestContext } from '@/utils/index.js';
+import {
+  fetchWithTimeout,
+  logger,
+  type RequestContext,
+} from '@/utils/index.js';
 import type { ProteinStructure } from '../../types.js';
 import { StructureFormat } from '../../types.js';
 import { PDBE_FILES_URL, REQUEST_TIMEOUT } from './config.js';
@@ -20,12 +24,27 @@ export async function fetchStructureFile(
   const extension = format === StructureFormat.MMCIF ? 'cif' : format;
   const url = `${PDBE_FILES_URL}/${pdbId}.${extension}`;
 
+  logger.debug('Fetching structure file from PDBe', {
+    ...context,
+    pdbId,
+    format,
+    url,
+  });
+
   const response = await fetchWithTimeout(url, {
     method: 'GET',
     timeout: REQUEST_TIMEOUT,
   });
 
   if (!response.ok) {
+    logger.error('Failed to download structure file from PDBe', {
+      ...context,
+      pdbId,
+      format,
+      url,
+      status: response.status,
+      statusText: response.statusText,
+    });
     throw new McpError(
       JsonRpcErrorCode.ServiceUnavailable,
       `Failed to download structure file from PDBe: ${response.status}`,
@@ -34,6 +53,13 @@ export async function fetchStructureFile(
   }
 
   const data = await response.text();
+
+  logger.debug('Structure file downloaded from PDBe', {
+    ...context,
+    pdbId,
+    format,
+    dataSize: data.length,
+  });
 
   return {
     format,

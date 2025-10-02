@@ -171,10 +171,27 @@ async function proteinSearchStructuresLogic(
 }
 
 function responseFormatter(result: SearchOutput): ContentBlock[] {
+  const summary = `Found ${result.totalCount} structure(s)${result.hasMore ? ` (showing ${result.results.length})` : ''}`;
+
+  const preview =
+    result.results.length > 0
+      ? result.results
+          .slice(0, 10)
+          .map((r) => {
+            const details = [];
+            if (r.organism.length > 0)
+              details.push(r.organism[0]?.substring(0, 25));
+            if (r.resolution) details.push(`${r.resolution.toFixed(2)}Å`);
+            details.push(r.experimentalMethod);
+            return `• ${r.pdbId}: ${r.title.slice(0, 60)}${details.length > 0 ? `\n  ${details.join(' | ')}` : ''}`;
+          })
+          .join('\n')
+      : 'No structures found matching your query.';
+
   return [
     {
       type: 'text',
-      text: JSON.stringify(result, null, 2),
+      text: `${summary}\n\n${preview}${result.results.length > 10 ? `\n... and ${result.results.length - 10} more` : ''}`,
     },
   ];
 }

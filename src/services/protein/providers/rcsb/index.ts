@@ -71,6 +71,11 @@ export class RcsbProteinProvider implements IProteinProvider {
 
     // Validate PDB ID format (4 alphanumeric characters)
     if (!/^[0-9A-Z]{4}$/i.test(normalizedId)) {
+      logger.error('Invalid PDB ID format', {
+        ...context,
+        pdbId,
+        normalizedId,
+      });
       throw new McpError(
         JsonRpcErrorCode.ValidationError,
         `Invalid PDB ID format: ${pdbId}. Must be 4 alphanumeric characters.`,
@@ -80,17 +85,33 @@ export class RcsbProteinProvider implements IProteinProvider {
 
     try {
       // Fetch metadata via GraphQL
+      logger.debug('Fetching metadata for structure', {
+        ...context,
+        normalizedId,
+      });
       const metadata = await fetchStructureMetadata(normalizedId, context);
 
       // Fetch structure file if coordinates requested
       let structureData: ProteinStructure['structure'] | undefined;
       if (options.includeCoordinates !== false) {
+        logger.debug('Fetching coordinate data for structure', {
+          ...context,
+          normalizedId,
+          format: options.format ?? StructureFormat.MMCIF,
+        });
         structureData = await fetchStructureFile(
           normalizedId,
           options.format ?? StructureFormat.MMCIF,
           context,
         );
       }
+
+      logger.info('Successfully retrieved protein structure', {
+        ...context,
+        normalizedId,
+        hasCoordinates: !!structureData,
+        chainCount: structureData?.chains.length ?? 0,
+      });
 
       return {
         pdbId: normalizedId,
@@ -104,6 +125,12 @@ export class RcsbProteinProvider implements IProteinProvider {
         annotations: metadata.annotations,
       };
     } catch (error) {
+      logger.error('Failed to fetch structure', {
+        ...context,
+        pdbId,
+        normalizedId,
+        error: error instanceof Error ? error.message : String(error),
+      });
       if (error instanceof McpError) throw error;
 
       throw new McpError(

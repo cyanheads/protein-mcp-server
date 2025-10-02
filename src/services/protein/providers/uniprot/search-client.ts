@@ -26,12 +26,26 @@ export async function getProteinSequence(
 
   try {
     const url = `${UNIPROT_API_URL}/uniprotkb/${accession}.fasta`;
+
+    logger.debug('Fetching protein sequence from UniProt', {
+      ...context,
+      accession,
+      url,
+    });
+
     const response = await fetchWithTimeout(url, {
       method: 'GET',
       timeout: REQUEST_TIMEOUT,
     });
 
     if (!response.ok) {
+      logger.error('UniProt sequence fetch failed', {
+        ...context,
+        accession,
+        url,
+        status: response.status,
+        statusText: response.statusText,
+      });
       throw new McpError(
         JsonRpcErrorCode.NotFound,
         `UniProt entry ${accession} not found`,
@@ -42,6 +56,13 @@ export async function getProteinSequence(
     const fasta = await response.text();
     // Extract sequence (skip header line)
     const sequence = fasta.split('\n').slice(1).join('').replace(/\s/g, '');
+
+    logger.debug('UniProt sequence retrieved', {
+      ...context,
+      accession,
+      sequenceLength: sequence.length,
+      sequencePreview: sequence.substring(0, 50),
+    });
 
     return sequence;
   } catch (error) {
@@ -69,12 +90,28 @@ export async function searchProtein(
 
   try {
     const url = `${UNIPROT_API_URL}/uniprotkb/search?query=${encodeURIComponent(query)}&format=json&size=25`;
+
+    logger.debug('Searching UniProt', {
+      ...context,
+      query,
+      url,
+    });
+
     const response = await fetchWithTimeout(url, {
       method: 'GET',
       timeout: REQUEST_TIMEOUT,
     });
 
     if (!response.ok) {
+      const errorBody = await response.text();
+      logger.error('UniProt search API error', {
+        ...context,
+        query,
+        url,
+        status: response.status,
+        statusText: response.statusText,
+        responseBody: errorBody,
+      });
       throw new McpError(
         JsonRpcErrorCode.ServiceUnavailable,
         `UniProt search failed: ${response.status}`,
@@ -83,6 +120,13 @@ export async function searchProtein(
     }
 
     const data = (await response.json()) as UniProtAPIResponse;
+
+    logger.debug('UniProt search response received', {
+      ...context,
+      query,
+      resultCount: data.results?.length ?? 0,
+      rawResponse: JSON.stringify(data, null, 2),
+    });
 
     return (
       data.results?.map((result) => ({

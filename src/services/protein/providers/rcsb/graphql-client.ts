@@ -48,20 +48,38 @@ export async function enrichSearchResults(
     }
   `;
 
+  const requestBody = {
+    query,
+    variables: { ids: pdbIds },
+  };
+
+  logger.debug('Enriching search results via GraphQL', {
+    ...context,
+    pdbIdCount: pdbIds.length,
+    pdbIds,
+    requestBody: JSON.stringify(requestBody, null, 2),
+    url: RCSB_GRAPHQL_URL,
+  });
+
   try {
     const response = await fetchWithTimeout(RCSB_GRAPHQL_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        query,
-        variables: { ids: pdbIds },
-      }),
+      body: JSON.stringify(requestBody),
       timeout: REQUEST_TIMEOUT,
     });
 
     const data = (await response.json()) as RcsbGraphQLResponse;
+
+    logger.debug('GraphQL enrichment response received', {
+      ...context,
+      entryCount: data.data?.entries?.length ?? 0,
+      hasErrors: !!data.errors,
+      errorCount: data.errors?.length ?? 0,
+      rawResponse: JSON.stringify(data, null, 2),
+    });
 
     if (data.errors && data.errors.length > 0) {
       throw new McpError(
@@ -165,19 +183,34 @@ export async function fetchStructureMetadata(
     }
   `;
 
+  const requestBody = {
+    query,
+    variables: { id: pdbId },
+  };
+
+  logger.debug('Fetching structure metadata via GraphQL', {
+    ...context,
+    pdbId,
+    requestBody: JSON.stringify(requestBody, null, 2),
+    url: RCSB_GRAPHQL_URL,
+  });
+
   const response = await fetchWithTimeout(RCSB_GRAPHQL_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      query,
-      variables: { id: pdbId },
-    }),
+    body: JSON.stringify(requestBody),
     timeout: REQUEST_TIMEOUT,
   });
 
   if (!response.ok) {
+    logger.error('Failed to fetch structure metadata', {
+      ...context,
+      pdbId,
+      status: response.status,
+      statusText: response.statusText,
+    });
     throw new McpError(
       JsonRpcErrorCode.NotFound,
       `Structure ${pdbId} not found`,
@@ -186,9 +219,21 @@ export async function fetchStructureMetadata(
   }
 
   const data = (await response.json()) as RcsbGraphQLResponse;
+
+  logger.debug('Structure metadata response received', {
+    ...context,
+    pdbId,
+    hasEntry: !!data.data?.entry,
+    rawResponse: JSON.stringify(data, null, 2),
+  });
+
   const entry = data.data?.entry;
 
   if (!entry) {
+    logger.warning('Structure metadata returned empty entry', {
+      ...context,
+      pdbId,
+    });
     throw new McpError(
       JsonRpcErrorCode.NotFound,
       `Structure ${pdbId} not found`,
@@ -309,15 +354,25 @@ export async function getBindingSiteInfo(
     }
   `;
 
+  const requestBody = {
+    query,
+    variables: { id: pdbId },
+  };
+
+  logger.debug('Fetching binding site info via GraphQL', {
+    ...context,
+    pdbId,
+    ligandId,
+    requestBody: JSON.stringify(requestBody, null, 2),
+    url: RCSB_GRAPHQL_URL,
+  });
+
   const response = await fetchWithTimeout(RCSB_GRAPHQL_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      query,
-      variables: { id: pdbId },
-    }),
+    body: JSON.stringify(requestBody),
     timeout: REQUEST_TIMEOUT,
   });
 
@@ -327,11 +382,20 @@ export async function getBindingSiteInfo(
       pdbId,
       ligandId,
       status: response.status,
+      statusText: response.statusText,
     });
     return [];
   }
 
   const data = (await response.json()) as RcsbGraphQLResponse;
+
+  logger.debug('Binding site info response received', {
+    ...context,
+    pdbId,
+    ligandId,
+    instanceCount: data.data?.entry?.polymer_entity_instances?.length ?? 0,
+    rawResponse: JSON.stringify(data, null, 2),
+  });
   const instances = data.data?.entry?.polymer_entity_instances || [];
 
   // Group interactions by chain

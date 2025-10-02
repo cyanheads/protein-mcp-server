@@ -1,6 +1,6 @@
 {
   "name": "protein-mcp-server",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "mcpName": "io.github.cyanheads/protein-mcp-server",
   "description": "A powerful Model Context Protocol server providing programmatic access to 3D protein structural data from RCSB PDB, PDBe, and UniProt. Features multi-provider orchestration, comprehensive structural analysis tools, and full observability.",
   "main": "dist/index.js",
@@ -36,7 +36,6 @@
     "start": "bun ./dist/index.js",
     "start:stdio": "MCP_TRANSPORT_TYPE=stdio bun ./dist/index.js",
     "start:http": "MCP_TRANSPORT_TYPE=http bun ./dist/index.js",
-    "dev": "bun --watch src/index.ts",
     "dev:stdio": "MCP_LOG_LEVEL=debug MCP_TRANSPORT_TYPE=stdio bun --watch src/index.ts",
     "dev:http": "MCP_LOG_LEVEL=debug MCP_TRANSPORT_TYPE=http bun --watch src/index.ts",
     "devdocs": "bun run scripts/devdocs.ts",
