@@ -3,7 +3,7 @@
  * @module src/mcp-server/tools/definitions/protein-analyze-collection.tool
  */
 import type { ContentBlock } from '@modelcontextprotocol/sdk/types.js';
-import { inject, injectable } from 'tsyringe';
+import { container } from 'tsyringe';
 import { z } from 'zod';
 
 import { ProteinService } from '@/container/tokens.js';
@@ -19,9 +19,7 @@ import {
   type AnalyzeCollectionParams,
   type AnalyzeCollectionResult,
 } from '@/services/protein/types.js';
-import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { type RequestContext, logger } from '@/utils/index.js';
-import { type DependencyContainer } from 'tsyringe';
 
 const TOOL_NAME = 'protein_analyze_collection';
 const TOOL_TITLE = 'Analyze Protein Collection';
@@ -135,40 +133,34 @@ const OutputSchema = z.object({
 type AnalysisInput = z.infer<typeof InputSchema>;
 type AnalysisOutput = z.infer<typeof OutputSchema>;
 
-@injectable()
-class ProteinAnalyzeCollectionLogic {
-  constructor(
-    @inject(ProteinService) private proteinService: ProteinServiceClass,
-  ) {}
+async function proteinAnalyzeCollectionLogic(
+  input: AnalysisInput,
+  appContext: RequestContext,
+  _sdkContext: SdkContext,
+): Promise<AnalysisOutput> {
+  logger.debug('Analyzing protein collection', {
+    ...appContext,
+    toolInput: input,
+  });
 
-  async execute(
-    input: AnalysisInput,
-    appContext: RequestContext,
-    _sdkContext: SdkContext,
-  ): Promise<AnalysisOutput> {
-    logger.debug('Analyzing protein collection', {
-      ...appContext,
-      toolInput: input,
-    });
+  const params: AnalyzeCollectionParams = {
+    analysisType: input.analysisType,
+    filters: input.filters,
+    groupBy: input.groupBy,
+    limit: input.limit,
+  };
 
-    const params: AnalyzeCollectionParams = {
-      analysisType: input.analysisType,
-      filters: input.filters,
-      groupBy: input.groupBy,
-      limit: input.limit,
-    };
+  const proteinService = container.resolve<ProteinServiceClass>(ProteinService);
+  const result: AnalyzeCollectionResult =
+    await proteinService.analyzeCollection(params, appContext);
 
-    const result: AnalyzeCollectionResult =
-      await this.proteinService.analyzeCollection(params, appContext);
+  logger.info('Collection analysis completed', {
+    ...appContext,
+    totalStructures: result.totalStructures,
+    categoryCount: result.statistics.length,
+  });
 
-    logger.info('Collection analysis completed', {
-      ...appContext,
-      totalStructures: result.totalStructures,
-      categoryCount: result.statistics.length,
-    });
-
-    return result;
-  }
+  return result;
 }
 
 function responseFormatter(result: AnalysisOutput): ContentBlock[] {
@@ -207,21 +199,6 @@ export const proteinAnalyzeCollectionTool: ToolDefinition<
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   annotations: TOOL_ANNOTATIONS,
-  logic: withToolAuth(
-    ['tool:protein:analyze'],
-    async (input, appContext, sdkContext) => {
-      const { container } = globalThis as {
-        container?: DependencyContainer;
-      };
-      if (!container) {
-        throw new McpError(
-          JsonRpcErrorCode.InternalError,
-          'DI container not available',
-        );
-      }
-      const logic = container.resolve(ProteinAnalyzeCollectionLogic);
-      return logic.execute(input, appContext, sdkContext);
-    },
-  ),
+  logic: withToolAuth(['tool:protein:analyze'], proteinAnalyzeCollectionLogic),
   responseFormatter,
 };

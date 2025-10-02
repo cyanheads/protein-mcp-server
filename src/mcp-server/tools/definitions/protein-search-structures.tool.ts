@@ -3,7 +3,7 @@
  * @module src/mcp-server/tools/definitions/protein-search-structures.tool
  */
 import type { ContentBlock } from '@modelcontextprotocol/sdk/types.js';
-import { inject, injectable } from 'tsyringe';
+import { container } from 'tsyringe';
 import { z } from 'zod';
 
 import { ProteinService } from '@/container/tokens.js';
@@ -122,82 +122,59 @@ const OutputSchema = z
 type SearchInput = z.infer<typeof InputSchema>;
 type SearchOutput = z.infer<typeof OutputSchema>;
 
-@injectable()
-class ProteinSearchLogic {
-  constructor(
-    @inject(ProteinService) private proteinService: ProteinServiceClass,
-  ) {}
+async function proteinSearchStructuresLogic(
+  input: SearchInput,
+  appContext: RequestContext,
+  _sdkContext: SdkContext,
+): Promise<SearchOutput> {
+  logger.debug('Searching protein structures', {
+    ...appContext,
+    toolInput: input,
+  });
 
-  async execute(
-    input: SearchInput,
-    appContext: RequestContext,
-    _sdkContext: SdkContext,
-  ): Promise<SearchOutput> {
-    logger.debug('Searching protein structures', {
-      ...appContext,
-      toolInput: input,
-    });
-
-    // Validate resolution range if both provided
-    if (
-      input.minResolution !== undefined &&
-      input.maxResolution !== undefined &&
-      input.minResolution > input.maxResolution
-    ) {
-      throw new McpError(
-        JsonRpcErrorCode.ValidationError,
-        'minResolution cannot be greater than maxResolution',
-        { requestId: appContext.requestId },
-      );
-    }
-
-    const params: SearchStructuresParams = {
-      query: input.query,
-      organism: input.organism,
-      experimentalMethod: input.experimentalMethod,
-      maxResolution: input.maxResolution,
-      minResolution: input.minResolution,
-      limit: input.limit,
-      offset: input.offset,
-    };
-
-    const result: SearchStructuresResult =
-      await this.proteinService.searchStructures(params, appContext);
-
-    logger.info('Protein search completed', {
-      ...appContext,
-      resultCount: result.results.length,
-      totalCount: result.totalCount,
-    });
-
-    return result;
+  // Validate resolution range if both provided
+  if (
+    input.minResolution !== undefined &&
+    input.maxResolution !== undefined &&
+    input.minResolution > input.maxResolution
+  ) {
+    throw new McpError(
+      JsonRpcErrorCode.ValidationError,
+      'minResolution cannot be greater than maxResolution',
+      { requestId: appContext.requestId },
+    );
   }
+
+  const params: SearchStructuresParams = {
+    query: input.query,
+    organism: input.organism,
+    experimentalMethod: input.experimentalMethod,
+    maxResolution: input.maxResolution,
+    minResolution: input.minResolution,
+    limit: input.limit,
+    offset: input.offset,
+  };
+
+  const proteinService = container.resolve<ProteinServiceClass>(ProteinService);
+  const result: SearchStructuresResult = await proteinService.searchStructures(
+    params,
+    appContext,
+  );
+
+  logger.info('Protein search completed', {
+    ...appContext,
+    resultCount: result.results.length,
+    totalCount: result.totalCount,
+  });
+
+  return result;
 }
 
 function responseFormatter(result: SearchOutput): ContentBlock[] {
-  const summary = [
-    `Found ${result.totalCount} matching structure(s)`,
-    `Showing ${result.results.length} result(s)`,
-    result.hasMore ? '(more available)' : '',
-  ]
-    .filter(Boolean)
-    .join(' ');
-
-  const preview =
-    result.results.length > 0
-      ? result.results
-          .slice(0, 5)
-          .map(
-            (r) =>
-              `• ${r.pdbId}: ${r.title}${r.resolution ? ` (${r.resolution.toFixed(2)}Å)` : ''}`,
-          )
-          .join('\n')
-      : 'No results found.';
-
   return [
     {
       type: 'text',
-      text: `${summary}\n\n${preview}${result.results.length > 5 ? '\n... and more' : ''}`,
+      text: JSON.stringify(result, null, 2),
     },
   ];
 }
@@ -212,16 +189,6 @@ export const proteinSearchStructuresTool: ToolDefinition<
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   annotations: TOOL_ANNOTATIONS,
-  logic: withToolAuth(
-    ['tool:protein:search'],
-    async (input, appContext, sdkContext) => {
-      const logic = new ProteinSearchLogic(
-        (
-          globalThis as { container?: { resolve: (token: symbol) => unknown } }
-        ).container?.resolve(ProteinService) as ProteinServiceClass,
-      );
-      return logic.execute(input, appContext, sdkContext);
-    },
-  ),
+  logic: withToolAuth(['tool:protein:search'], proteinSearchStructuresLogic),
   responseFormatter,
 };

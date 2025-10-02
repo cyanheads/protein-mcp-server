@@ -24,11 +24,10 @@ import type {
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { logger, type RequestContext } from '@/utils/index.js';
 
-/**
- * Dependency injection tokens for providers
- */
-export const ProteinProviderPrimary = Symbol('ProteinProviderPrimary');
-export const ProteinProviderFallback = Symbol('ProteinProviderFallback');
+import {
+  ProteinProviderPrimary,
+  ProteinProviderFallback,
+} from '@/container/tokens.js';
 
 /**
  * Orchestrator service for protein structure operations.

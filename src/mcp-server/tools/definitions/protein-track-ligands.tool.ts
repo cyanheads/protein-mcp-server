@@ -3,7 +3,7 @@
  * @module src/mcp-server/tools/definitions/protein-track-ligands.tool
  */
 import type { ContentBlock } from '@modelcontextprotocol/sdk/types.js';
-import { inject, injectable } from 'tsyringe';
+import { container } from 'tsyringe';
 import { z } from 'zod';
 
 import { ProteinService } from '@/container/tokens.js';
@@ -98,42 +98,36 @@ const OutputSchema = z.object({
 type LigandInput = z.infer<typeof InputSchema>;
 type LigandOutput = z.infer<typeof OutputSchema>;
 
-@injectable()
-class ProteinTrackLigandsLogic {
-  constructor(
-    @inject(ProteinService) private proteinService: ProteinServiceClass,
-  ) {}
+async function proteinTrackLigandsLogic(
+  input: LigandInput,
+  appContext: RequestContext,
+  _sdkContext: SdkContext,
+): Promise<LigandOutput> {
+  logger.debug('Tracking ligands in structures', {
+    ...appContext,
+    toolInput: input,
+  });
 
-  async execute(
-    input: LigandInput,
-    appContext: RequestContext,
-    _sdkContext: SdkContext,
-  ): Promise<LigandOutput> {
-    logger.debug('Tracking ligands in structures', {
-      ...appContext,
-      toolInput: input,
-    });
+  const params: TrackLigandsParams = {
+    ligandQuery: input.ligandQuery,
+    filters: input.filters,
+    includeBindingSite: input.includeBindingSite,
+    limit: input.limit,
+  };
 
-    const params: TrackLigandsParams = {
-      ligandQuery: input.ligandQuery,
-      filters: input.filters,
-      includeBindingSite: input.includeBindingSite,
-      limit: input.limit,
-    };
+  const proteinService = container.resolve<ProteinServiceClass>(ProteinService);
+  const result: TrackLigandsResult = await proteinService.trackLigands(
+    params,
+    appContext,
+  );
 
-    const result: TrackLigandsResult = await this.proteinService.trackLigands(
-      params,
-      appContext,
-    );
+  logger.info('Ligand tracking completed', {
+    ...appContext,
+    ligand: result.ligand.chemicalId,
+    structureCount: result.structures.length,
+  });
 
-    logger.info('Ligand tracking completed', {
-      ...appContext,
-      ligand: result.ligand.chemicalId,
-      structureCount: result.structures.length,
-    });
-
-    return result;
-  }
+  return result;
 }
 
 function responseFormatter(result: LigandOutput): ContentBlock[] {
@@ -174,16 +168,6 @@ export const proteinTrackLigandsTool: ToolDefinition<
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   annotations: TOOL_ANNOTATIONS,
-  logic: withToolAuth(
-    ['tool:protein:search'],
-    async (input, appContext, sdkContext) => {
-      const logic = new ProteinTrackLigandsLogic(
-        (
-          globalThis as { container?: { resolve: (token: symbol) => unknown } }
-        ).container?.resolve(ProteinService) as ProteinServiceClass,
-      );
-      return logic.execute(input, appContext, sdkContext);
-    },
-  ),
+  logic: withToolAuth(['tool:protein:search'], proteinTrackLigandsLogic),
   responseFormatter,
 };

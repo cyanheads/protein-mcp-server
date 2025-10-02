@@ -3,7 +3,7 @@
  * @module src/mcp-server/tools/definitions/protein-compare-structures.tool
  */
 import type { ContentBlock } from '@modelcontextprotocol/sdk/types.js';
-import { inject, injectable } from 'tsyringe';
+import { container } from 'tsyringe';
 import { z } from 'zod';
 
 import { ProteinService } from '@/container/tokens.js';
@@ -105,48 +105,42 @@ const OutputSchema = z
 type CompareInput = z.infer<typeof InputSchema>;
 type CompareOutput = z.infer<typeof OutputSchema>;
 
-@injectable()
-class ProteinCompareLogic {
-  constructor(
-    @inject(ProteinService) private proteinService: ProteinServiceClass,
-  ) {}
+async function proteinCompareStructuresLogic(
+  input: CompareInput,
+  appContext: RequestContext,
+  _sdkContext: SdkContext,
+): Promise<CompareOutput> {
+  logger.debug('Comparing protein structures', {
+    ...appContext,
+    toolInput: input,
+  });
 
-  async execute(
-    input: CompareInput,
-    appContext: RequestContext,
-    _sdkContext: SdkContext,
-  ): Promise<CompareOutput> {
-    logger.debug('Comparing protein structures', {
-      ...appContext,
-      toolInput: input,
-    });
-
-    if (input.pdbIds.length < 2) {
-      throw new McpError(
-        JsonRpcErrorCode.ValidationError,
-        'At least 2 structures required for comparison',
-        { requestId: appContext.requestId },
-      );
-    }
-
-    const params: CompareStructuresParams = {
-      pdbIds: input.pdbIds.map((id) => id.toUpperCase()),
-      alignmentMethod: input.alignmentMethod,
-      chainSelections: input.chainSelections,
-      includeVisualization: input.includeVisualization,
-    };
-
-    const result: CompareStructuresResult =
-      await this.proteinService.compareStructures(params, appContext);
-
-    logger.info('Structure comparison completed', {
-      ...appContext,
-      structureCount: input.pdbIds.length,
-      rmsd: result.alignment.rmsd,
-    });
-
-    return result;
+  if (input.pdbIds.length < 2) {
+    throw new McpError(
+      JsonRpcErrorCode.ValidationError,
+      'At least 2 structures required for comparison',
+      { requestId: appContext.requestId },
+    );
   }
+
+  const params: CompareStructuresParams = {
+    pdbIds: input.pdbIds.map((id) => id.toUpperCase()),
+    alignmentMethod: input.alignmentMethod,
+    chainSelections: input.chainSelections,
+    includeVisualization: input.includeVisualization,
+  };
+
+  const proteinService = container.resolve<ProteinServiceClass>(ProteinService);
+  const result: CompareStructuresResult =
+    await proteinService.compareStructures(params, appContext);
+
+  logger.info('Structure comparison completed', {
+    ...appContext,
+    structureCount: input.pdbIds.length,
+    rmsd: result.alignment.rmsd,
+  });
+
+  return result;
 }
 
 function responseFormatter(result: CompareOutput): ContentBlock[] {
@@ -188,16 +182,6 @@ export const proteinCompareStructuresTool: ToolDefinition<
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   annotations: TOOL_ANNOTATIONS,
-  logic: withToolAuth(
-    ['tool:protein:analyze'],
-    async (input, appContext, sdkContext) => {
-      const logic = new ProteinCompareLogic(
-        (
-          globalThis as { container?: { resolve: (token: symbol) => unknown } }
-        ).container?.resolve(ProteinService) as ProteinServiceClass,
-      );
-      return logic.execute(input, appContext, sdkContext);
-    },
-  ),
+  logic: withToolAuth(['tool:protein:analyze'], proteinCompareStructuresLogic),
   responseFormatter,
 };

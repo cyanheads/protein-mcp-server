@@ -5,16 +5,12 @@
 
 // Core
 export type { IProteinProvider } from './core/IProteinProvider.js';
-export {
-  ProteinService,
-  ProteinProviderPrimary,
-  ProteinProviderFallback,
-} from './core/ProteinService.js';
+export { ProteinService } from './core/ProteinService.js';
 
 // Providers
-export { RcsbProteinProvider } from './providers/rcsb.provider.js';
-export { PdbeProteinProvider } from './providers/pdbe.provider.js';
-export { UniProtProvider } from './providers/uniprot.provider.js';
+export { RcsbProteinProvider } from './providers/rcsb/index.js';
+export { PdbeProteinProvider } from './providers/pdbe/index.js';
+export { UniProtProvider } from './providers/uniprot/index.js';
 
 // Types
 export type * from './types.js';

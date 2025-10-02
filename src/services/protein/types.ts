@@ -309,8 +309,8 @@ export interface SimilarityResultEntry {
   title: string;
   organism: string[];
   similarity: SimilarityMetrics;
-  alignmentLength: number;
-  coverage: number;
+  alignmentLength?: number;
+  coverage?: number;
 }
 
 /**

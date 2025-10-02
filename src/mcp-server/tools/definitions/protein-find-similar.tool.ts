@@ -3,7 +3,7 @@
  * @module src/mcp-server/tools/definitions/protein-find-similar.tool
  */
 import type { ContentBlock } from '@modelcontextprotocol/sdk/types.js';
-import { inject, injectable } from 'tsyringe';
+import { container } from 'tsyringe';
 import { z } from 'zod';
 
 import { ProteinService } from '@/container/tokens.js';
@@ -79,8 +79,8 @@ const OutputSchema = z.object({
         tmscore: z.number().optional(),
         rmsd: z.number().optional(),
       }),
-      alignmentLength: z.number(),
-      coverage: z.number(),
+      alignmentLength: z.number().optional(),
+      coverage: z.number().optional(),
     }),
   ),
   totalCount: z.number(),
@@ -89,41 +89,35 @@ const OutputSchema = z.object({
 type SimilarInput = z.infer<typeof InputSchema>;
 type SimilarOutput = z.infer<typeof OutputSchema>;
 
-@injectable()
-class ProteinFindSimilarLogic {
-  constructor(
-    @inject(ProteinService) private proteinService: ProteinServiceClass,
-  ) {}
+async function proteinFindSimilarLogic(
+  input: SimilarInput,
+  appContext: RequestContext,
+  _sdkContext: SdkContext,
+): Promise<SimilarOutput> {
+  logger.debug('Finding similar proteins', {
+    ...appContext,
+    toolInput: input,
+  });
 
-  async execute(
-    input: SimilarInput,
-    appContext: RequestContext,
-    _sdkContext: SdkContext,
-  ): Promise<SimilarOutput> {
-    logger.debug('Finding similar proteins', {
-      ...appContext,
-      toolInput: input,
-    });
+  const params: FindSimilarParams = {
+    query: input.query,
+    similarityType: input.similarityType,
+    threshold: input.threshold,
+    limit: input.limit,
+  };
 
-    const params: FindSimilarParams = {
-      query: input.query,
-      similarityType: input.similarityType,
-      threshold: input.threshold,
-      limit: input.limit,
-    };
+  const proteinService = container.resolve<ProteinServiceClass>(ProteinService);
+  const result: FindSimilarResult = await proteinService.findSimilar(
+    params,
+    appContext,
+  );
 
-    const result: FindSimilarResult = await this.proteinService.findSimilar(
-      params,
-      appContext,
-    );
+  logger.info('Similarity search completed', {
+    ...appContext,
+    resultCount: result.results.length,
+  });
 
-    logger.info('Similarity search completed', {
-      ...appContext,
-      resultCount: result.results.length,
-    });
-
-    return result;
-  }
+  return result;
 }
 
 function responseFormatter(result: SimilarOutput): ContentBlock[] {
@@ -164,16 +158,6 @@ export const proteinFindSimilarTool: ToolDefinition<
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   annotations: TOOL_ANNOTATIONS,
-  logic: withToolAuth(
-    ['tool:protein:search'],
-    async (input, appContext, sdkContext) => {
-      const logic = new ProteinFindSimilarLogic(
-        (
-          globalThis as { container?: { resolve: (token: symbol) => unknown } }
-        ).container?.resolve(ProteinService) as ProteinServiceClass,
-      );
-      return logic.execute(input, appContext, sdkContext);
-    },
-  ),
+  logic: withToolAuth(['tool:protein:search'], proteinFindSimilarLogic),
   responseFormatter,
 };

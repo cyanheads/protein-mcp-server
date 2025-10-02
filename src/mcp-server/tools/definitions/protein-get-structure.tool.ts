@@ -3,7 +3,7 @@
  * @module src/mcp-server/tools/definitions/protein-get-structure.tool
  */
 import type { ContentBlock } from '@modelcontextprotocol/sdk/types.js';
-import { inject, injectable } from 'tsyringe';
+import { container } from 'tsyringe';
 import { z } from 'zod';
 
 import { ProteinService } from '@/container/tokens.js';
@@ -132,44 +132,38 @@ const OutputSchema = z
 type GetStructureInput = z.infer<typeof InputSchema>;
 type GetStructureOutput = z.infer<typeof OutputSchema>;
 
-@injectable()
-class ProteinGetStructureLogic {
-  constructor(
-    @inject(ProteinService) private proteinService: ProteinServiceClass,
-  ) {}
+async function proteinGetStructureLogic(
+  input: GetStructureInput,
+  appContext: RequestContext,
+  _sdkContext: SdkContext,
+): Promise<GetStructureOutput> {
+  logger.debug('Fetching protein structure', {
+    ...appContext,
+    toolInput: input,
+  });
 
-  async execute(
-    input: GetStructureInput,
-    appContext: RequestContext,
-    _sdkContext: SdkContext,
-  ): Promise<GetStructureOutput> {
-    logger.debug('Fetching protein structure', {
-      ...appContext,
-      toolInput: input,
-    });
+  const options: GetStructureOptions = {
+    format: input.format,
+    includeCoordinates: input.includeCoordinates,
+    includeExperimentalData: input.includeExperimentalData,
+    includeAnnotations: input.includeAnnotations,
+  };
 
-    const options: GetStructureOptions = {
-      format: input.format,
-      includeCoordinates: input.includeCoordinates,
-      includeExperimentalData: input.includeExperimentalData,
-      includeAnnotations: input.includeAnnotations,
-    };
+  const proteinService = container.resolve<ProteinServiceClass>(ProteinService);
+  const result: ProteinStructure = await proteinService.getStructure(
+    input.pdbId.toUpperCase(),
+    options,
+    appContext,
+  );
 
-    const result: ProteinStructure = await this.proteinService.getStructure(
-      input.pdbId.toUpperCase(),
-      options,
-      appContext,
-    );
+  logger.info('Protein structure retrieved', {
+    ...appContext,
+    pdbId: result.pdbId,
+    format: result.structure.format,
+    chainCount: result.structure.chains.length,
+  });
 
-    logger.info('Protein structure retrieved', {
-      ...appContext,
-      pdbId: result.pdbId,
-      format: result.structure.format,
-      chainCount: result.structure.chains.length,
-    });
-
-    return result;
-  }
+  return result;
 }
 
 function responseFormatter(result: GetStructureOutput): ContentBlock[] {
@@ -217,16 +211,6 @@ export const proteinGetStructureTool: ToolDefinition<
   inputSchema: InputSchema,
   outputSchema: OutputSchema,
   annotations: TOOL_ANNOTATIONS,
-  logic: withToolAuth(
-    ['tool:protein:read'],
-    async (input, appContext, sdkContext) => {
-      const logic = new ProteinGetStructureLogic(
-        (
-          globalThis as { container?: { resolve: (token: symbol) => unknown } }
-        ).container?.resolve(ProteinService) as ProteinServiceClass,
-      );
-      return logic.execute(input, appContext, sdkContext);
-    },
-  ),
+  logic: withToolAuth(['tool:protein:read'], proteinGetStructureLogic),
   responseFormatter,
 };
