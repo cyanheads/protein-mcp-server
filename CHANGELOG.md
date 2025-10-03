@@ -6,16 +6,20 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- **Comprehensive Test Coverage**: Created complete unit test suites for all 4 stable protein tools (`protein_search_structures`, `protein_get_structure`, `protein_find_similar`, `protein_track_ligands`) with 97 test cases covering functionality, input validation, error handling, and response formatting.
-- **Ligand Chemical Properties**: Added `getLigandChemicalProperties` function to fetch molecular formula and weight from RCSB GraphQL API.
+- **Comprehensive Unit Tests**: Introduced a full suite of unit tests for the core protein tools (`protein_search_structures`, `protein_get_structure`, `protein_find_similar`, `protein_track_ligands`), adding test coverage to ensure stability and correctness.
+- **Ligand Chemical Properties**: `protein_track_ligands` now fetches and displays chemical properties like molecular weight and formula using a new `getLigandChemicalProperties` function.
 
 ### Changed
 
-- **Improved Structural Similarity Search**: Optimized `protein_find_similar` to perform sequential pairwise alignments (max 10 structures) with rate limiting to avoid RCSB API timeouts.
+- **Upgraded Structural Similarity Search**: The `protein_find_similar` tool's structural search now performs pairwise alignments on candidate structures, providing accurate TM-scores and RMSD values instead of relying solely on shape similarity.
+- **Refactored GraphQL Client**: Replaced the manual `fetch` implementation for the RCSB GraphQL API with the official `@rcsb/rcsb-api-tools` library for improved reliability and maintainability.
+- **Intelligent Data Merging**: `protein_get_structure` now intelligently merges metadata (like organism names) with data from coordinate files (like sequences) to provide a more complete model of each chain.
 
 ### Fixed
 
-- **`protein_find_similar`**: Fixed alignment service failures by limiting concurrent alignments and adding delays between API calls.
+- **Alignment Service Stability**: Corrected the request format for the RCSB Alignment service and improved handling of optional chain IDs to prevent failures.
+- **Robust Error Handling**: `fetchWithTimeout` now correctly throws an `McpError` on non-2xx HTTP responses, ensuring upstream services handle failures gracefully.
+- **Data Nullability**: Improved type definitions to handle nullable fields from external APIs, preventing runtime errors.
 - **`protein_track_ligands`**: Now correctly displays molecular weight, formula, and enhanced chemical properties for ligands.
 
 ### Technical

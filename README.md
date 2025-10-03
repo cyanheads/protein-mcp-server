@@ -5,7 +5,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-1.0.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2025--06--18-8A2BE2.svg?style=flat-square)](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2025-06-18/changelog.mdx) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.19.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Status](https://img.shields.io/badge/Status-Development-orange.svg?style=flat-square)](https://github.com/cyanheads/protein-mcp-server/issues) [![TypeScript](https://img.shields.io/badge/TypeScript-^5.9.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.2.23-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-1.0.4-blue.svg?style=flat-square)](./CHANGELOG.md) [![MCP Spec](https://img.shields.io/badge/MCP%20Spec-2025--06--18-8A2BE2.svg?style=flat-square)](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/docs/specification/2025-06-18/changelog.mdx) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.19.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Status](https://img.shields.io/badge/Status-Development-orange.svg?style=flat-square)](https://github.com/cyanheads/protein-mcp-server/issues) [![TypeScript](https://img.shields.io/badge/TypeScript-^5.9.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.2.23-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -17,10 +17,10 @@ This server provides a powerful suite of tools for accessing and analyzing prote
 
 | Tool Name                    | Status                | Description                                                                                               |
 | :--------------------------- | :-------------------- | :-------------------------------------------------------------------------------------------------------- |
-| `protein_search_structures`  | ✅ **Stable**         | Searches for protein structures using keywords, filters, pagination, and sorting.                         |
-| `protein_get_structure`      | ✅ **Stable**         | Fetches one or more protein structures by their PDB IDs, returning either full data or concise summaries. |
-| `protein_find_similar`       | ✅ **Stable**         | Finds proteins with similar sequence or structure.                                                        |
-| `protein_track_ligands`      | ✅ **Stable**         | Finds protein structures containing specific ligands, cofactors, or drugs.                                |
+| `protein_search_structures`  | ✅ **Testing**         | Searches for protein structures using keywords, filters, pagination, and sorting.                         |
+| `protein_get_structure`      | ✅ **Testing**         | Fetches one or more protein structures by their PDB IDs, returning either full data or concise summaries. |
+| `protein_find_similar`       | ✅ **Testing**         | Finds proteins with similar sequence or structure.                                                        |
+| `protein_track_ligands`      | ✅ **Testing**         | Finds protein structures containing specific ligands, cofactors, or drugs.                                |
 | `protein_compare_structures` | 🟡 **In Development** | Performs a detailed side-by-side comparison of 2-10 protein structures.                                   |
 | `protein_analyze_collection` | 🟡 **In Development** | Performs statistical analysis on the protein structure database.                                          |
 
