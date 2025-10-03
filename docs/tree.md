@@ -1,6 +1,6 @@
 # protein-mcp-server - Directory Structure
 
-Generated on: 2025-10-02 22:36:40
+Generated on: 2025-10-03 01:31:13
 
 ```
 protein-mcp-server
@@ -217,6 +217,10 @@ protein-mcp-server
 │   │   │   └── definitions
 │   │   ├── tools
 │   │   │   └── definitions
+│   │   │       ├── protein-find-similar.test.ts
+│   │   │       ├── protein-get-structure.test.ts
+│   │   │       ├── protein-search-structures.test.ts
+│   │   │       └── protein-track-ligands.test.ts
 │   │   └── transports
 │   │       └── auth
 │   │           └── lib

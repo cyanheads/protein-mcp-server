@@ -2,13 +2,58 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- **Comprehensive Test Coverage**: Created complete unit test suites for all 4 stable protein tools (`protein_search_structures`, `protein_get_structure`, `protein_find_similar`, `protein_track_ligands`) with 97 test cases covering functionality, input validation, error handling, and response formatting.
+- **Ligand Chemical Properties**: Added `getLigandChemicalProperties` function to fetch molecular formula and weight from RCSB GraphQL API.
+
+### Changed
+
+- **Improved Structural Similarity Search**: Optimized `protein_find_similar` to perform sequential pairwise alignments (max 10 structures) with rate limiting to avoid RCSB API timeouts.
+
+### Fixed
+
+- **`protein_find_similar`**: Fixed alignment service failures by limiting concurrent alignments and adding delays between API calls.
+- **`protein_track_ligands`**: Now correctly displays molecular weight, formula, and enhanced chemical properties for ligands.
+
+### Technical
+
+- **Enhanced Tool Outputs**: Significantly improved the `responseFormatter` for all stable tools to provide richer, more informative output:
+  - **`protein_search_structures`**:
+    - Now shows all organisms (up to 3) instead of truncating to first one
+    - Added pagination indicators (e.g., "page 1 of 4")
+    - Abbreviated experimental methods for cleaner display (X-RAY, EM, NMR)
+    - Better handling of multi-organism structures
+  - **`protein_get_structure`**:
+    - Added R-factor and R-free values to experimental data display
+    - Included primary citation information with authors, journal, year, and DOI
+    - Display functional keywords when available
+    - Show chain organism information
+    - Enhanced chain details formatting
+  - **`protein_find_similar`**:
+    - Added ranking indicators (Rank #1, #2, etc.)
+    - Always display coverage percentage when available
+    - Prioritize shape similarity score for structure searches
+    - Include organism names (up to 2) for each result
+    - Added quality indicators (⭐ High quality) for strong matches
+    - Multi-line format with better metric organization
+  - **`protein_track_ligands`**:
+    - Display molecular weight alongside formula
+    - Show organism names for each structure
+    - Better ligand count formatting (instances/instance)
+    - Include binding site statistics when requested
+    - More prominent display of chemical properties
+
 ## [1.0.3] - 2025-10-02
 
 ### Changed
+
 - **Comprehensive Logging**: Integrated structured, context-aware logging (`pino`) across all protein services (`rcsb`, `pdbe`, `uniprot`) and the core `ProteinService` orchestrator. Every external API request, response, and error is now logged with detailed context (including request bodies and error messages) to significantly improve debuggability and observability.
 - **Find Similar Tool**:
-    - Added a `chainId` parameter to the `protein_find_similar` tool to allow for more specific structural similarity searches.
-    - Improved the `responseFormatter` to include more detailed metrics like `ShapeSimilarity` and `E-value`, and to provide a clearer summary of the query and results.
+  - Added a `chainId` parameter to the `protein_find_similar` tool to allow for more specific structural similarity searches.
+  - Improved the `responseFormatter` to include more detailed metrics like `ShapeSimilarity` and `E-value`, and to provide a clearer summary of the query and results.
 - **Search Structures Tool**: Overhauled the `responseFormatter` for `protein_search_structures` to present a clean, human-readable summary of search results instead of raw JSON.
 - **README Update**: Updated the status of `protein_compare_structures` and `protein_analyze_collection` to "Failure" in the `README.md` to accurately reflect their current state. Also added notes about the low sequence identity values in `protein_find_similar`.
 - **AGENTS.md**: Updated the "Known Issues" section in `AGENTS.md` with more precise debugging summaries and next steps for the failing `protein_compare_structures` and `protein_analyze_collection` tools.
