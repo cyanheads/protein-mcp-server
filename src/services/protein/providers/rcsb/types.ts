@@ -46,6 +46,14 @@ export interface RcsbGraphQLResponse {
   data?: {
     entry?: RcsbGraphQLEntry;
     entries?: RcsbGraphQLEntry[];
+    chem_comp?: {
+      chem_comp?: {
+        id: string;
+        name: string;
+        formula?: string;
+        formula_weight?: number;
+      };
+    };
   };
 }
 

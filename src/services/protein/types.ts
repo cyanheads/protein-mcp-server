@@ -121,6 +121,8 @@ export interface SearchStructuresResult {
   results: SearchResultEntry[];
   totalCount: number;
   hasMore: boolean;
+  limit: number;
+  offset: number;
 }
 
 /**
@@ -223,6 +225,7 @@ export interface AlignmentResult {
   alignedResidues: number;
   sequenceIdentity: number;
   tmscore?: number | undefined;
+  queryLength?: number;
 }
 
 /**

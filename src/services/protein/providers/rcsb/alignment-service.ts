@@ -30,6 +30,7 @@ interface RcsbScore {
 interface RcsbAlignmentSummary {
   scores: RcsbScore[];
   n_aln_residue_pairs: number;
+  query_len: number;
 }
 
 interface RcsbAlignmentResultData {
@@ -50,6 +51,7 @@ interface RcsbAlignmentResponse {
   rmsd: number;
   tm_score: number;
   'aligned-residues': number;
+  query_length: number;
 }
 
 function mapAlignmentMethod(method: AlignmentMethod): string {
@@ -64,69 +66,102 @@ function mapAlignmentMethod(method: AlignmentMethod): string {
 async function submitAlignmentJob(
   pdbId1: string,
   pdbId2: string,
-  chainId1: string,
-  chainId2: string,
+  chainId1: string | undefined,
+  chainId2: string | undefined,
   algorithm: string,
   context: RequestContext,
 ): Promise<string> {
-  const queryData = {
-    mode: 'pairwise',
-    method: { name: algorithm },
-    structures: [
-      { entry_id: pdbId1, selection: { asym_id: chainId1 } },
-      { entry_id: pdbId2, selection: { asym_id: chainId2 } },
-    ],
+  const structure1: { entry_id: string; selection?: { asym_id: string } } = {
+    entry_id: pdbId1,
+  };
+  if (chainId1) {
+    structure1.selection = { asym_id: chainId1 };
+  }
+
+  const structure2: { entry_id: string; selection?: { asym_id: string } } = {
+    entry_id: pdbId2,
+  };
+  if (chainId2) {
+    structure2.selection = { asym_id: chainId2 };
+  }
+
+  const query = {
+    context: {
+      mode: 'pairwise' as const,
+      method: { name: algorithm },
+      structures: [structure1, structure2],
+    },
   };
 
   const formData = new URLSearchParams();
-  formData.append('query', JSON.stringify(queryData));
+  const queryString = JSON.stringify(query);
+  formData.append('query', queryString);
 
-  logger.debug('Submitting alignment job as form data', {
+  logger.debug('Submitting alignment job as x-www-form-urlencoded', {
     ...context,
     pdbId1,
     pdbId2,
-    chainId1,
-    chainId2,
     algorithm,
-    formData: formData.toString(),
+    query: queryString,
     url: `${RCSB_ALIGNMENT_API_URL}/submit`,
   });
 
-  const response = await fetchWithTimeout(`${RCSB_ALIGNMENT_API_URL}/submit`, {
-    method: 'POST',
-    body: formData,
-    timeout: REQUEST_TIMEOUT,
-  });
+  try {
+    const response = await fetchWithTimeout(
+      `${RCSB_ALIGNMENT_API_URL}/submit`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: formData.toString(),
+        timeout: REQUEST_TIMEOUT,
+      },
+    );
 
-  if (!response.ok) {
-    const errorBody = await response.text();
-    logger.error('RCSB Alignment job submission failed', {
+    if (!response.ok) {
+      const errorBody = await response.text();
+      logger.error('RCSB Alignment job submission failed', {
+        ...context,
+        pdbId1,
+        pdbId2,
+        algorithm,
+        status: response.status,
+        statusText: response.statusText,
+        requestBody: queryString,
+        responseBody: errorBody,
+      });
+      throw new McpError(
+        JsonRpcErrorCode.ServiceUnavailable,
+        `RCSB Alignment job submission failed: ${response.status} ${response.statusText}`,
+        { responseBody: errorBody },
+      );
+    }
+    const ticket = (await response.json()) as AlignmentTicket;
+
+    logger.debug('Alignment job submitted successfully', {
       ...context,
       pdbId1,
       pdbId2,
-      chainId1,
-      chainId2,
-      algorithm,
-      status: response.status,
-      statusText: response.statusText,
-      requestBody: formData.toString(),
-      responseBody: errorBody,
+      ticketId: ticket.query_id,
     });
+
+    return ticket.query_id;
+  } catch (error) {
+    logger.error('Error during alignment job submission', {
+      ...context,
+      error,
+    });
+    if (error instanceof McpError) {
+      throw error;
+    }
+    const errorMessage = error instanceof Error ? error.message : String(error);
     throw new McpError(
       JsonRpcErrorCode.ServiceUnavailable,
-      `RCSB Alignment job submission failed: ${response.status} ${response.statusText}`,
+      `Alignment job submission network error: ${errorMessage}`,
+      { originalError: error },
     );
   }
-  const ticket = (await response.json()) as AlignmentTicket;
-
-  logger.debug('Alignment job submitted successfully', {
-    ...context,
-    pdbId1,
-    pdbId2,
-    ticketId: ticket.query_id,
-  });
-
-  return ticket.query_id;
 }
 
 async function getAlignmentResults(
@@ -181,6 +216,7 @@ async function getAlignmentResults(
       const alignmentResponse = {
         ...scores,
         'aligned-residues': alignmentData.summary.n_aln_residue_pairs,
+        query_length: alignmentData.summary.query_len,
       } as RcsbAlignmentResponse;
 
       logger.debug('Alignment results retrieved', {
@@ -215,11 +251,11 @@ async function getAlignmentResults(
   );
 }
 
-async function alignPairwise(
+export async function alignPairwise(
   pdbId1: string,
   pdbId2: string,
-  chainId1: string,
-  chainId2: string,
+  chainId1: string | undefined,
+  chainId2: string | undefined,
   algorithm: string,
   context: RequestContext,
 ): Promise<RcsbAlignmentResponse> {
@@ -254,8 +290,8 @@ export async function compareStructures(
   const algorithm = mapAlignmentMethod(
     params.alignmentMethod || AlignmentMethod.CEALIGN,
   );
-  const getChainForIndex = (index: number): string =>
-    params.chainSelections?.[index]?.chain || 'A';
+  const getChainForIndex = (index: number): string | undefined =>
+    params.chainSelections?.[index]?.chain;
 
   const pairwiseComparisons: CompareStructuresResult['pairwiseComparisons'] =
     [];
@@ -337,6 +373,7 @@ export async function compareStructures(
       alignedResidues: Math.round(avgAlignedResidues),
       sequenceIdentity: firstAlignment.sequence_identity,
       tmscore: firstAlignment['tm_score'],
+      queryLength: firstAlignment.query_length,
     },
     pairwiseComparisons,
     conformationalAnalysis: undefined,

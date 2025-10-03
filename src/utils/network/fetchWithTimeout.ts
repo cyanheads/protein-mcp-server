@@ -77,6 +77,38 @@ export async function fetchWithTimeout(
         requestContext,
       );
     }
+
+    // Check if the response is not ok (status outside 200-299)
+    if (!response.ok) {
+      if (requestContext) {
+        logger.error(
+          `Fetch failed for ${urlString} with status ${response.status}.`,
+          {
+            ...requestContext,
+            errorSource: 'FetchHttpError',
+            statusCode: response.status,
+            statusText: response.statusText,
+          },
+        );
+      }
+      throw new McpError(
+        JsonRpcErrorCode.ServiceUnavailable,
+        `HTTP error! Status: ${response.status} ${response.statusText}`,
+        requestContext
+          ? {
+              ...requestContext,
+              errorSource: 'FetchHttpError',
+              statusCode: response.status,
+              statusText: response.statusText,
+            }
+          : {
+              errorSource: 'FetchHttpError',
+              statusCode: response.status,
+              statusText: response.statusText,
+            },
+      );
+    }
+
     return response;
   } catch (error) {
     clearTimeout(timeoutId);

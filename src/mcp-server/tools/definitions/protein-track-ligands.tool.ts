@@ -192,29 +192,52 @@ async function proteinTrackLigandsLogic(
 }
 
 function responseFormatter(result: LigandOutput): ContentBlock[] {
-  const summary = [
-    `Ligand: ${result.ligand.name} (${result.ligand.chemicalId})`,
+  const chemicalProperties = [
     result.ligand.formula ? `Formula: ${result.ligand.formula}` : '',
-    `Found in ${result.totalCount} structure(s)`,
+    result.ligand.molecularWeight
+      ? `MW: ${result.ligand.molecularWeight.toFixed(2)} Da`
+      : '',
   ]
     .filter(Boolean)
-    .join('\n');
+    .join(' | ');
+
+  const summary = `Ligand: ${result.ligand.name} (${result.ligand.chemicalId})${chemicalProperties ? `\n${chemicalProperties}` : ''}\nFound in ${result.totalCount} structure(s)`;
 
   const preview =
     result.structures.length > 0
       ? result.structures
           .slice(0, 5)
-          .map(
-            (s) =>
-              `• ${s.pdbId}: ${s.title.slice(0, 50)}${s.resolution ? ` (${s.resolution.toFixed(2)}Å)` : ''} - ${s.ligandCount} ligand(s)`,
-          )
-          .join('\n')
+          .map((s) => {
+            const organismStr =
+              s.organism.length > 0
+                ? `\n  Organism: ${s.organism.slice(0, 2).join(', ')}`
+                : '';
+            const instanceStr = `${s.ligandCount} instance${s.ligandCount !== 1 ? 's' : ''}`;
+            const resolutionStr = s.resolution
+              ? ` | ${s.resolution.toFixed(2)}Å`
+              : '';
+
+            let bindingSiteInfo = '';
+            if (s.bindingSites && s.bindingSites.length > 0) {
+              const totalResidues = s.bindingSites.reduce(
+                (sum, site) => sum + site.residues.length,
+                0,
+              );
+              const chains = [
+                ...new Set(s.bindingSites.map((site) => site.chain)),
+              ].join(', ');
+              bindingSiteInfo = `\n  Binding Site: ${s.bindingSites.length} sites on chain(s) ${chains} (${totalResidues} residues)`;
+            }
+
+            return `• ${s.pdbId}: ${s.title.slice(0, 45)} (${instanceStr}${resolutionStr})${organismStr}${bindingSiteInfo}`;
+          })
+          .join('\n\n')
       : 'No structures found.';
 
   return [
     {
       type: 'text',
-      text: `${summary}\n\n${preview}`,
+      text: `${summary}\n\n${preview}${result.structures.length > 5 ? `\n\n... and ${result.totalCount - 5} more structures` : ''}`,
     },
   ];
 }

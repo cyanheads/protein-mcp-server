@@ -18,7 +18,11 @@ import type {
   TrackLigandsResult,
 } from '../../types.js';
 import { RCSB_SEARCH_URL, REQUEST_TIMEOUT } from './config.js';
-import { enrichSearchResults, getBindingSiteInfo } from './graphql-client.js';
+import {
+  enrichSearchResults,
+  getBindingSiteInfo,
+  getLigandChemicalProperties,
+} from './graphql-client.js';
 import { buildSearchQuery, getAnalysisFacet } from './query-builder.js';
 import type { RcsbSearchResponse } from './types.js';
 
@@ -111,6 +115,8 @@ export async function searchStructures(
       results,
       totalCount: data.total_count ?? 0,
       hasMore: (data.total_count ?? 0) > (params.offset ?? 0) + results.length,
+      limit: params.limit ?? 25,
+      offset: params.offset ?? 0,
     };
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
@@ -309,21 +315,58 @@ export async function trackLigands(
         }),
       );
 
-    logger.info('RCSB ligand tracking completed', {
-      ...context,
-      ligandName: params.ligandQuery.value,
-      totalCount: data.total_count ?? 0,
-      structureCount: structuresWithBindingSites.length,
-    });
+    // Fetch ligand chemical properties
+    let ligandProperties: {
+      name: string;
+      chemicalId: string;
+      formula?: string;
+      molecularWeight?: number;
+    };
 
-    return {
-      ligand: {
+    if (params.ligandQuery.type === 'chemicalId' && params.ligandQuery.value) {
+      try {
+        ligandProperties = await getLigandChemicalProperties(
+          params.ligandQuery.value,
+          context,
+        );
+        logger.debug('Successfully retrieved ligand chemical properties', {
+          ...context,
+          ligandId: params.ligandQuery.value,
+          ligandProperties,
+        });
+      } catch (error) {
+        logger.warning('Failed to fetch ligand chemical properties', {
+          ...context,
+          ligandId: params.ligandQuery.value,
+          error,
+        });
+        ligandProperties = {
+          name: params.ligandQuery.value,
+          chemicalId: params.ligandQuery.value.toUpperCase(),
+        };
+      }
+    } else {
+      ligandProperties = {
         name: params.ligandQuery.value,
         chemicalId:
           params.ligandQuery.type === 'chemicalId'
             ? params.ligandQuery.value.toUpperCase()
             : '',
-      },
+      };
+    }
+
+    logger.info('RCSB ligand tracking completed', {
+      ...context,
+      ligandName: params.ligandQuery.value,
+      totalCount: data.total_count ?? 0,
+      structureCount: structuresWithBindingSites.length,
+      hasChemicalProperties: !!(
+        ligandProperties.formula || ligandProperties.molecularWeight
+      ),
+    });
+
+    return {
+      ligand: ligandProperties,
       structures: structuresWithBindingSites,
       totalCount: data.total_count ?? 0,
     };

@@ -90,7 +90,7 @@ const OutputSchema = z
           pdbId: z.string().describe('4-character PDB identifier.'),
           title: z.string().describe('Structure title/description.'),
           organism: z
-            .array(z.string())
+            .array(z.string().nullable())
             .describe('Source organism(s) scientific names.'),
           experimentalMethod: z
             .string()
@@ -116,6 +116,12 @@ const OutputSchema = z
     hasMore: z
       .boolean()
       .describe('Whether more results are available for pagination.'),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .describe('Offset used for this result set.'),
+    limit: z.number().int().min(1).describe('Limit used for this result set.'),
   })
   .describe('Protein structure search results.');
 
@@ -156,22 +162,36 @@ async function proteinSearchStructuresLogic(
   };
 
   const proteinService = container.resolve<ProteinServiceClass>(ProteinService);
-  const result: SearchStructuresResult = await proteinService.searchStructures(
-    params,
-    appContext,
-  );
+  const searchResult: SearchStructuresResult =
+    await proteinService.searchStructures(params, appContext);
 
   logger.info('Protein search completed', {
     ...appContext,
-    resultCount: result.results.length,
-    totalCount: result.totalCount,
+    resultCount: searchResult.results.length,
+    totalCount: searchResult.totalCount,
   });
 
-  return result;
+  return {
+    ...searchResult,
+    offset: input.offset,
+    limit: input.limit,
+  };
 }
 
 function responseFormatter(result: SearchOutput): ContentBlock[] {
-  const summary = `Found ${result.totalCount} structure(s)${result.hasMore ? ` (showing ${result.results.length})` : ''}`;
+  // Calculate pagination info
+  const limit = result.limit ?? 25;
+  const offset = result.offset ?? 0;
+  const totalPages = Math.ceil(result.totalCount / limit) || 1;
+  const currentPage = Math.floor(offset / limit) + 1;
+  const hasMore =
+    result.hasMore ?? result.totalCount > offset + result.results.length;
+
+  const summary = `Found ${result.totalCount} structure(s)${
+    hasMore || totalPages > 1
+      ? ` (showing ${result.results.length}, page ${currentPage} of ${totalPages})`
+      : ''
+  }`;
 
   const preview =
     result.results.length > 0
@@ -179,10 +199,20 @@ function responseFormatter(result: SearchOutput): ContentBlock[] {
           .slice(0, 10)
           .map((r) => {
             const details = [];
-            if (r.organism.length > 0)
-              details.push(r.organism[0]?.substring(0, 25));
+            // Show all organisms (up to 3), not just first one
+            if (r.organism.length > 0) {
+              const organisms = r.organism.filter((o) => o).slice(0, 3);
+              if (organisms.length > 0) {
+                details.push(organisms.join(', '));
+              }
+            }
             if (r.resolution) details.push(`${r.resolution.toFixed(2)}Å`);
-            details.push(r.experimentalMethod);
+            // Abbreviate experimental method for cleaner display
+            const methodAbbrev = r.experimentalMethod
+              .replace('X-RAY DIFFRACTION', 'X-RAY')
+              .replace('ELECTRON MICROSCOPY', 'EM')
+              .replace('SOLUTION NMR', 'NMR');
+            details.push(methodAbbrev);
             return `• ${r.pdbId}: ${r.title.slice(0, 60)}${details.length > 0 ? `\n  ${details.join(' | ')}` : ''}`;
           })
           .join('\n')
@@ -191,7 +221,7 @@ function responseFormatter(result: SearchOutput): ContentBlock[] {
   return [
     {
       type: 'text',
-      text: `${summary}\n\n${preview}${result.results.length > 10 ? `\n... and ${result.results.length - 10} more` : ''}`,
+      text: `${summary}\n\n${preview}${result.results.length > 10 ? `\n\n... and ${result.results.length - 10} more in this page` : ''}`,
     },
   ];
 }

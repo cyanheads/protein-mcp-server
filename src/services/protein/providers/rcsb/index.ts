@@ -26,6 +26,8 @@ import type {
   SearchStructuresResult,
   TrackLigandsParams,
   TrackLigandsResult,
+  Chain,
+  ChainType,
 } from '../../types.js';
 import { StructureFormat } from '../../types.js';
 import { RCSB_BASE_URL } from './config.js';
@@ -92,35 +94,72 @@ export class RcsbProteinProvider implements IProteinProvider {
       const metadata = await fetchStructureMetadata(normalizedId, context);
 
       // Fetch structure file if coordinates requested
-      let structureData: ProteinStructure['structure'] | undefined;
+      let fileData: ProteinStructure['structure'] | undefined;
       if (options.includeCoordinates !== false) {
         logger.debug('Fetching coordinate data for structure', {
           ...context,
           normalizedId,
           format: options.format ?? StructureFormat.MMCIF,
         });
-        structureData = await fetchStructureFile(
+        fileData = await fetchStructureFile(
           normalizedId,
           options.format ?? StructureFormat.MMCIF,
           context,
         );
       }
 
-      logger.info('Successfully retrieved protein structure', {
+      // Merge metadata chains with file-derived chains
+      const mergedChains = new Map<string, Partial<Chain>>();
+
+      // Start with metadata chains (has organism info)
+      if (metadata.structure?.chains) {
+        for (const chain of metadata.structure.chains) {
+          mergedChains.set(chain.id, { ...chain });
+        }
+      }
+
+      // Merge in file data (has sequence, more accurate length)
+      if (fileData?.chains) {
+        for (const chain of fileData.chains) {
+          const existing = mergedChains.get(chain.id) || {};
+          mergedChains.set(chain.id, { ...existing, ...chain });
+        }
+      }
+
+      const finalChains: Chain[] = Array.from(mergedChains.values()).map(
+        (c, index) => {
+          const chain: Chain = {
+            id: c.id ?? `chain_${index}`,
+            type: (c.type ?? 'protein') as ChainType,
+            length: c.length ?? 0,
+          };
+          if (c.sequence) {
+            chain.sequence = c.sequence;
+          }
+          if (c.organism) {
+            chain.organism = c.organism;
+          }
+          return chain;
+        },
+      );
+
+      const finalStructureData = {
+        format: fileData?.format ?? StructureFormat.JSON,
+        data: fileData?.data ?? {},
+        chains: finalChains,
+      };
+
+      logger.info('Successfully retrieved and merged protein structure data', {
         ...context,
         normalizedId,
-        hasCoordinates: !!structureData,
-        chainCount: structureData?.chains.length ?? 0,
+        hasCoordinates: !!fileData,
+        chainCount: finalChains.length,
       });
 
       return {
         pdbId: normalizedId,
         title: metadata.title,
-        structure: structureData ?? {
-          format: StructureFormat.JSON,
-          data: {},
-          chains: [],
-        },
+        structure: finalStructureData,
         experimental: metadata.experimental,
         annotations: metadata.annotations,
       };

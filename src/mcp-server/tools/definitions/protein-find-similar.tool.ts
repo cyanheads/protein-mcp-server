@@ -190,27 +190,74 @@ function responseFormatter(result: SimilarOutput): ContentBlock[] {
     result.results.length > 0
       ? result.results
           .slice(0, 5)
-          .map((r) => {
-            const metrics = [];
-            if (r.similarity.sequenceIdentity !== undefined)
-              metrics.push(`${r.similarity.sequenceIdentity.toFixed(1)}% ID`);
-            if (r.similarity.tmscore !== undefined)
-              metrics.push(`TM=${r.similarity.tmscore.toFixed(2)}`);
-            if (r.similarity.rmsd !== undefined)
-              metrics.push(`RMSD=${r.similarity.rmsd.toFixed(2)}Å`);
-            if (r.similarity.shapeSimilarity !== undefined)
-              metrics.push(`Shape=${r.similarity.shapeSimilarity.toFixed(2)}`);
-            if (r.similarity.eValue !== undefined)
-              metrics.push(`E=${r.similarity.eValue.toExponential(1)}`);
-            return `• ${r.pdbId}: ${r.title.slice(0, 50)} ${metrics.length > 0 ? `(${metrics.join(', ')})` : ''}`;
+          .map((r, index) => {
+            const sequenceMetrics = [];
+            const structureMetrics = [];
+
+            // Coverage
+            if (r.coverage !== undefined) {
+              sequenceMetrics.push(`Cov: ${r.coverage.toFixed(0)}%`);
+            }
+
+            // Sequence similarity
+            if (r.similarity.sequenceIdentity !== undefined) {
+              sequenceMetrics.push(
+                `${r.similarity.sequenceIdentity.toFixed(1)}% ID`,
+              );
+            }
+            if (r.similarity.eValue !== undefined) {
+              sequenceMetrics.push(`E=${r.similarity.eValue.toExponential(1)}`);
+            }
+
+            // Structure similarity
+            if (r.similarity.shapeSimilarity !== undefined) {
+              structureMetrics.push(
+                `Shape=${r.similarity.shapeSimilarity.toFixed(2)}`,
+              );
+            }
+            if (r.similarity.tmscore !== undefined) {
+              structureMetrics.push(`TM=${r.similarity.tmscore.toFixed(2)}`);
+            }
+            if (r.similarity.rmsd !== undefined) {
+              structureMetrics.push(`RMSD=${r.similarity.rmsd.toFixed(2)}Å`);
+            }
+
+            // Quality indicator
+            const isHighQuality = () => {
+              if (r.coverage === undefined) return false;
+              const normalizedIdentity =
+                (r.similarity.sequenceIdentity ?? 0) / 100;
+              const normalizedTm = r.similarity.tmscore ?? 0;
+              const compositeScore =
+                (r.coverage / 100) * Math.max(normalizedIdentity, normalizedTm);
+              return compositeScore > 0.7; // Threshold for high quality (e.g., >85% cov, >85% similarity)
+            };
+            if (isHighQuality()) {
+              sequenceMetrics.push('⭐ High quality');
+            }
+
+            const organismStr =
+              r.organism.length > 0
+                ? `  ${r.organism.slice(0, 2).join(', ')}`
+                : '';
+            const seqMetricStr =
+              sequenceMetrics.length > 0
+                ? `\n  Similarity: ${sequenceMetrics.join(' | ')}`
+                : '';
+            const structMetricStr =
+              structureMetrics.length > 0
+                ? `\n  Structure: ${structureMetrics.join(' | ')}`
+                : '';
+
+            return `• Rank #${index + 1} - ${r.pdbId}: ${r.title.slice(0, 45)}${organismStr}${seqMetricStr}${structMetricStr}`;
           })
-          .join('\n')
+          .join('\n\n') // Add more space between entries
       : 'No similar structures found.';
 
   return [
     {
       type: 'text',
-      text: `${summary}\n\n${preview}${result.results.length > 5 ? `\n... and ${result.totalCount - 5} more` : ''}`,
+      text: `${summary}\n\n${preview}${result.results.length > 5 ? `\n\n... and ${result.totalCount - 5} more` : ''}`,
     },
   ];
 }

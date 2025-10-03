@@ -9,8 +9,13 @@ import {
   logger,
   type RequestContext,
 } from '@/utils/index.js';
-import type { FindSimilarParams, FindSimilarResult } from '../../types.js';
+import type {
+  FindSimilarParams,
+  FindSimilarResult,
+  SimilarityResultEntry,
+} from '../../types.js';
 import { SimilarityType } from '../../types.js';
+import { alignPairwise } from './alignment-service.js';
 import { RCSB_SEARCH_URL, REQUEST_TIMEOUT } from './config.js';
 import { enrichSearchResults, getSequenceForPdbId } from './graphql-client.js';
 import type { RcsbSearchResponse } from './types.js';
@@ -147,15 +152,12 @@ export async function findSequenceSimilar(
       similarityType: 'sequence',
       results: enriched.map((e) => {
         const score = scoreMap.get(e.pdbId) ?? 0;
-        // RCSB returns sequence identity as score (0-100)
-        // E-value would require detailed alignment data not available in search results
         return {
           pdbId: e.pdbId,
           title: e.title,
           organism: e.organism,
           similarity: {
             sequenceIdentity: score,
-            // eValue, alignmentLength, coverage not available from search API
           },
         };
       }),
@@ -173,20 +175,19 @@ export async function findSequenceSimilar(
 }
 
 /**
- * Find structure-similar structures using RCSB structure motif search
+ * Find structure-similar structures using RCSB structure motif search and pairwise alignment
  */
 export async function findStructureSimilar(
   params: FindSimilarParams,
   context: RequestContext,
 ): Promise<FindSimilarResult> {
-  // Structural similarity search using RCSB structure motif
   const query = {
     type: 'terminal',
     service: 'structure',
     parameters: {
       value: {
         entry_id: params.query.value,
-        asym_id: params.chainId || 'A', // Allow chain selection, default to 'A'
+        asym_id: params.chainId || 'A',
       },
       operator: 'strict_shape_match',
     },
@@ -200,6 +201,7 @@ export async function findStructureSimilar(
         start: 0,
         rows: params.limit ?? 25,
       },
+      scoring_strategy: 'structure',
     },
   };
 
@@ -242,23 +244,146 @@ export async function findStructureSimilar(
       ...context,
       totalCount: data.total_count,
       resultCount: data.result_set?.length ?? 0,
-      rawResponse: JSON.stringify(data, null, 2),
     });
 
-    // Create a map of PDB ID to score for quick lookup
-    const scoreMap = new Map(
-      data.result_set?.map((r) => [r.identifier, r.score]) ?? [],
-    );
+    if (!data.result_set) {
+      return {
+        query: {
+          type: params.query.type,
+          identifier: params.query.value,
+        },
+        similarityType: 'structure',
+        results: [],
+        totalCount: 0,
+      };
+    }
+
+    const candidateIds = data.result_set.map((r) => r.identifier);
+
+    // Limit the number of structures to align to avoid timeouts
+    const maxAlignments = Math.min(candidateIds.length, params.limit ?? 25, 10);
+    const limitedCandidateIds = candidateIds.slice(0, maxAlignments);
+
+    logger.debug('Starting pairwise alignments for structural similarity', {
+      ...context,
+      totalCandidates: candidateIds.length,
+      alignmentLimit: limitedCandidateIds.length,
+      queryId: params.query.value,
+    });
+
+    // Perform pairwise alignments in parallel, but rate-limited.
+    // Use Promise.allSettled to ensure all alignments complete, even if some fail.
+    const alignmentPromises = limitedCandidateIds.map((id) => {
+      logger.debug(`Queueing alignment of ${params.query.value} with ${id}`, {
+        ...context,
+      });
+      const queryChain = params.chainId || 'A';
+      const candidateChain = 'A';
+      return alignPairwise(
+        params.query.value,
+        id,
+        queryChain,
+        candidateChain,
+        'jce', // Default algorithm
+        context,
+      )
+        .then((alignment) => ({
+          pdbId: id,
+          alignment,
+          status: 'fulfilled' as const,
+        }))
+        .catch((error: unknown) => ({
+          pdbId: id,
+          error: error instanceof Error ? error : new Error(String(error)),
+          status: 'rejected' as const,
+        }));
+    });
+
+    const alignmentResults = await Promise.allSettled(alignmentPromises);
+
+    const successfulAlignments = alignmentResults
+      .filter(
+        (result) =>
+          result.status === 'fulfilled' && result.value.status === 'fulfilled',
+      )
+      .map(
+        (result) =>
+          (
+            result as PromiseFulfilledResult<{
+              pdbId: string;
+              alignment: Awaited<ReturnType<typeof alignPairwise>>;
+            }>
+          ).value,
+      );
+
+    alignmentResults.forEach((result) => {
+      if (
+        result.status === 'rejected' ||
+        (result.status === 'fulfilled' && result.value.status === 'rejected')
+      ) {
+        const rejectedResult = (
+          result.status === 'fulfilled' ? result.value : result
+        ) as { pdbId: string; error: Error };
+        logger.warning(
+          `Failed to align ${params.query.value} with ${rejectedResult.pdbId}`,
+          {
+            ...context,
+            error: rejectedResult.error,
+          },
+        );
+      }
+    });
+
+    if (successfulAlignments.length === 0) {
+      return {
+        query: { type: params.query.type, identifier: params.query.value },
+        similarityType: 'structure',
+        results: [],
+        totalCount: data.total_count ?? 0,
+      };
+    }
 
     const enriched = await enrichSearchResults(
-      data.result_set?.map((r) => r.identifier) ?? [],
+      successfulAlignments.map((ar) => ar.pdbId),
       context,
     );
+    const enrichedMap = new Map(enriched.map((e) => [e.pdbId, e]));
 
-    logger.info('Structural similarity search completed', {
+    const results: SimilarityResultEntry[] = successfulAlignments
+      .map((ar) => {
+        if (!ar.alignment) return null;
+
+        const enrichedEntry = enrichedMap.get(ar.pdbId);
+        if (!enrichedEntry) return null;
+
+        const alignmentLength = ar.alignment['aligned-residues'] ?? 0;
+        const queryLength = ar.alignment.query_length ?? 0;
+
+        return {
+          pdbId: ar.pdbId,
+          title: enrichedEntry.title,
+          organism: enrichedEntry.organism,
+          similarity: {
+            tmscore: ar.alignment.tm_score,
+            rmsd: ar.alignment.rmsd,
+            sequenceIdentity: ar.alignment.sequence_identity,
+          },
+          alignmentLength: alignmentLength,
+          coverage:
+            queryLength > 0 && alignmentLength > 0
+              ? (alignmentLength / queryLength) * 100
+              : 0,
+        } as SimilarityResultEntry;
+      })
+      .filter((r): r is SimilarityResultEntry => r !== null)
+      .sort(
+        (a, b) => (b.similarity.tmscore ?? 0) - (a.similarity.tmscore ?? 0),
+      );
+
+    logger.info('Structural similarity search completed with alignments', {
       ...context,
       totalCount: data.total_count ?? 0,
-      enrichedCount: enriched.length,
+      resultCount: results.length,
     });
 
     return {
@@ -267,28 +392,7 @@ export async function findStructureSimilar(
         identifier: params.query.value,
       },
       similarityType: 'structure',
-      results: enriched.map((e) => {
-        const score = scoreMap.get(e.pdbId);
-        // RCSB structure search uses BioZernike 3D shape descriptors
-        // The score is a relevance/similarity score, NOT a TM-score from alignment
-        // TM-scores require explicit structural alignment (e.g., via RCSB Alignment API)
-        const result: {
-          pdbId: string;
-          title: string;
-          organism: string[];
-          similarity: { shapeSimilarity?: number };
-        } = {
-          pdbId: e.pdbId,
-          title: e.title,
-          organism: e.organism,
-          similarity: {},
-        };
-        if (score !== undefined) {
-          // Store raw BioZernike shape similarity score (no normalization)
-          result.similarity.shapeSimilarity = score;
-        }
-        return result;
-      }),
+      results,
       totalCount: data.total_count ?? 0,
     };
   } catch (error) {

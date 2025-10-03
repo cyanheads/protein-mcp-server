@@ -1,17 +1,40 @@
 /**
- * @fileoverview GraphQL client for RCSB PDB data access.
+ * @fileoverview GraphQL client for RCSB PDB data access using official @rcsb/rcsb-api-tools.
  * @module src/services/protein/providers/rcsb/graphql-client
  */
 
+import { GraphQLRequest } from '@rcsb/rcsb-api-tools';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { logger, type RequestContext } from '@/utils/index.js';
 import {
-  fetchWithTimeout,
-  logger,
-  type RequestContext,
-} from '@/utils/index.js';
-import type { ProteinStructure, SearchStructuresResult } from '../../types.js';
-import { RCSB_GRAPHQL_URL, REQUEST_TIMEOUT } from './config.js';
+  StructureFormat,
+  type ChainType,
+  type ProteinStructure,
+  type SearchStructuresResult,
+} from '../../types.js';
+import { REQUEST_TIMEOUT } from './config.js';
 import type { RcsbGraphQLResponse } from './types.js';
+
+/**
+ * Singleton GraphQL client instance
+ * @rcsb/rcsb-api-tools has poor TypeScript types, so we suppress eslint warnings
+ */
+// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call
+const graphqlClient = new GraphQLRequest('data-api', {
+  timeout: REQUEST_TIMEOUT,
+});
+
+/**
+ * Type-safe wrapper around GraphQL client request
+ * Suppresses eslint warnings for third-party library with poor types
+ */
+function graphqlRequest<T>(
+  variables: Record<string, unknown>,
+  query: string,
+): Promise<T> {
+  // eslint-disable-next-line @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-member-access
+  return graphqlClient.request(variables, query) as Promise<T>;
+}
 
 /**
  * Enrich search results with detailed metadata from GraphQL
@@ -48,55 +71,45 @@ export async function enrichSearchResults(
     }
   `;
 
-  const requestBody = {
-    query,
-    variables: { ids: pdbIds },
-  };
+  const variables = { ids: pdbIds };
 
   logger.debug('Enriching search results via GraphQL', {
     ...context,
     pdbIdCount: pdbIds.length,
     pdbIds,
-    requestBody: JSON.stringify(requestBody, null, 2),
-    url: RCSB_GRAPHQL_URL,
+    variables,
   });
 
   try {
-    const response = await fetchWithTimeout(RCSB_GRAPHQL_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(requestBody),
-      timeout: REQUEST_TIMEOUT,
-    });
-
-    const data = (await response.json()) as RcsbGraphQLResponse;
+    const data = await graphqlRequest<RcsbGraphQLResponse>(variables, query);
 
     logger.debug('GraphQL enrichment response received', {
       ...context,
       entryCount: data.data?.entries?.length ?? 0,
       hasErrors: !!data.errors,
       errorCount: data.errors?.length ?? 0,
-      rawResponse: JSON.stringify(data, null, 2),
     });
 
     if (data.errors && data.errors.length > 0) {
       throw new McpError(
         JsonRpcErrorCode.ServiceUnavailable,
-        `RCSB GraphQL enrichment failed: ${data.errors.map((e) => e.message).join('; ')}`,
+        `RCSB GraphQL enrichment failed: ${data.errors.map((e: { message: string }) => e.message).join('; ')}`,
         { requestId: context.requestId, errors: data.errors },
       );
     }
 
     return (
-      data.data?.entries?.map((entry) => {
+      data.data?.entries?.map((entry: (typeof data.data.entries)[number]) => {
         // Correctly extract organism names from the nested structure
         const organismNames =
           entry.polymer_entities?.flatMap(
-            (pe) =>
+            (pe: NonNullable<typeof entry.polymer_entities>[number]) =>
               pe.rcsb_entity_source_organism?.map(
-                (org) => org.ncbi_scientific_name,
+                (
+                  org: NonNullable<
+                    typeof pe.rcsb_entity_source_organism
+                  >[number],
+                ) => org.ncbi_scientific_name,
               ) ?? [],
           ) ?? [];
         const uniqueOrganismNames = [...new Set(organismNames)];
@@ -108,7 +121,7 @@ export async function enrichSearchResults(
           experimentalMethod: entry.exptl?.[0]?.method ?? 'Unknown',
           resolution:
             entry.rcsb_entry_info?.resolution_combined?.find(
-              (r) => r !== null,
+              (r: number | null) => r !== null,
             ) ?? undefined,
           releaseDate: entry.rcsb_accession_info?.initial_release_date ?? '',
           molecularWeight: entry.rcsb_entry_info?.molecular_weight,
@@ -134,7 +147,11 @@ export async function enrichSearchResults(
 export async function fetchStructureMetadata(
   pdbId: string,
   context: RequestContext,
-): Promise<Omit<ProteinStructure, 'structure'>> {
+): Promise<
+  Omit<ProteinStructure, 'structure'> & {
+    structure: Partial<ProteinStructure['structure']>;
+  }
+> {
   const query = `
     query($id: String!) {
       entry(entry_id: $id) {
@@ -178,53 +195,28 @@ export async function fetchStructureMetadata(
           rcsb_polymer_entity_container_identifiers {
             auth_asym_ids
           }
+          rcsb_entity_source_organism {
+            ncbi_scientific_name
+          }
         }
       }
     }
   `;
 
-  const requestBody = {
-    query,
-    variables: { id: pdbId },
-  };
+  const variables = { id: pdbId };
 
   logger.debug('Fetching structure metadata via GraphQL', {
     ...context,
     pdbId,
-    requestBody: JSON.stringify(requestBody, null, 2),
-    url: RCSB_GRAPHQL_URL,
+    variables,
   });
 
-  const response = await fetchWithTimeout(RCSB_GRAPHQL_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(requestBody),
-    timeout: REQUEST_TIMEOUT,
-  });
-
-  if (!response.ok) {
-    logger.error('Failed to fetch structure metadata', {
-      ...context,
-      pdbId,
-      status: response.status,
-      statusText: response.statusText,
-    });
-    throw new McpError(
-      JsonRpcErrorCode.NotFound,
-      `Structure ${pdbId} not found`,
-      { requestId: context.requestId, pdbId },
-    );
-  }
-
-  const data = (await response.json()) as RcsbGraphQLResponse;
+  const data = await graphqlRequest<RcsbGraphQLResponse>(variables, query);
 
   logger.debug('Structure metadata response received', {
     ...context,
     pdbId,
     hasEntry: !!data.data?.entry,
-    rawResponse: JSON.stringify(data, null, 2),
   });
 
   const entry = data.data?.entry;
@@ -240,6 +232,39 @@ export async function fetchStructureMetadata(
       { requestId: context.requestId, pdbId },
     );
   }
+
+  const chainOrganisms: Record<string, string> = {};
+  if (entry.polymer_entities) {
+    for (const entity of entry.polymer_entities) {
+      if (
+        entity.rcsb_polymer_entity_container_identifiers?.auth_asym_ids &&
+        entity.rcsb_entity_source_organism?.length
+      ) {
+        const organismName =
+          entity.rcsb_entity_source_organism[0]?.ncbi_scientific_name;
+        if (organismName) {
+          for (const chainId of entity.rcsb_polymer_entity_container_identifiers
+            .auth_asym_ids) {
+            chainOrganisms[chainId] = organismName;
+          }
+        }
+      }
+    }
+  }
+
+  const chains =
+    entry.polymer_entities?.flatMap(
+      (pe: NonNullable<typeof entry.polymer_entities>[number]) =>
+        pe.rcsb_polymer_entity_container_identifiers?.auth_asym_ids.map(
+          (id: string) => ({
+            id,
+            type:
+              (pe.entity_poly?.type?.toLowerCase() as ChainType) || 'protein',
+            length: pe.entity_poly?.pdbx_seq_one_letter_code?.length ?? 0,
+            organism: chainOrganisms[id] ?? 'Unknown',
+          }),
+        ) ?? [],
+    ) ?? [];
 
   return {
     pdbId,
@@ -266,7 +291,7 @@ export async function fetchStructureMetadata(
         : undefined,
     },
     annotations: {
-      keywords: [],
+      keywords: [], // Placeholder, keywords are typically broader and not in this query
       citations: entry.rcsb_primary_citation
         ? [
             {
@@ -281,6 +306,11 @@ export async function fetchStructureMetadata(
             },
           ]
         : [],
+    },
+    structure: {
+      format: StructureFormat.JSON,
+      data: {},
+      chains,
     },
   };
 }
@@ -304,19 +334,10 @@ export async function getSequenceForPdbId(
     }
   `;
 
-  const response = await fetchWithTimeout(RCSB_GRAPHQL_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      query,
-      variables: { id: pdbId },
-    }),
-    timeout: REQUEST_TIMEOUT,
-  });
+  const variables = { id: pdbId };
 
-  const data = (await response.json()) as RcsbGraphQLResponse;
+  const data = await graphqlRequest<RcsbGraphQLResponse>(variables, query);
+
   return (
     data.data?.entry?.polymer_entities?.[0]?.entity_poly
       ?.pdbx_seq_one_letter_code ?? ''
@@ -354,76 +375,139 @@ export async function getBindingSiteInfo(
     }
   `;
 
-  const requestBody = {
-    query,
-    variables: { id: pdbId },
-  };
+  const variables = { id: pdbId };
 
   logger.debug('Fetching binding site info via GraphQL', {
     ...context,
     pdbId,
     ligandId,
-    requestBody: JSON.stringify(requestBody, null, 2),
-    url: RCSB_GRAPHQL_URL,
+    variables,
   });
 
-  const response = await fetchWithTimeout(RCSB_GRAPHQL_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(requestBody),
-    timeout: REQUEST_TIMEOUT,
-  });
+  try {
+    const data = await graphqlRequest<RcsbGraphQLResponse>(variables, query);
 
-  if (!response.ok) {
+    logger.debug('Binding site info response received', {
+      ...context,
+      pdbId,
+      ligandId,
+      instanceCount: data.data?.entry?.polymer_entity_instances?.length ?? 0,
+    });
+
+    const instances = data.data?.entry?.polymer_entity_instances || [];
+
+    // Group interactions by chain
+    const bindingSites = new Map<string, Set<string>>();
+
+    for (const instance of instances) {
+      const chainId =
+        instance.rcsb_polymer_entity_instance_container_identifiers
+          ?.asym_id?.[0];
+      if (!chainId) continue;
+
+      const neighbors = instance.rcsb_ligand_neighbors || [];
+      for (const neighbor of neighbors) {
+        if (neighbor.ligand_comp_id === ligandId.toUpperCase()) {
+          const targetChain = neighbor.target_asym_id;
+          if (targetChain) {
+            if (!bindingSites.has(targetChain)) {
+              bindingSites.set(targetChain, new Set());
+            }
+            // Store interaction info (simplified - would parse residue details in production)
+            bindingSites.get(targetChain)?.add(`${neighbor.distance}Å`);
+          }
+        }
+      }
+    }
+
+    // Convert to array format
+    return Array.from(bindingSites.entries()).map(([chain, _interactions]) => ({
+      chain,
+      residues: [], // Would need additional query for residue-level details
+    }));
+  } catch (error) {
     logger.warning('Failed to fetch binding site info', {
       ...context,
       pdbId,
       ligandId,
-      status: response.status,
-      statusText: response.statusText,
+      error,
     });
     return [];
   }
+}
 
-  const data = (await response.json()) as RcsbGraphQLResponse;
-
-  logger.debug('Binding site info response received', {
-    ...context,
-    pdbId,
-    ligandId,
-    instanceCount: data.data?.entry?.polymer_entity_instances?.length ?? 0,
-    rawResponse: JSON.stringify(data, null, 2),
-  });
-  const instances = data.data?.entry?.polymer_entity_instances || [];
-
-  // Group interactions by chain
-  const bindingSites = new Map<string, Set<string>>();
-
-  for (const instance of instances) {
-    const chainId =
-      instance.rcsb_polymer_entity_instance_container_identifiers?.asym_id?.[0];
-    if (!chainId) continue;
-
-    const neighbors = instance.rcsb_ligand_neighbors || [];
-    for (const neighbor of neighbors) {
-      if (neighbor.ligand_comp_id === ligandId.toUpperCase()) {
-        const targetChain = neighbor.target_asym_id;
-        if (targetChain) {
-          if (!bindingSites.has(targetChain)) {
-            bindingSites.set(targetChain, new Set());
-          }
-          // Store interaction info (simplified - would parse residue details in production)
-          bindingSites.get(targetChain)?.add(`${neighbor.distance}Å`);
+/**
+ * Get chemical properties for a ligand
+ */
+export async function getLigandChemicalProperties(
+  ligandId: string,
+  context: RequestContext,
+): Promise<{
+  name: string;
+  chemicalId: string;
+  formula?: string;
+  molecularWeight?: number;
+}> {
+  const query = `
+    query($chemId: String!) {
+      chem_comp(comp_id: $chemId) {
+        chem_comp {
+          id
+          name
+          formula
+          formula_weight
         }
       }
     }
-  }
+  `;
 
-  // Convert to array format
-  return Array.from(bindingSites.entries()).map(([chain, _interactions]) => ({
-    chain,
-    residues: [], // Would need additional query for residue-level details
-  }));
+  const variables = { chemId: ligandId.toUpperCase() };
+
+  logger.debug('Fetching ligand chemical properties', {
+    ...context,
+    ligandId,
+    variables,
+  });
+
+  try {
+    const data = await graphqlRequest<RcsbGraphQLResponse>(variables, query);
+
+    const chemComp = data.data?.chem_comp?.chem_comp;
+
+    logger.debug('Ligand chemical properties received', {
+      ...context,
+      ligandId,
+      hasData: !!chemComp,
+    });
+
+    const result: {
+      name: string;
+      chemicalId: string;
+      formula?: string;
+      molecularWeight?: number;
+    } = {
+      name: chemComp?.name || ligandId,
+      chemicalId: chemComp?.id || ligandId.toUpperCase(),
+    };
+
+    if (chemComp?.formula) {
+      result.formula = chemComp.formula;
+    }
+    if (chemComp?.formula_weight) {
+      result.molecularWeight = chemComp.formula_weight;
+    }
+
+    return result;
+  } catch (error) {
+    logger.warning('Failed to fetch ligand chemical properties', {
+      ...context,
+      ligandId,
+      error,
+    });
+    // Return minimal info if GraphQL fails
+    return {
+      name: ligandId,
+      chemicalId: ligandId.toUpperCase(),
+    };
+  }
 }

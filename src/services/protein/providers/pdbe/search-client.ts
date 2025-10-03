@@ -56,6 +56,8 @@ export async function searchStructures(
           results: [],
           totalCount: 0,
           hasMore: false,
+          limit: params.limit ?? 25,
+          offset: params.offset ?? 0,
         };
       }
 
@@ -102,6 +104,8 @@ export async function searchStructures(
       results,
       totalCount: entries.length,
       hasMore: entries.length > (params.offset ?? 0) + results.length,
+      limit: params.limit ?? 25,
+      offset: params.offset ?? 0,
     };
   } catch (error) {
     if (error instanceof McpError) throw error;

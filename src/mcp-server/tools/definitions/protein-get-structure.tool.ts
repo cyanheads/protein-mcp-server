@@ -85,6 +85,10 @@ const OutputSchema = z
                 .describe('Chain type (protein, dna, rna, ligand).'),
               sequence: z.string().optional().describe('Amino acid sequence.'),
               length: z.number().describe('Chain length.'),
+              organism: z
+                .string()
+                .optional()
+                .describe('Source organism of the chain.'),
             }),
           )
           .describe('Molecular chains in the structure.'),
@@ -113,16 +117,18 @@ const OutputSchema = z
     annotations: z
       .object({
         function: z.string().optional().describe('Functional description.'),
-        keywords: z.array(z.string()).describe('Classification keywords.'),
+        keywords: z
+          .array(z.string().nullable())
+          .describe('Classification keywords.'),
         citations: z
           .array(
             z.object({
               title: z.string(),
-              authors: z.array(z.string()),
+              authors: z.array(z.string().nullable()),
               journal: z.string().optional(),
-              doi: z.string().optional(),
+              doi: z.string().nullable().optional(),
               pubmedId: z.string().optional(),
-              year: z.number().optional(),
+              year: z.number().nullable().optional(),
             }),
           )
           .describe('Primary citations.'),
@@ -180,6 +186,9 @@ function responseFormatter(result: GetStructureOutput): ContentBlock[] {
     result.experimental.resolution
       ? `Resolution: ${result.experimental.resolution.toFixed(2)}Å`
       : '',
+    result.experimental.rFactor
+      ? `R-factor: ${result.experimental.rFactor.toFixed(3)} / R-free: ${result.experimental.rFree?.toFixed(3) ?? 'N/A'}`
+      : '',
     `Chains: ${result.structure.chains.length}`,
     `Format: ${result.structure.format.toUpperCase()}`,
     `Size: ${(structureSize / 1024).toFixed(1)} KB`,
@@ -189,16 +198,45 @@ function responseFormatter(result: GetStructureOutput): ContentBlock[] {
 
   const chains = result.structure.chains
     .slice(0, 5)
-    .map(
-      (c) =>
-        `• Chain ${c.id}: ${c.type}${c.length ? ` (${c.length} residues)` : ''}`,
-    )
+    .map((c) => {
+      const details = [];
+      if (c.length) details.push(`${c.length} residues`);
+      if (c.organism) details.push(c.organism);
+      const detailsString =
+        details.length > 0 ? ` (${details.join(', ')})` : '';
+      return `• Chain ${c.id}: ${c.type}${detailsString}`;
+    })
     .join('\n');
+
+  // Include primary citation info if available
+  const citationInfo = result.annotations.citations[0]
+    ? [
+        '\nPrimary Citation:',
+        `  ${result.annotations.citations[0].title}`,
+        result.annotations.citations[0].authors?.length
+          ? `  ${result.annotations.citations[0].authors[0]}${result.annotations.citations[0].authors.length > 1 ? ' et al.' : ''}`
+          : '',
+        result.annotations.citations[0].journal
+          ? `  ${result.annotations.citations[0].journal}${result.annotations.citations[0].year ? ` (${result.annotations.citations[0].year})` : ''}`
+          : '',
+        result.annotations.citations[0].doi
+          ? `  DOI: ${result.annotations.citations[0].doi}`
+          : '',
+      ]
+        .filter(Boolean)
+        .join('\n')
+    : '';
+
+  // Include keywords if available
+  const keywordsInfo =
+    result.annotations.keywords.length > 0
+      ? `\nKeywords: ${result.annotations.keywords.slice(0, 5).join(', ')}${result.annotations.keywords.length > 5 ? '...' : ''}`
+      : '';
 
   return [
     {
       type: 'text',
-      text: `${summary}\n\nChains:\n${chains}${result.structure.chains.length > 5 ? '\n... and more' : ''}`,
+      text: `${summary}\n\nChains:\n${chains}${result.structure.chains.length > 5 ? '\n... and more' : ''}${keywordsInfo}${citationInfo}`,
     },
   ];
 }
