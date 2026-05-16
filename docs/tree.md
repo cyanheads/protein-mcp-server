@@ -1,6 +1,6 @@
 # protein-mcp-server - Directory Structure
 
-Generated on: 2025-10-03 04:53:33
+Generated on: 2026-05-16 19:22:40
 
 ```
 protein-mcp-server
@@ -275,6 +275,7 @@ protein-mcp-server
 ├── bun.lock
 ├── bunfig.toml
 ├── CHANGELOG.md
+├── CITATION.cff
 ├── CLAUDE.md
 ├── Dockerfile
 ├── eslint.config.js
