@@ -1,19 +1,19 @@
 {
-  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
-  "name": "io.github.cyanheads/protein-mcp-server",
-  "description": "MCP Server for 3D protein structural data retrieval & analysis from RCSB PDB, PDBe, and UniProt.",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "protein-mcp-server",
+  "description": "",
   "repository": {
-    "url": "https://github.com/cyanheads/protein-mcp-server",
+    "url": "",
     "source": "github"
   },
-  "version": "1.0.4",
+  "version": "0.1.0",
   "packages": [
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "protein-mcp-server",
-      "version": "1.0.4",
-      "runtimeHint": "bun",
+      "runtimeHint": "node",
+      "version": "0.1.0",
       "packageArguments": [
         {
           "type": "positional",
@@ -41,8 +41,8 @@
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
       "identifier": "protein-mcp-server",
-      "version": "1.0.4",
-      "runtimeHint": "bun",
+      "runtimeHint": "node",
+      "version": "0.1.0",
       "packageArguments": [
         {
           "type": "positional",
@@ -95,6 +95,5 @@
         "url": "http://localhost:3010/mcp"
       }
     }
-  ],
-  "mcpName": "io.github.cyanheads/protein-mcp-server"
+  ]
 }
