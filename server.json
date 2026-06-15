@@ -1,9 +1,9 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "protein-mcp-server",
-  "description": "",
+  "name": "io.github.cyanheads/protein-mcp-server",
+  "description": "Federated protein structure & function across experimental (PDB) and predicted (AlphaFold) models.",
   "repository": {
-    "url": "",
+    "url": "https://github.com/cyanheads/protein-mcp-server",
     "source": "github"
   },
   "version": "0.1.0",
@@ -11,7 +11,7 @@
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
-      "identifier": "protein-mcp-server",
+      "identifier": "@cyanheads/protein-mcp-server",
       "runtimeHint": "node",
       "version": "0.1.0",
       "packageArguments": [
@@ -40,7 +40,7 @@
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
-      "identifier": "protein-mcp-server",
+      "identifier": "@cyanheads/protein-mcp-server",
       "runtimeHint": "node",
       "version": "0.1.0",
       "packageArguments": [

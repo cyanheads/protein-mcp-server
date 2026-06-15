@@ -1,7 +1,8 @@
 {
-  "name": "protein-mcp-server",
+  "name": "@cyanheads/protein-mcp-server",
   "version": "0.1.0",
-  "description": "",
+  "mcpName": "io.github.cyanheads/protein-mcp-server",
+  "description": "Federated protein structure & function across experimental (PDB) and predicted (AlphaFold) models.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -40,15 +41,47 @@
     "start:http": "MCP_TRANSPORT_TYPE=http node dist/index.js"
   },
   "keywords": [
+    "protein",
+    "protein-structure",
+    "structural-biology",
+    "pdb",
+    "alphafold",
+    "uniprot",
+    "interpro",
+    "foldseek",
+    "rcsb",
+    "bioinformatics",
+    "drug-discovery",
     "mcp",
     "mcp-server",
-    "model-context-protocol"
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "ai-agent"
   ],
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "git+https://github.com/cyanheads/protein-mcp-server.git"
   },
+  "bugs": {
+    "url": "https://github.com/cyanheads/protein-mcp-server/issues"
+  },
+  "homepage": "https://github.com/cyanheads/protein-mcp-server#readme",
+  "author": "cyanheads <casey@caseyjhand.com> (https://github.com/cyanheads/protein-mcp-server#readme)",
+  "funding": [
+    {
+      "type": "github",
+      "url": "https://github.com/sponsors/cyanheads"
+    },
+    {
+      "type": "buy_me_a_coffee",
+      "url": "https://www.buymeacoffee.com/cyanheads"
+    }
+  ],
   "license": "Apache-2.0",
+  "packageManager": "bun@1.3.2",
   "engines": {
     "bun": ">=1.3.0",
     "node": ">=24.0.0"

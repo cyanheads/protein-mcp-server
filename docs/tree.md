@@ -1,6 +1,6 @@
 # protein-mcp-server - Directory Structure
 
-Generated on: 2026-06-15 14:53:11
+Generated on: 2026-06-15 18:35:53
 
 ```text
 protein-mcp-server/
@@ -18,6 +18,7 @@ protein-mcp-server/
 │   ├── extensions.json
 │   └── settings.json
 ├── changelog/
+│   ├── 0.1.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -123,37 +124,97 @@ protein-mcp-server/
 │   └── tool-defs-analysis/
 │       └── SKILL.md
 ├── src/
+│   ├── config/
+│   │   └── server-config.ts
 │   ├── mcp-server/
 │   │   ├── prompts/
 │   │   │   └── definitions/
-│   │   │       └── echo.prompt.ts
 │   │   ├── resources/
 │   │   │   └── definitions/
-│   │   │       ├── echo-app-ui.app-resource.ts
-│   │   │       └── echo.resource.ts
+│   │   │       ├── af-summary.resource.ts
+│   │   │       ├── index.ts
+│   │   │       └── pdb-summary.resource.ts
 │   │   └── tools/
 │   │       └── definitions/
-│   │           ├── echo-app.app-tool.ts
-│   │           └── echo.tool.ts
+│   │           ├── _schemas.ts
+│   │           ├── analyze-collection.tool.ts
+│   │           ├── compare-structures.tool.ts
+│   │           ├── find-similar.tool.ts
+│   │           ├── get-annotations.tool.ts
+│   │           ├── get-structure.tool.ts
+│   │           ├── index.ts
+│   │           ├── search-structures.tool.ts
+│   │           └── track-ligands.tool.ts
+│   ├── services/
+│   │   ├── alignment/
+│   │   │   └── alignment-service.ts
+│   │   ├── alphafold/
+│   │   │   └── alphafold-service.ts
+│   │   ├── beacons/
+│   │   │   └── beacons-service.ts
+│   │   ├── foldseek/
+│   │   │   └── foldseek-service.ts
+│   │   ├── rcsb/
+│   │   │   ├── facets.ts
+│   │   │   ├── rcsb-service.ts
+│   │   │   └── types.ts
+│   │   ├── shared/
+│   │   │   ├── async.ts
+│   │   │   ├── http.ts
+│   │   │   └── identifiers.ts
+│   │   └── uniprot/
+│   │       └── uniprot-service.ts
 │   └── index.ts
 ├── tests/
-│   ├── prompts/
-│   │   └── echo.prompt.test.ts
+│   ├── config/
+│   │   └── server-config.test.ts
 │   ├── resources/
-│   │   └── echo.resource.test.ts
+│   │   ├── af-summary.resource.test.ts
+│   │   └── pdb-summary.resource.test.ts
+│   ├── services/
+│   │   ├── alignment/
+│   │   │   └── alignment-service.test.ts
+│   │   ├── alphafold/
+│   │   │   └── alphafold-service.test.ts
+│   │   ├── beacons/
+│   │   │   └── beacons-service.test.ts
+│   │   ├── foldseek/
+│   │   │   └── foldseek-service.test.ts
+│   │   ├── rcsb/
+│   │   │   ├── facets.test.ts
+│   │   │   ├── rcsb-normalizers.test.ts
+│   │   │   └── rcsb-service.test.ts
+│   │   ├── shared/
+│   │   │   ├── async.test.ts
+│   │   │   ├── http.test.ts
+│   │   │   └── identifiers.test.ts
+│   │   └── uniprot/
+│   │       └── uniprot-service.test.ts
 │   └── tools/
-│       └── echo.tool.test.ts
+│       ├── _schemas.test.ts
+│       ├── analyze-collection.tool.test.ts
+│       ├── compare-structures.tool.test.ts
+│       ├── find-similar.tool.test.ts
+│       ├── get-annotations.tool.test.ts
+│       ├── get-structure.tool.test.ts
+│       ├── search-structures.tool.test.ts
+│       └── track-ligands.tool.test.ts
 ├── .dockerignore
 ├── .env.example
 ├── .gitignore
 ├── .mcpbignore
 ├── AGENTS.md
 ├── biome.json
+├── bun.lock
+├── bunfig.toml
+├── CHANGELOG.md
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile
+├── LICENSE
 ├── manifest.json
 ├── package.json
+├── README.md
 ├── server.json
 ├── tsconfig.build.json
 ├── tsconfig.json
