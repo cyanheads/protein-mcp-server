@@ -1,6 +1,6 @@
 <div align="center">
   <h1>@cyanheads/protein-mcp-server</h1>
-  <p><b>Federated protein structure & function across experimental (PDB) and predicted (AlphaFold) models.</b>
+  <p><b>Federated protein structure & function across experimental (PDB) and predicted (AlphaFold) models via MCP. STDIO or Streamable HTTP.</b>
   <div>7 Tools • 2 Resources</div>
   </p>
 </div>
