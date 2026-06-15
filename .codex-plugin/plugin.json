@@ -1,25 +1,34 @@
 {
   "name": "protein-mcp-server",
   "version": "0.1.0",
-  "description": "",
+  "description": "Federated protein structure & function across experimental (PDB) and predicted (AlphaFold) models.",
   "author": {
-    "name": "",
-    "email": "",
-    "url": ""
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
   },
-  "homepage": "",
-  "repository": "",
+  "homepage": "https://github.com/cyanheads/protein-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/protein-mcp-server",
   "license": "Apache-2.0",
-  "keywords": ["mcp", "mcp-server", "model-context-protocol"],
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "protein",
+    "structural-biology",
+    "pdb",
+    "alphafold",
+    "bioinformatics"
+  ],
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "protein-mcp-server",
-    "shortDescription": "",
-    "longDescription": "",
-    "developerName": "",
-    "category": "",
+    "shortDescription": "Federated protein structure & function across experimental (PDB) and predicted (AlphaFold) models.",
+    "longDescription": "Search, fetch, and compare protein structures across experimental (PDB) and predicted (AlphaFold) models from one tool surface. Find sequence and fold homologs, track ligands and binding sites, profile the PDB with server-side facets, and pull UniProt/InterPro functional annotations — all over keyless public providers.",
+    "developerName": "cyanheads",
+    "category": "research",
     "capabilities": ["Read"],
-    "websiteURL": "",
+    "websiteURL": "https://github.com/cyanheads/protein-mcp-server",
     "defaultPrompt": []
   }
 }

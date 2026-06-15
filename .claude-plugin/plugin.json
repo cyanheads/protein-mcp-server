@@ -1,17 +1,17 @@
 {
   "name": "protein-mcp-server",
   "version": "0.1.0",
-  "description": "",
+  "description": "Federated protein structure & function across experimental (PDB) and predicted (AlphaFold) models.",
   "author": {
-    "name": ""
+    "name": "cyanheads"
   },
-  "homepage": "",
-  "repository": "",
+  "homepage": "https://github.com/cyanheads/protein-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/protein-mcp-server",
   "license": "Apache-2.0",
   "mcpServers": {
     "protein-mcp-server": {
       "command": "npx",
-      "args": ["-y", "protein-mcp-server"],
+      "args": ["-y", "@cyanheads/protein-mcp-server"],
       "env": {
         "MCP_TRANSPORT_TYPE": "stdio"
       }

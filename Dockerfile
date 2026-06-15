@@ -39,10 +39,10 @@ ENV NODE_ENV=production
 # OCI image metadata (https://github.com/opencontainers/image-spec/blob/main/annotations.md)
 ARG APP_VERSION
 LABEL org.opencontainers.image.title="protein-mcp-server"
-LABEL org.opencontainers.image.description=""
+LABEL org.opencontainers.image.description="Federated protein structure & function across experimental (PDB) and predicted (AlphaFold) models."
 LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.version="${APP_VERSION}"
-LABEL org.opencontainers.image.source=""
+LABEL org.opencontainers.image.source="https://github.com/cyanheads/protein-mcp-server"
 
 # Copy dependency manifests
 COPY package.json bun.lock ./

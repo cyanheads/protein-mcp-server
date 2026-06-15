@@ -11,19 +11,6 @@
 
 ---
 
-## First Session
-
-This project was just scaffolded with `bunx @cyanheads/mcp-ts-core init`. You're holding a production-grade MCP framework with the hard parts already solved — error handling, telemetry, auth, transport, validation, lifecycle. What's missing is the **domain**. Your job: design the tool, resource, and service surface with the user, then implement it as small pure handlers that throw — the framework catches, classifies, and instruments the rest. Design before code; the user's first messages set direction, so wait for them before scaffolding definitions.
-
-> **Remove this section** from CLAUDE.md / AGENTS.md after completing these steps. The skills and conventions below remain — this block is one-time onboarding only.
-
-1. **Get your bearings.** Take stock of the project tree, the skills in `skills/`, and the tools/MCP servers available. Light tool use is fine for context-building — you're mapping the territory, not committing yet.
-2. **Read the framework docs** — `node_modules/@cyanheads/mcp-ts-core/CLAUDE.md` (builders, Context, errors, exports, conventions)
-3. **Run the `setup` skill** — read `skills/setup/SKILL.md` and follow its checklist (project orientation, agent protocol file selection, echo definition cleanup, skill sync)
-4. **Design the server** — read `skills/design-mcp-server/SKILL.md` and work through it with the user to map the domain into tools, resources, and services before scaffolding
-
----
-
 ## What's Next?
 
 When the user asks what's next or needs direction, suggest options based on the current project state. Common next steps:
@@ -58,120 +45,138 @@ Tailor suggestions to what's actually missing or stale — don't recite the full
 
 ### Tool
 
+A real tool from this server (`protein_get_annotations`) — note the typed `errors` contract, the PDB-ID → UniProt-accession resolution, and the parallel upstream fetch. Tools are public, keyless, and `readOnlyHint`.
+
 ```ts
 import { tool, z } from '@cyanheads/mcp-ts-core';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { getRcsbService } from '@/services/rcsb/rcsb-service.js';
+import { isUniProtAccession } from '@/services/shared/identifiers.js';
+import { getUniProtService } from '@/services/uniprot/uniprot-service.js';
 
-export const searchItems = tool('search_items', {
-  description: 'Search inventory items by query.',
-  annotations: { readOnlyHint: true },
+export const getAnnotations = tool('protein_get_annotations', {
+  title: 'protein-mcp-server: get annotations',
+  description: 'Sequence and functional annotation for a protein: UniProt features, variants, and InterPro domains.',
+  annotations: { readOnlyHint: true, openWorldHint: true },
+  errors: [
+    {
+      reason: 'no_uniprot_mapping',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'A PDB ID has no UniProt cross-reference, or neither uniprot nor pdb_id was provided.',
+      recovery: 'Pass a UniProt accession directly, or use protein_search_structures to find a modeled protein chain.',
+    },
+  ],
   input: z.object({
-    query: z.string().describe('Search terms'),
-    limit: z.number().default(10).describe('Max results'),
+    uniprot: z.string().optional().describe('UniProt accession (e.g. P69905). Takes precedence over pdb_id.'),
+    pdb_id: z.string().optional().describe('PDB entry ID; resolved to a UniProt accession via cross-reference.'),
+    include: z.enum(['features', 'domains', 'variants', 'all']).default('all').describe('Which annotation classes to fetch.'),
   }),
   output: z.object({
-    items: z.array(z.object({
-      id: z.string().describe('Item ID'),
-      name: z.string().describe('Item name'),
-    })).describe('Matching items'),
+    accession: z.string().describe('UniProt accession the annotations describe.'),
+    geneNames: z.array(z.string()).describe('Gene names.'),
+    // … features / variants / domains
   }),
-  auth: ['inventory:read'],
 
   async handler(input, ctx) {
-    const items = await findItems(input.query, input.limit);
-    ctx.log.info('Search completed', { query: input.query, count: items.length });
-    return { items };
+    let accession = input.uniprot?.toUpperCase();
+    if (!accession && input.pdb_id) {
+      accession = (await getRcsbService().resolveUniprot(input.pdb_id, ctx))[0];
+    }
+    if (!accession || !isUniProtAccession(accession)) {
+      throw ctx.fail('no_uniprot_mapping', 'Provide a UniProt accession, or a PDB ID with a modeled protein chain.');
+    }
+    const entry = await getUniProtService().getEntry(accession, input.include, ctx);
+    return { accession: entry.accession, geneNames: entry.geneNames };
   },
 
   // format() populates content[] — the markdown twin of structuredContent.
   // Different clients read different surfaces (Claude Code → structuredContent,
   // Claude Desktop → content[]); both must carry the same data.
-  // Enforced at lint time: every field in `output` must appear in the rendered text.
-  format: (result) => [{
-    type: 'text',
-    text: result.items.map(i => `**${i.id}**: ${i.name}`).join('\n'),
-  }],
+  format: (result) => [{ type: 'text', text: `## ${result.accession}\n${result.geneNames.join(', ')}` }],
 });
 ```
 
 ### Resource
 
+A real resource from this server (`af://{uniprot}`) — the injectable-context twin of `protein_get_structure` for predicted models.
+
 ```ts
 import { resource, z } from '@cyanheads/mcp-ts-core';
 import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { getAlphaFoldService } from '@/services/alphafold/alphafold-service.js';
 
-export const itemData = resource('inventory://{itemId}', {
-  description: 'Fetch an inventory item by ID.',
-  params: z.object({ itemId: z.string().describe('Item identifier') }),
-  auth: ['inventory:read'],
+export const afSummaryResource = resource('af://{uniprot}', {
+  name: 'alphafold-structure-summary',
+  title: 'AlphaFold structure summary',
+  description: 'Predicted-structure summary for a UniProt accession from AlphaFold DB: mean pLDDT, confidence bands, model URLs.',
+  mimeType: 'application/json',
+  params: z.object({ uniprot: z.string().describe('UniProt accession (e.g. P69905).') }),
+  output: z.object({
+    uniprotAccession: z.string().describe('UniProt accession.'),
+    meanPlddt: z.number().optional().describe('Mean pLDDT confidence (0–100).'),
+    // … confidence buckets, model URLs, version
+  }),
   async handler(params, ctx) {
-    const item = await ctx.state.get(`item:${params.itemId}`);
-    if (!item) throw notFound(`Item ${params.itemId} not found`, { itemId: params.itemId });
-    return item;
+    const model = await getAlphaFoldService().getPrediction(params.uniprot, ctx);
+    if (!model) throw notFound(`No AlphaFold model found for ${params.uniprot.toUpperCase()}`, { uniprot: params.uniprot });
+    return { uniprotAccession: model.uniprotAccession, ...(typeof model.meanPlddt === 'number' ? { meanPlddt: model.meanPlddt } : {}) };
   },
 });
 ```
 
-### Prompt
-
-```ts
-import { prompt, z } from '@cyanheads/mcp-ts-core';
-
-export const reviewCode = prompt('review_code', {
-  description: 'Review code for issues and best practices.',
-  args: z.object({
-    code: z.string().describe('Code to review'),
-    language: z.string().optional().describe('Programming language'),
-  }),
-  generate: (args) => [
-    { role: 'user', content: { type: 'text', text: `Review this ${args.language ?? ''} code:\n${args.code}` } },
-  ],
-});
-```
+This server registers no prompts (`prompts: []`). If you add one, follow the `add-prompt` skill.
 
 ### Server config
 
 ```ts
-// src/config/server-config.ts — lazy-parsed, separate from framework config
+// src/config/server-config.ts — lazy-parsed, separate from framework config.
+// Every value is optional with a public-endpoint default — the server runs out
+// of the box with no env file. No API keys: all upstreams are keyless.
 import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
 const ServerConfigSchema = z.object({
-  apiKey: z.string().describe('External API key'),
-  maxResults: z.coerce.number().default(100),
-  verboseLogging: z.stringbool().default(false).describe('Enable verbose logging'),
+  rcsbSearchBaseUrl: z.string().url().default('https://search.rcsb.org').describe('Base URL for the RCSB Search API v2.'),
+  alphafoldBaseUrl: z.string().url().default('https://alphafold.ebi.ac.uk').describe('Base URL for the AlphaFold DB API.'),
+  asyncPollTimeoutMs: z.coerce.number().int().min(1000).default(30_000).describe('Max wall-clock to poll an async job before "still computing".'),
+  maxBatchIds: z.coerce.number().int().min(1).max(100).default(25).describe('Cap on IDs accepted by protein_get_structure per batch.'),
+  // … remaining provider base URLs + tuning limits
 });
 
 let _config: z.infer<typeof ServerConfigSchema> | undefined;
 export function getServerConfig() {
   _config ??= parseEnvConfig(ServerConfigSchema, {
-    apiKey: 'MY_API_KEY',
-    maxResults: 'MY_MAX_RESULTS',
-    verboseLogging: 'MY_VERBOSE_LOGGING',
+    rcsbSearchBaseUrl: 'RCSB_SEARCH_BASE_URL',
+    alphafoldBaseUrl: 'ALPHAFOLD_BASE_URL',
+    asyncPollTimeoutMs: 'PROTEIN_ASYNC_POLL_TIMEOUT_MS',
+    maxBatchIds: 'PROTEIN_MAX_BATCH_IDS',
   });
   return _config;
 }
 ```
 
-`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`MY_API_KEY`) not the path (`apiKey`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
+`parseEnvConfig` maps Zod schema paths → env var names so errors name the variable (`RCSB_SEARCH_BASE_URL`) not the path (`rcsbSearchBaseUrl`). Throws `ConfigurationError`, which the framework prints as a clean startup banner.
 
 For env booleans use `z.stringbool()`, never `z.coerce.boolean()` — `Boolean("false")` is `true`, so a coerced flag can't be disabled through the environment. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` and rejects anything else, so `=false` actually disables.
 
 ### Server identity and instructions
 
-`createApp()` accepts optional identity fields forwarded to the SDK's `initialize` response and the server manifest (`/.well-known/mcp.json`):
+`createApp()` carries this server's identity fields, forwarded to the SDK's `initialize` response and the server manifest (`/.well-known/mcp.json`). The display identity is the bare hyphenated machine name — `name` and `title` are both `protein-mcp-server`, never the npm scope (the package publishes as `@cyanheads/protein-mcp-server`, but the served identity stays bare):
 
 ```ts
 await createApp({
-  name: 'my-mcp-server',
-  title: 'My Server',                         // human-readable display name
-  websiteUrl: 'https://github.com/owner/repo', // canonical homepage URL
-  description: 'One-line description.',        // wins over MCP_SERVER_DESCRIPTION
-  icons: [{ src: 'https://example.com/icon.png', sizes: ['48x48'], mimeType: 'image/png' }],
-  instructions: 'Use shortcut alpha for the most common case.', // session-level context
+  name: 'protein-mcp-server',
+  title: 'protein-mcp-server',
+  tools: [/* … */],
+  resources: [pdbSummaryResource, afSummaryResource],
+  prompts: [],
+  landing: { requireAuth: false }, // public, keyless data server
+  instructions: 'protein-mcp-server — federated protein structure & function over experimental (PDB) and predicted (AlphaFold) structures. No API keys required.',
+  setup(core) { /* init the six provider services */ },
 });
 ```
 
-`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. Use it for deployment guidance (connection aliases, regional notes, scope hints) instead of repeating the same context across tool descriptions. Client adoption is uneven, but there's no downside when set.
+`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. Use it for high-level guidance (here, the keyless federated-surface framing and a one-line tool map) instead of repeating context across tool descriptions. Client adoption is uneven, but there's no downside when set.
 
 ---
 
@@ -239,20 +244,23 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ```text
 src/
-  index.ts                              # createApp() entry point
+  index.ts                              # createApp() entry point — registers 7 tools + 2 resources, inits 6 services
   config/
-    server-config.ts                    # Server-specific env vars (Zod schema)
+    server-config.ts                    # Server-specific env vars (Zod schema) — provider base URLs + tuning limits, all optional
   services/
-    [domain]/
-      [domain]-service.ts               # Domain service (init/accessor pattern)
-      types.ts                          # Domain types
+    rcsb/                               # RCSB Search v2 + Data API + alignment + facets (rcsb-service.ts, facets.ts, types.ts)
+    alphafold/                          # AlphaFold DB predictions (pLDDT/PAE)
+    beacons/                            # 3D-Beacons federated best-available models
+    uniprot/                           # UniProt features/variants + InterPro domains/GO terms
+    alignment/                         # RCSB Structural Comparison (TM-align / jFATCAT) async jobs
+    foldseek/                          # Foldseek fold-similarity async search
+    shared/                            # http.ts, async.ts (mapWithConcurrency), identifiers.ts (PDB/UniProt ID checks)
   mcp-server/
     tools/definitions/
-      [tool-name].tool.ts               # Tool definitions
+      *.tool.ts                        # 7 tool definitions + _schemas.ts (shared facet schema/render) + index.ts barrel
     resources/definitions/
-      [resource-name].resource.ts       # Resource definitions
-    prompts/definitions/
-      [prompt-name].prompt.ts           # Prompt definitions
+      pdb-summary.resource.ts          # pdb://{entry_id}
+      af-summary.resource.ts           # af://{uniprot}
 ```
 
 ---
