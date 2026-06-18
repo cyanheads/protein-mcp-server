@@ -1,6 +1,7 @@
 /**
  * @fileoverview Tests for protein_get_structure: source/ID-type guarding, batched
- * partial success (failed[]), the predicted (AlphaFold) path, and the coordinate
+ * partial success (failed[]), the predicted (AlphaFold) path, the best_available
+ * federated pick (experimental pdbId + title promotion), and the coordinate
  * overflow → section-outline collapse. Services and the HTTP layer are mocked.
  * @module tests/tools/get-structure.tool.test
  */
@@ -114,5 +115,59 @@ describe('protein_get_structure', () => {
     expect(out.overflow).toBeDefined();
     expect(out.overflow?.sections).toHaveLength(2);
     expect(out.structures.every((s) => s.coordinates === undefined)).toBe(true);
+  });
+
+  it('best_available promotes the chosen experimental PDB id and title (parity with experimental)', async () => {
+    getSummary.mockResolvedValue({
+      accession: 'P69905',
+      found: true,
+      models: [
+        {
+          modelIdentifier: '2W72',
+          modelCategory: 'EXPERIMENTALLY DETERMINED',
+          provider: 'PDBe',
+          modelUrl: 'https://www.ebi.ac.uk/pdbe/static/entry/2w72_updated.cif',
+          resolution: 1.07,
+          experimentalMethod: 'X-RAY DIFFRACTION',
+        },
+      ],
+    });
+    getEntries.mockResolvedValue([experimentalMeta('2W72')]);
+    const input = getStructure.input.parse({ ids: ['P69905'], source: 'best_available' });
+    const out = await getStructure.handler(input, ctx());
+
+    expect(out.structures[0]).toMatchObject({
+      id: 'P69905',
+      source: 'experimental',
+      pdbId: '2W72',
+      title: '2W72 structure',
+      resolution: 1.07,
+    });
+    // The chosen entry's title is fetched to match the source "experimental" shape.
+    expect(getEntries).toHaveBeenCalledWith(['2W72'], expect.anything());
+    const text = (getStructure.format?.(out)?.[0] as { text: string }).text;
+    expect(text).toContain('**PDB:** 2W72');
+  });
+
+  it('best_available leaves pdbId unset for a predicted pick (no entry fetch)', async () => {
+    getSummary.mockResolvedValue({
+      accession: 'P00001',
+      found: true,
+      models: [
+        {
+          modelIdentifier: 'AF-P00001-F1',
+          modelCategory: 'AB-INITIO',
+          provider: 'AlphaFold DB',
+          modelUrl: 'https://alphafold.test/af.cif',
+          confidenceAvgLocalScore: 92.5,
+        },
+      ],
+    });
+    const input = getStructure.input.parse({ ids: ['P00001'], source: 'best_available' });
+    const out = await getStructure.handler(input, ctx());
+
+    expect(out.structures[0]).toMatchObject({ id: 'P00001', source: 'predicted', meanPlddt: 92.5 });
+    expect(out.structures[0]?.pdbId).toBeUndefined();
+    expect(getEntries).not.toHaveBeenCalled();
   });
 });

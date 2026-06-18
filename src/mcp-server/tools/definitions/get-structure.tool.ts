@@ -31,6 +31,12 @@ const structureRecordSchema = z
     source: z
       .enum(['experimental', 'predicted'])
       .describe('Whether the structure is experimental or predicted.'),
+    pdbId: z
+      .string()
+      .optional()
+      .describe(
+        'Chosen PDB entry ID when a best_available query resolved to an experimental structure (id stays the queried UniProt accession). Lets an agent cite the structure without parsing the coordinate URL.',
+      ),
     title: z.string().optional().describe('Structure / protein title.'),
     method: z.string().optional().describe('Experimental method(s).'),
     resolution: z.number().optional().describe('Resolution in Å (experimental).'),
@@ -244,6 +250,7 @@ export const getStructure = tool('protein_get_structure', {
       lines.push(`\n### ${s.id} _(${s.source})_`);
       if (s.title) lines.push(s.title);
       const meta = [
+        s.pdbId ? `**PDB:** ${s.pdbId}` : null,
         s.method ? `**Method:** ${s.method}` : null,
         typeof s.resolution === 'number' ? `**Resolution:** ${s.resolution} Å` : null,
         s.organism ? `**Organism:** ${s.organism}` : null,
@@ -380,9 +387,26 @@ async function fetchBest(accession: string, ctx: Context): Promise<StructureReco
     )[0];
   if (!best) return null;
   const isExperimental = /experimentally/i.test(best.modelCategory ?? '');
+
+  // For an experimental pick the federated id is the chosen PDB entry; surface it
+  // explicitly so the agent can cite the structure, and fetch its title for parity
+  // with source "experimental". The title is best-effort — a failed lookup must
+  // not drop the structure the agent already has.
+  let pdbId: string | undefined;
+  let title: string | undefined;
+  if (isExperimental && best.modelIdentifier) {
+    pdbId = best.modelIdentifier.toUpperCase();
+    const entries = await getRcsbService()
+      .getEntries([pdbId], ctx)
+      .catch(() => []);
+    title = entries[0]?.title;
+  }
+
   return {
     id: summary.accession,
     source: isExperimental ? 'experimental' : 'predicted',
+    ...(pdbId ? { pdbId } : {}),
+    ...(title ? { title } : {}),
     ...(best.provider ? { provider: best.provider } : {}),
     ...(typeof best.resolution === 'number' ? { resolution: best.resolution } : {}),
     ...(best.experimentalMethod ? { method: best.experimentalMethod } : {}),
