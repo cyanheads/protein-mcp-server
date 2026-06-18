@@ -46,6 +46,16 @@ describe('protein_analyze_collection', () => {
     expect(out.facets[0]?.buckets).toHaveLength(2);
   });
 
+  it('returns total 0 with empty buckets for a zero-match scope (no throw)', async () => {
+    analyzeFacets.mockResolvedValue({ total: 0, facets: [methodFacet([])] });
+    const out = await analyzeCollection.handler(
+      analyzeCollection.input.parse({ group_by: ['method'], query: 'zzzznotathing' }),
+      ctx(),
+    );
+    expect(out.total).toBe(0);
+    expect(out.facets[0]?.buckets).toEqual([]);
+  });
+
   it('maps content_type predicted → computational and all → undefined scope', async () => {
     analyzeFacets.mockResolvedValue({ total: 1, facets: [methodFacet([])] });
 

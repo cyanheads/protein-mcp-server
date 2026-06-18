@@ -78,8 +78,18 @@ export function parseJson<T>(text: string, label: string): T {
   }
 }
 
-/** GET/POST JSON with retry over the full fetch + parse pipeline. Throws a status-mapped `McpError` on non-2xx. */
-export function fetchJson<T>(url: string, ctx: Context, opts: FetchOptions): Promise<T> {
+/**
+ * GET/POST JSON with retry over the full fetch + parse pipeline. Throws a
+ * status-mapped `McpError` on non-2xx. Pass `onEmptyBody` to resolve a 204 / empty
+ * body to a value instead of the default transient-failure throw — used by the
+ * RCSB search layer, where the API answers a zero-result query with `204 No
+ * Content` rather than an empty hit list.
+ */
+export function fetchJson<T>(
+  url: string,
+  ctx: Context,
+  opts: FetchOptions & { onEmptyBody?: () => T },
+): Promise<T> {
   const rctx = asRequestContext(ctx);
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   return withRetry(
@@ -90,7 +100,11 @@ export function fetchJson<T>(url: string, ctx: Context, opts: FetchOptions): Pro
         headers: withDefaultHeaders(opts.headers),
         signal: ctx.signal,
       });
-      return parseJson<T>(await res.text(), opts.label);
+      const text = await res.text();
+      if (opts.onEmptyBody && (res.status === 204 || text.trim().length === 0)) {
+        return opts.onEmptyBody();
+      }
+      return parseJson<T>(text, opts.label);
     },
     {
       operation: opts.operation,

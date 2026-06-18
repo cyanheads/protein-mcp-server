@@ -342,6 +342,10 @@ export class RcsbService {
       operation,
       label: 'RCSB Search API',
       baseDelayMs: 400,
+      // RCSB answers a zero-result query with 204 No Content. Treat that as an
+      // empty result set rather than letting the empty-body guard classify it as
+      // a transient outage and burn the full retry budget.
+      onEmptyBody: () => ({ total_count: 0, result_set: [], facets: [] }),
     });
   }
 

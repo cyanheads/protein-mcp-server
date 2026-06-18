@@ -5,8 +5,14 @@
  * @module tests/services/rcsb/rcsb-service.test
  */
 
-import { describe, expect, it } from 'vitest';
-import { buildQuery, type FacetSpec, toRcsbFacet } from '@/services/rcsb/rcsb-service.js';
+import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+  buildQuery,
+  type FacetSpec,
+  RcsbService,
+  toRcsbFacet,
+} from '@/services/rcsb/rcsb-service.js';
 
 describe('buildQuery', () => {
   it('returns a match-all terminal when no constraints are given', () => {
@@ -103,5 +109,41 @@ describe('toRcsbFacet', () => {
     const out = toRcsbFacet(spec) as { facets: Array<Record<string, unknown>> };
     expect(out.facets).toHaveLength(1);
     expect(out.facets[0]).toMatchObject({ name: 'release_year', interval: 'year' });
+  });
+});
+
+describe('RcsbService search — 204 / empty body (issue #4 regression)', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const service = () =>
+    new RcsbService(
+      {} as never,
+      {} as never,
+      {
+        rcsbSearchBaseUrl: 'https://search.test',
+        rcsbDataBaseUrl: 'https://data.test',
+        rcsbFilesBaseUrl: 'https://files.test',
+      } as never,
+    );
+
+  it('returns an empty result set without retrying when RCSB answers 204', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    const out = await service().search({ text: 'zzzznotathing' }, createMockContext());
+    expect(out).toEqual({ total: 0, hits: [] });
+    // A zero-result 204 must not burn the retry budget.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns total 0 with empty buckets for a faceted zero-result query', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 204 }));
+    const out = await service().analyzeFacets(
+      { text: 'zzzznotathing' },
+      [{ dimension: 'method', attribute: 'exptl.method', aggregation: 'terms' }],
+      createMockContext(),
+    );
+    expect(out.total).toBe(0);
+    expect(out.facets).toEqual([{ dimension: 'method', attribute: 'exptl.method', buckets: [] }]);
   });
 });
