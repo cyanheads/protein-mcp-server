@@ -1,6 +1,6 @@
 {
   "name": "protein-mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Federated protein structure & function across experimental (PDB) and predicted (AlphaFold) models.",
   "author": {
     "name": "cyanheads",

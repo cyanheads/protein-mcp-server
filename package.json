@@ -1,6 +1,6 @@
 {
   "name": "@cyanheads/protein-mcp-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "mcpName": "io.github.cyanheads/protein-mcp-server",
   "description": "Federated protein structure & function across experimental (PDB) and predicted (AlphaFold) models via MCP. STDIO or Streamable HTTP.",
   "type": "module",
