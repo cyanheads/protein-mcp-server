@@ -1,12 +1,14 @@
 /**
  * @fileoverview Tests for protein_track_ligands: the three modes (find_ligand,
- * structures_with_ligand, binding_site), each mode's missing-input and empty-result
- * not_found branches, the totalCount / resolvedCompId enrichment, comp_id
- * upper-casing, and format() rendering of ligands, structure lists, and binding
- * sites. RCSB service mocked.
+ * structures_with_ligand, binding_site), the missing-param guards (InvalidParams),
+ * the find_ligand / binding_site empty-result not_found branches,
+ * structures_with_ligand's empty-result set + notice, the totalCount /
+ * resolvedCompId enrichment, comp_id upper-casing, and format() rendering of
+ * ligands, structure lists, and binding sites. RCSB service mocked.
  * @module tests/tools/track-ligands.tool.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -58,10 +60,13 @@ describe('protein_track_ligands — find_ligand', () => {
     expect(out.ligands).toEqual([{ compId: 'HEM' }]);
   });
 
-  it('throws not_found when query is missing', async () => {
+  it('throws missing_param (InvalidParams) when query is missing', async () => {
     await expect(
       trackLigands.handler(trackLigands.input.parse({ mode: 'find_ligand' }), ctx()),
-    ).rejects.toMatchObject({ data: { reason: 'not_found' } });
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: { reason: 'missing_param' },
+    });
   });
 
   it('throws not_found when nothing resolves', async () => {
@@ -95,20 +100,25 @@ describe('protein_track_ligands — structures_with_ligand', () => {
     expect(getEnrichment(c)).toMatchObject({ totalCount: 1200, resolvedCompId: 'HEM' });
   });
 
-  it('throws not_found when comp_id is missing', async () => {
+  it('throws missing_param (InvalidParams) when comp_id is missing', async () => {
     await expect(
       trackLigands.handler(trackLigands.input.parse({ mode: 'structures_with_ligand' }), ctx()),
-    ).rejects.toMatchObject({ data: { reason: 'not_found' } });
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: { reason: 'missing_param' },
+    });
   });
 
-  it('throws not_found when no structures contain the ligand', async () => {
+  it('returns an empty structure set (with a notice) when no structures contain the ligand', async () => {
     searchByLigand.mockResolvedValue({ total: 0, hits: [] });
-    await expect(
-      trackLigands.handler(
-        trackLigands.input.parse({ mode: 'structures_with_ligand', comp_id: 'ZZZ' }),
-        ctx(),
-      ),
-    ).rejects.toMatchObject({ data: { reason: 'not_found' } });
+    const c = ctx();
+    const out = await trackLigands.handler(
+      trackLigands.input.parse({ mode: 'structures_with_ligand', comp_id: 'ZZZ' }),
+      c,
+    );
+    expect(out.structures).toEqual([]);
+    expect(getEnrichment(c)).toMatchObject({ totalCount: 0, resolvedCompId: 'ZZZ' });
+    expect(String(getEnrichment(c).notice)).toMatch(/no pdb entries contain zzz/i);
   });
 });
 
@@ -129,13 +139,16 @@ describe('protein_track_ligands — binding_site', () => {
     expect(getBindingSites).toHaveBeenCalledWith('4HHB', 'HEM', expect.anything());
   });
 
-  it('throws not_found when pdb_id is missing', async () => {
+  it('throws missing_param (InvalidParams) when pdb_id is missing', async () => {
     await expect(
       trackLigands.handler(
         trackLigands.input.parse({ mode: 'binding_site', comp_id: 'HEM' }),
         ctx(),
       ),
-    ).rejects.toMatchObject({ data: { reason: 'not_found' } });
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: { reason: 'missing_param' },
+    });
   });
 
   it('throws not_found when no binding-site contacts are found', async () => {

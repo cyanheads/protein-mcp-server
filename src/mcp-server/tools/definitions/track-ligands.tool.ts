@@ -57,9 +57,16 @@ export const trackLigands = tool('protein_track_ligands', {
 
   errors: [
     {
+      reason: 'missing_param',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'The mode-specific required input is absent: query (find_ligand), comp_id (structures_with_ligand), or pdb_id (binding_site).',
+      recovery:
+        'Provide the parameter the selected mode requires: query for find_ligand, comp_id for structures_with_ligand, or pdb_id for binding_site.',
+    },
+    {
       reason: 'not_found',
       code: JsonRpcErrorCode.NotFound,
-      when: 'No chemical component matched the name/formula, no structures contain the component, or the structure has no instance of the ligand.',
+      when: 'No chemical component matched the name/formula, or the structure has no instance of the ligand.',
       recovery:
         'Use mode "find_ligand" to resolve a name to a component ID first, then confirm the ligand is present in the structure via protein_get_structure.',
     },
@@ -129,7 +136,7 @@ export const trackLigands = tool('protein_track_ligands', {
 
     if (input.mode === 'find_ligand') {
       if (!input.query)
-        throw ctx.fail('not_found', 'mode find_ligand requires a name or formula in "query".');
+        throw ctx.fail('missing_param', 'mode find_ligand requires a name or formula in "query".');
       const ids = await rcsb.findChemComps(input.query, input.limit, ctx);
       const ligands = (
         await mapWithConcurrency(ids, cfg.fanoutConcurrency, (id) => rcsb.getChemComp(id, ctx))
@@ -146,17 +153,18 @@ export const trackLigands = tool('protein_track_ligands', {
 
     if (input.mode === 'structures_with_ligand') {
       const compId = input.comp_id?.toUpperCase();
-      if (!compId) throw ctx.fail('not_found', 'mode structures_with_ligand requires a "comp_id".');
+      if (!compId)
+        throw ctx.fail('missing_param', 'mode structures_with_ligand requires a "comp_id".');
       const result = await rcsb.searchByLigand(compId, { limit: input.limit }, ctx);
-      if (result.hits.length === 0) {
-        throw ctx.fail('not_found', `No structures contain ligand ${compId}.`, {
-          recovery: {
-            hint: `No PDB entries contain ${compId}. Verify the component ID via mode find_ligand.`,
-          },
-        });
-      }
       ctx.enrich.total(result.total);
       ctx.enrich({ resolvedCompId: compId });
+      // A valid component with zero containing structures is an empty result set,
+      // not a not-found — mirrors protein_search_structures' empty-hits behavior.
+      if (result.hits.length === 0) {
+        ctx.enrich.notice(
+          `No PDB entries contain ${compId}. Verify the component ID via mode find_ligand.`,
+        );
+      }
       return {
         mode: input.mode,
         structures: result.hits.map((h) => ({ id: h.id, score: h.score })),
@@ -165,7 +173,7 @@ export const trackLigands = tool('protein_track_ligands', {
 
     // binding_site
     const compId = input.comp_id?.toUpperCase();
-    if (!input.pdb_id) throw ctx.fail('not_found', 'mode binding_site requires a "pdb_id".');
+    if (!input.pdb_id) throw ctx.fail('missing_param', 'mode binding_site requires a "pdb_id".');
     const sites = await rcsb.getBindingSites(input.pdb_id, compId, ctx);
     if (sites.length === 0) {
       throw ctx.fail(
