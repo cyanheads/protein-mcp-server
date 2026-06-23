@@ -1,8 +1,8 @@
 {
   "manifest_version": "0.3",
   "name": "protein-mcp-server",
-  "version": "0.1.3",
-  "description": "Federated protein structure & function across experimental (PDB) and predicted (AlphaFold) models.",
+  "version": "0.1.4",
+  "description": "Federated protein structure & annotation across experimental (PDB) and predicted (AlphaFold) models.",
   "author": { "name": "cyanheads" },
   "repository": {
     "type": "git",

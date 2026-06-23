@@ -1,7 +1,7 @@
 {
   "name": "protein-mcp-server",
-  "version": "0.1.3",
-  "description": "Federated protein structure & function across experimental (PDB) and predicted (AlphaFold) models.",
+  "version": "0.1.4",
+  "description": "Federated protein structure & annotation across experimental (PDB) and predicted (AlphaFold) models.",
   "author": {
     "name": "cyanheads",
     "email": "casey@caseyjhand.com",
@@ -23,7 +23,7 @@
   "mcpServers": "./.codex-plugin/mcp.json",
   "interface": {
     "displayName": "protein-mcp-server",
-    "shortDescription": "Federated protein structure & function across experimental (PDB) and predicted (AlphaFold) models.",
+    "shortDescription": "Federated protein structure & annotation across experimental (PDB) and predicted (AlphaFold) models.",
     "longDescription": "Search, fetch, and compare protein structures across experimental (PDB) and predicted (AlphaFold) models from one tool surface. Find sequence and fold homologs, track ligands and binding sites, profile the PDB with server-side facets, and pull UniProt/InterPro functional annotations — all over keyless public providers.",
     "developerName": "cyanheads",
     "category": "research",

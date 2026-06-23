@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.1.4](changelog/0.1.x/0.1.4.md) — 2026-06-23
+
+Narrow the public description and server instructions from 'structure & function' to 'structure & annotation'. No behavior changes.
+
 ## [0.1.3](changelog/0.1.x/0.1.3.md) — 2026-06-20
 
 Maintenance: mcp-ts-core ^0.10.6 → ^0.10.9, re-synced framework scripts/skills and devcheck guards. No behavior changes.

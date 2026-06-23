@@ -42,15 +42,7 @@ await createApp({
   // Public, keyless data server — serve the full inventory to unauthenticated callers.
   landing: { requireAuth: false },
   instructions:
-    'protein-mcp-server — federated protein structure & function research over experimental (PDB) and ' +
-    'predicted (AlphaFold) structures. No API keys required.\n' +
-    '- protein_search_structures: find structures by text, sequence, or organism/method/resolution; optional facet breakdown\n' +
-    '- protein_get_structure: fetch metadata + coordinate URLs for PDB IDs or UniProt accessions (batch, partial success)\n' +
-    '- protein_find_similar: sequence (mmseqs2) or structure (Foldseek) similarity search\n' +
-    '- protein_track_ligands: resolve ligands, find structures containing them, or map binding-site residues\n' +
-    '- protein_compare_structures: pairwise TM-align / jFATCAT over 2–10 structures\n' +
-    '- protein_analyze_collection: server-side facet distributions and trends over the PDB\n' +
-    '- protein_get_annotations: UniProt features + InterPro domains/GO terms',
+    'protein-mcp-server federates experimental (PDB) and predicted (AlphaFold) protein structures: search structures by text, sequence, or organism/method/resolution (protein_search_structures); fetch metadata and coordinate URLs for PDB IDs or UniProt accessions (protein_get_structure); find sequence or fold homologs via mmseqs2 or Foldseek (protein_find_similar); resolve ligands and map binding-site residues (protein_track_ligands); align 2–10 structures with TM-align or jFATCAT (protein_compare_structures); profile the PDB with server-side facet distributions and trends (protein_analyze_collection); and pull UniProt features plus InterPro domains and GO terms (protein_get_annotations).',
   setup(core) {
     const serverConfig = getServerConfig();
     initRcsbService(core.config, core.storage, serverConfig);
