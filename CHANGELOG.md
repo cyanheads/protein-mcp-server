@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-07-03
+
+Nested cross-tab facet children now carry a truncated flag; declared error recovery hints reach the wire; protein_track_ligands binding_site honors limit.
+
 ## [0.2.0](changelog/0.2.x/0.2.0.md) — 2026-07-03 · 🛡️ Security
 
 Resume protein_find_similar and protein_compare_structures jobs by ticket/UUID instead of resubmitting; compare_structures structures cap widened to the configured 2–25 range with a truncation notice; dependency refresh clears a moderate js-yaml advisory.
