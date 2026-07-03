@@ -14,10 +14,19 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const findChemComps = vi.fn();
 const getChemComp = vi.fn();
+const countEntriesWithLigand = vi.fn();
 const searchByLigand = vi.fn();
+const getEntries = vi.fn();
 const getBindingSites = vi.fn();
 vi.mock('@/services/rcsb/rcsb-service.js', () => ({
-  getRcsbService: () => ({ findChemComps, getChemComp, searchByLigand, getBindingSites }),
+  getRcsbService: () => ({
+    findChemComps,
+    getChemComp,
+    countEntriesWithLigand,
+    searchByLigand,
+    getEntries,
+    getBindingSites,
+  }),
 }));
 
 import { trackLigands } from '@/mcp-server/tools/definitions/track-ligands.tool.js';
@@ -27,7 +36,7 @@ const ctx = () => createMockContext({ errors: trackLigands.errors });
 beforeEach(() => vi.clearAllMocks());
 
 describe('protein_track_ligands — find_ligand', () => {
-  it('resolves a name to chem-comp metadata', async () => {
+  it('resolves a name to chem-comp metadata with its deposition count', async () => {
     findChemComps.mockResolvedValue(['HEM']);
     getChemComp.mockResolvedValue({
       compId: 'HEM',
@@ -35,6 +44,7 @@ describe('protein_track_ligands — find_ligand', () => {
       formula: 'C34 H32 Fe N4 O4',
       formulaWeight: 616.5,
     });
+    countEntriesWithLigand.mockResolvedValue(6475);
     const out = await trackLigands.handler(
       trackLigands.input.parse({ mode: 'find_ligand', query: 'heme' }),
       ctx(),
@@ -46,18 +56,36 @@ describe('protein_track_ligands — find_ligand', () => {
         name: 'PROTOPORPHYRIN IX CONTAINING FE',
         formula: 'C34 H32 Fe N4 O4',
         formulaWeight: 616.5,
+        depositionCount: 6475,
       },
     ]);
+  });
+
+  it('re-ranks candidates by deposition frequency: the most-deposited component leads, not the top name match (#17)', async () => {
+    // RCSB name-string ranking returns HEC first, HEM last; HEM is far more
+    // deposited (the canonical heme), so the re-rank must surface it first.
+    findChemComps.mockResolvedValue(['HEC', 'HEA', 'HEM']);
+    getChemComp.mockImplementation(async (id: string) => ({ compId: id }));
+    countEntriesWithLigand.mockImplementation(
+      async (id: string) => ({ HEM: 6475, HEC: 1218, HEA: 202 })[id] ?? 0,
+    );
+    const out = await trackLigands.handler(
+      trackLigands.input.parse({ mode: 'find_ligand', query: 'heme' }),
+      ctx(),
+    );
+    expect(out.ligands?.map((l) => l.compId)).toEqual(['HEM', 'HEC', 'HEA']);
+    expect(out.ligands?.map((l) => l.depositionCount)).toEqual([6475, 1218, 202]);
   });
 
   it('drops nulls from the per-id metadata fan-out', async () => {
     findChemComps.mockResolvedValue(['HEM', 'GONE']);
     getChemComp.mockImplementation(async (id: string) => (id === 'HEM' ? { compId: 'HEM' } : null));
+    countEntriesWithLigand.mockResolvedValue(6475);
     const out = await trackLigands.handler(
       trackLigands.input.parse({ mode: 'find_ligand', query: 'heme' }),
       ctx(),
     );
-    expect(out.ligands).toEqual([{ compId: 'HEM' }]);
+    expect(out.ligands).toEqual([{ compId: 'HEM', depositionCount: 6475 }]);
   });
 
   it('throws missing_param (InvalidParams) when query is missing', async () => {
@@ -91,26 +119,58 @@ describe('protein_track_ligands — find_ligand', () => {
 });
 
 describe('protein_track_ligands — structures_with_ligand', () => {
-  it('returns matching structures and records the total + resolved comp id', async () => {
+  it('returns matching structures with resolution, records the total + resolved comp id', async () => {
     searchByLigand.mockResolvedValue({
       total: 1200,
       hits: [
         { id: '4HHB', score: 1 },
-        { id: '2HHB', score: 0.9 },
+        { id: '2HHB', score: 1 },
       ],
     });
+    getEntries.mockResolvedValue([
+      { id: '4HHB', resolution: 1.74, organisms: [], polymerEntities: [], ligands: [] },
+      { id: '2HHB', resolution: 1.9, organisms: [], polymerEntities: [], ligands: [] },
+    ]);
     const c = ctx();
     const out = await trackLigands.handler(
       trackLigands.input.parse({ mode: 'structures_with_ligand', comp_id: 'hem' }),
       c,
     );
     expect(out.structures).toEqual([
-      { id: '4HHB', score: 1 },
-      { id: '2HHB', score: 0.9 },
+      { id: '4HHB', resolution: 1.74 },
+      { id: '2HHB', resolution: 1.9 },
     ]);
-    // comp_id is upper-cased before the search.
+    // comp_id is upper-cased before the search; hit ids feed the batched metadata fetch.
     expect(searchByLigand).toHaveBeenCalledWith('HEM', { limit: 25 }, expect.anything());
+    expect(getEntries).toHaveBeenCalledWith(['4HHB', '2HHB'], expect.anything());
     expect(getEnrichment(c)).toMatchObject({ totalCount: 1200, resolvedCompId: 'HEM' });
+  });
+
+  it('sorts by resolution (best first), carries no score, and puts entries lacking resolution last (#19)', async () => {
+    searchByLigand.mockResolvedValue({
+      total: 3,
+      hits: [
+        { id: 'AAAA', score: 1 },
+        { id: 'BBBB', score: 1 },
+        { id: 'CCCC', score: 1 },
+      ],
+    });
+    // getEntries returns out of input order and omits resolution for one entry.
+    getEntries.mockResolvedValue([
+      { id: 'BBBB', resolution: 0.8, organisms: [], polymerEntities: [], ligands: [] },
+      { id: 'AAAA', resolution: 2, organisms: [], polymerEntities: [], ligands: [] },
+      { id: 'CCCC', organisms: [], polymerEntities: [], ligands: [] },
+    ]);
+    const out = await trackLigands.handler(
+      trackLigands.input.parse({ mode: 'structures_with_ligand', comp_id: 'HEM' }),
+      ctx(),
+    );
+    // Best resolution first; the entry with no resolution sorts last.
+    expect(out.structures?.map((s) => s.id)).toEqual(['BBBB', 'AAAA', 'CCCC']);
+    expect(out.structures?.[0]).toEqual({ id: 'BBBB', resolution: 0.8 });
+    expect(out.structures?.[2]).toEqual({ id: 'CCCC' });
+    // The meaningless containment score is gone entirely.
+    for (const s of out.structures ?? []) expect(s).not.toHaveProperty('score');
   });
 
   it('throws missing_param (InvalidParams) when comp_id is missing', async () => {
@@ -218,6 +278,7 @@ describe('protein_track_ligands — format', () => {
           type: 'non-polymer',
           smiles: 'Cc1ccc(cc1)Nc1nccc(n1)-c1cccnc1',
           inchikey: 'KTUFNOKKBVMGRW-UHFFFAOYSA-N',
+          depositionCount: 42,
         },
       ],
     });
@@ -225,6 +286,7 @@ describe('protein_track_ligands — format', () => {
     expect(text).toContain('### STI — IMATINIB');
     expect(text).toContain('**Formula:** C29 H31 N7 O');
     expect(text).toContain('**Weight:** 493.6 Da');
+    expect(text).toContain('**PDB entries:** 42');
     expect(text).toContain('**SMILES:** Cc1ccc(cc1)Nc1nccc(n1)-c1cccnc1');
     expect(text).toContain('**InChIKey:** KTUFNOKKBVMGRW-UHFFFAOYSA-N');
   });
@@ -249,14 +311,16 @@ describe('protein_track_ligands — format', () => {
     expect(text).toContain('- PHE (chain A)'); // no seqId, no distance
   });
 
-  it('renders a structures list with the comma-joined ids', () => {
+  it('renders a structures list with the comma-joined ids and per-entry resolution', () => {
     const blocks = trackLigands.format?.({
       mode: 'structures_with_ligand',
-      structures: [{ id: '4HHB', score: 1 }, { id: '2HHB' }],
+      structures: [{ id: '4HHB', resolution: 1.74 }, { id: '2HHB' }],
     });
     const text = (blocks?.[0] as { text: string }).text;
     expect(text).toContain('**2 structures:**');
     expect(text).toContain('4HHB, 2HHB');
-    expect(text).toContain('- 4HHB (score 1.00)');
+    expect(text).toContain('- 4HHB — 1.74 Å');
+    // An entry without a resolution gets no bullet line (no meaningless score column).
+    expect(text).not.toContain('score');
   });
 });

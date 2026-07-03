@@ -143,30 +143,38 @@ export class RcsbService {
     return { total: raw.total_count ?? 0, hits: normalizeHits(raw.result_set) };
   }
 
-  /** Find entries containing a given ligand (exact chemical component ID). */
+  /**
+   * Find entries containing a given ligand (exact chemical component ID),
+   * highest-resolution first. Containment is boolean so RCSB's relevance score is
+   * uniform; a server-side resolution sort orders the page by a signal that
+   * actually discriminates (the returned page is the globally best-resolution
+   * entries, not an arbitrary PDB-ID-ascending slice).
+   */
   async searchByLigand(
     compId: string,
     opts: { limit?: number; contentType?: ContentType },
     ctx: Context,
   ): Promise<SearchResult> {
-    const body = {
-      query: {
-        type: 'terminal' as const,
-        service: 'text_chem' as const,
-        parameters: {
-          attribute: 'rcsb_chem_comp_container_identifiers.comp_id',
-          operator: 'exact_match',
-          value: compId.toUpperCase(),
-        },
-      },
-      return_type: 'entry' as const,
-      request_options: {
-        ...contentTypeOption(opts.contentType ?? 'experimental'),
-        paginate: { start: 0, rows: opts.limit ?? 25 },
-      },
-    };
-    const raw = await this.postSearch(body, ctx, 'RcsbService.searchByLigand');
+    const raw = await this.postSearch(
+      ligandContainmentQuery(compId, opts.contentType, opts.limit ?? 25, true),
+      ctx,
+      'RcsbService.searchByLigand',
+    );
     return { total: raw.total_count ?? 0, hits: normalizeHits(raw.result_set) };
+  }
+
+  /**
+   * Count PDB entries containing a given ligand (its deposition frequency). Used
+   * to re-rank name-search candidates so the canonical, most-deposited component
+   * surfaces first — a count-only query (rows 0), no rows or sort pulled.
+   */
+  async countEntriesWithLigand(compId: string, ctx: Context): Promise<number> {
+    const raw = await this.postSearch(
+      ligandContainmentQuery(compId, undefined, 0, false),
+      ctx,
+      'RcsbService.countEntriesWithLigand',
+    );
+    return raw.total_count ?? 0;
   }
 
   /** Resolve a ligand name/synonym to candidate chemical component IDs. */
@@ -437,6 +445,39 @@ function textNode(attribute: string, operator: string, value: string | number): 
 function contentTypeOption(contentType?: ContentType): { results_content_type?: string[] } {
   if (!contentType) return {};
   return { results_content_type: [contentType] };
+}
+
+/**
+ * Ligand-containment search body (exact chemical-component ID), shared by
+ * searchByLigand and countEntriesWithLigand. Defaults to experimental content;
+ * `rows` bounds the page (0 for a count-only query), and `sortByResolution`
+ * orders entries best-resolution-first (skip it for counts — order is moot).
+ */
+function ligandContainmentQuery(
+  compId: string,
+  contentType: ContentType | undefined,
+  rows: number,
+  sortByResolution: boolean,
+): unknown {
+  return {
+    query: {
+      type: 'terminal',
+      service: 'text_chem',
+      parameters: {
+        attribute: 'rcsb_chem_comp_container_identifiers.comp_id',
+        operator: 'exact_match',
+        value: compId.toUpperCase(),
+      },
+    },
+    return_type: 'entry',
+    request_options: {
+      ...contentTypeOption(contentType ?? 'experimental'),
+      paginate: { start: 0, rows },
+      ...(sortByResolution
+        ? { sort: [{ sort_by: 'rcsb_entry_info.resolution_combined', direction: 'asc' }] }
+        : {}),
+    },
+  };
 }
 
 /** Translate a friendly FacetSpec into the RCSB facet request shape (recursively). */

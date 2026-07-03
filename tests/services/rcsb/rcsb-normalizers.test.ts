@@ -363,14 +363,31 @@ describe('RcsbService search helpers', () => {
     ]);
   });
 
-  it('searchByLigand upper-cases the component id in the query', async () => {
+  it('searchByLigand upper-cases the component id and sorts by resolution (best first)', async () => {
     fetchJsonMock.mockResolvedValue({
       total_count: 3,
       result_set: [{ identifier: '4HHB', score: 1 }],
     });
     await service().searchByLigand('hem', { limit: 10 }, createMockContext());
     const opts = fetchJsonMock.mock.calls[0]?.[2] as unknown as { body: string };
-    expect(JSON.parse(opts.body).query.parameters.value).toBe('HEM');
+    const body = JSON.parse(opts.body);
+    expect(body.query.parameters.value).toBe('HEM');
+    // Containment score is uniform, so a server-side resolution sort supplies the real order.
+    expect(body.request_options.sort).toEqual([
+      { sort_by: 'rcsb_entry_info.resolution_combined', direction: 'asc' },
+    ]);
+    expect(body.request_options.paginate.rows).toBe(10);
+  });
+
+  it('countEntriesWithLigand returns the deposition total from a count-only (rows 0, unsorted) query', async () => {
+    fetchJsonMock.mockResolvedValue({ total_count: 6475, result_set: [] });
+    const n = await service().countEntriesWithLigand('hem', createMockContext());
+    expect(n).toBe(6475);
+    const opts = fetchJsonMock.mock.calls[0]?.[2] as unknown as { body: string };
+    const body = JSON.parse(opts.body);
+    expect(body.query.parameters.value).toBe('HEM');
+    expect(body.request_options.paginate.rows).toBe(0);
+    expect(body.request_options.sort).toBeUndefined();
   });
 
   it('findChemComps returns only the hit identifiers', async () => {

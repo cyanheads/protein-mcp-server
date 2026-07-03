@@ -10,7 +10,7 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { getRcsbService } from '@/services/rcsb/rcsb-service.js';
-import type { ChemComp } from '@/services/rcsb/types.js';
+import type { ChemComp, EntryMeta } from '@/services/rcsb/types.js';
 import { mapWithConcurrency } from '@/services/shared/async.js';
 
 const chemCompSchema = z
@@ -22,6 +22,11 @@ const chemCompSchema = z
     smiles: z.string().optional().describe('Isomeric SMILES.'),
     inchikey: z.string().optional().describe('InChIKey.'),
     type: z.string().optional().describe('Component type (e.g. non-polymer).'),
+    depositionCount: z
+      .number()
+      .describe(
+        'Number of PDB entries containing this component (deposition frequency). Candidates are ranked by this value, most-deposited first.',
+      ),
   })
   .describe('A resolved chemical component (ligand) and its identifiers.');
 
@@ -48,10 +53,12 @@ export const trackLigands = tool('protein_track_ligands', {
   title: 'protein-mcp-server: track ligands',
   description:
     'Ligand discovery and binding-site analysis across the PDB. mode "find_ligand" resolves a name or ' +
-    'formula to chemical component IDs with metadata (formula, weight, SMILES). mode ' +
-    '"structures_with_ligand" returns PDB entries containing a ligand (by exact component ID — get the ' +
-    'ID from find_ligand first). mode "binding_site" returns the protein residues lining a ligand\'s ' +
-    'pocket in a given structure, with contact distances. Binding sites are experimental-only ' +
+    'formula to chemical component IDs with metadata (formula, weight, SMILES), ranked by deposition ' +
+    'frequency — most-deposited component first, so the top hit is the most common match for the name, ' +
+    'not necessarily an exact name-string match. mode "structures_with_ligand" returns PDB entries ' +
+    'containing a ligand (by exact component ID — get the ID from find_ligand first), highest-resolution ' +
+    'first, each with its resolution in Å. mode "binding_site" returns the protein residues lining a ' +
+    "ligand's pocket in a given structure, with contact distances. Binding sites are experimental-only " +
     '(computed from deposited coordinates; predicted models carry no bound ligands).',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
@@ -106,12 +113,19 @@ export const trackLigands = tool('protein_track_ligands', {
         z
           .object({
             id: z.string().describe('PDB entry ID containing the ligand.'),
-            score: z.number().optional().describe('RCSB relevance score.'),
+            resolution: z
+              .number()
+              .optional()
+              .describe(
+                'Best reported resolution in Å (absent for methods without one, e.g. NMR).',
+              ),
           })
-          .describe('A PDB entry containing the ligand.'),
+          .describe('A PDB entry containing the ligand, with its resolution.'),
       )
       .optional()
-      .describe('PDB entries containing the ligand (structures_with_ligand).'),
+      .describe(
+        'PDB entries containing the ligand, highest-resolution first (structures_with_ligand).',
+      ),
     bindingSites: z
       .array(bindingSiteSchema)
       .optional()
@@ -140,9 +154,21 @@ export const trackLigands = tool('protein_track_ligands', {
           ...ctx.recoveryFor('missing_param'),
         });
       const ids = await rcsb.findChemComps(input.query, input.limit, ctx);
-      const ligands = (
-        await mapWithConcurrency(ids, cfg.fanoutConcurrency, (id) => rcsb.getChemComp(id, ctx))
-      ).filter((c): c is ChemComp => c != null);
+      // Resolve each candidate's metadata and its deposition frequency (entries
+      // containing it) in parallel, then re-rank by that count — the canonical
+      // component (e.g. HEM for "heme") is the most-deposited, but RCSB's name
+      // ranking buries it below near-namesakes. Re-rank, never filter: same set,
+      // reordered. Candidate count is already bounded by `limit` via findChemComps.
+      const resolved = await mapWithConcurrency(ids, cfg.fanoutConcurrency, async (id) => {
+        const [chem, depositionCount] = await Promise.all([
+          rcsb.getChemComp(id, ctx),
+          rcsb.countEntriesWithLigand(id, ctx),
+        ]);
+        return chem ? { ...chem, depositionCount } : null;
+      });
+      const ligands = resolved
+        .filter((c): c is ChemComp & { depositionCount: number } => c != null)
+        .sort((a, b) => b.depositionCount - a.depositionCount);
       if (ligands.length === 0) {
         throw ctx.fail('not_found', `No chemical component matched "${input.query}".`, {
           recovery: {
@@ -169,10 +195,22 @@ export const trackLigands = tool('protein_track_ligands', {
           `No PDB entries contain ${compId}. Verify the component ID via mode find_ligand.`,
         );
       }
-      return {
-        mode: input.mode,
-        structures: result.hits.map((h) => ({ id: h.id, score: h.score })),
-      };
+      // Replace RCSB's uniform containment score (noise for a boolean filter) with
+      // each entry's resolution, enriched via the same batched entry-metadata path
+      // the other tools use. The search is resolution-sorted server-side; sort
+      // again by the enriched value since getEntries does not preserve input order.
+      const ids = result.hits.map((h) => h.id);
+      const metaById = new Map<string, EntryMeta>();
+      if (ids.length > 0) {
+        for (const meta of await rcsb.getEntries(ids, ctx)) metaById.set(meta.id, meta);
+      }
+      const structures = ids
+        .map((id) => {
+          const resolution = metaById.get(id.toUpperCase())?.resolution;
+          return { id, ...(typeof resolution === 'number' ? { resolution } : {}) };
+        })
+        .sort((a, b) => (a.resolution ?? Infinity) - (b.resolution ?? Infinity));
+      return { mode: input.mode, structures };
     }
 
     // binding_site
@@ -213,6 +251,7 @@ export const trackLigands = tool('protein_track_ligands', {
         l.formula ? `**Formula:** ${l.formula}` : null,
         typeof l.formulaWeight === 'number' ? `**Weight:** ${l.formulaWeight} Da` : null,
         l.type ? `**Type:** ${l.type}` : null,
+        typeof l.depositionCount === 'number' ? `**PDB entries:** ${l.depositionCount}` : null,
       ].filter(Boolean);
       if (parts.length > 0) lines.push(parts.join(' | '));
       if (l.smiles) lines.push(`**SMILES:** ${l.smiles}`);
@@ -222,7 +261,8 @@ export const trackLigands = tool('protein_track_ligands', {
       lines.push(`\n**${result.structures.length} structures:**`);
       lines.push(result.structures.map((s) => s.id).join(', '));
       for (const s of result.structures) {
-        if (typeof s.score === 'number') lines.push(`- ${s.id} (score ${s.score.toFixed(2)})`);
+        if (typeof s.resolution === 'number')
+          lines.push(`- ${s.id} — ${s.resolution.toFixed(2)} Å`);
       }
     }
     for (const site of result.bindingSites ?? []) {
