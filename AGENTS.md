@@ -80,7 +80,8 @@ export const getAnnotations = tool('protein_get_annotations', {
   async handler(input, ctx) {
     let accession = input.uniprot?.toUpperCase();
     if (!accession && input.pdb_id) {
-      accession = (await getRcsbService().resolveUniprot(input.pdb_id, ctx))[0];
+      // entity-grained; the real handler picks deterministically by author chain
+      accession = (await getRcsbService().resolveUniprotEntities(input.pdb_id, ctx))[0]?.accession;
     }
     if (!accession || !isUniProtAccession(accession)) {
       throw ctx.fail('no_uniprot_mapping', 'Provide a UniProt accession, or a PDB ID with a modeled protein chain.');
