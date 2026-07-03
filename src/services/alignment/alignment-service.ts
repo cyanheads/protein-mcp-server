@@ -108,6 +108,30 @@ export class AlignmentService {
     }
   }
 
+  /**
+   * Resume an existing job: bounded-poll a UUID returned by a prior `comparePair`
+   * without resubmitting. Reuses the same `pollResult` step, so a `404` — which the
+   * RCSB API returns identically for an expired UUID and a job still computing —
+   * degrades to `{ status: 'computing' }` on timeout rather than a false `failed`.
+   * A legitimately in-flight job is never mistaken for a dead one. Never throws.
+   */
+  async resumePair(uuid: string, timeoutMs: number, ctx: Context): Promise<PairOutcome> {
+    try {
+      const outcome = await withAsyncPoll<PairScores>({
+        step: () => this.pollResult(uuid, ctx),
+        timeoutMs,
+        ctx,
+        intervalMs: 1500,
+        maxIntervalMs: 2500,
+      });
+      return outcome.status === 'complete'
+        ? { status: 'complete', uuid, scores: outcome.value }
+        : { status: 'computing', uuid };
+    } catch (err) {
+      return { status: 'failed', error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
   /** Single poll of a job's results. 404 = still computing; a result body = ready. */
   private async pollResult(uuid: string, ctx: Context): Promise<PollStep<PairScores>> {
     const res = await fetchResponse(`${this.resultsUrl}?uuid=${encodeURIComponent(uuid)}`, ctx, {

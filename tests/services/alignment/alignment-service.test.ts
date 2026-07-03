@@ -221,3 +221,55 @@ describe('AlignmentService.comparePair', () => {
     expect(query.context.method).toEqual({ name: 'tm-align' });
   });
 });
+
+describe('AlignmentService.resumePair — poll an existing UUID without resubmitting', () => {
+  it('polls the given UUID (no submit) and returns a completed result', async () => {
+    fetchResponseMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () => READY_PAYLOAD,
+    } as Response);
+
+    const out = await service().resumePair('abc-123', 1000, createMockContext());
+
+    expect(out).toEqual({
+      status: 'complete',
+      uuid: 'abc-123',
+      scores: { tmScore: 0.98, rmsd: 0.42, sequenceIdentity: 1, alignedResidues: 141 },
+    });
+    // No submit — the resume path never calls fetchText (the submit helper).
+    expect(fetchTextMock).not.toHaveBeenCalled();
+    // The poll URL carries the resumed UUID.
+    expect(fetchResponseMock.mock.calls[0]?.[0]).toContain('uuid=abc-123');
+  });
+
+  it('stays computing on a 404 — an expired UUID is indistinguishable from a running job, so it is never falsely failed', async () => {
+    fetchResponseMock.mockResolvedValue({
+      status: 404,
+      ok: false,
+      text: async () =>
+        '{"status":404,"message":"No such UUID: 00000000-0000-4000-8000-000000000000"}',
+    } as Response);
+
+    const out = await service().resumePair(
+      '00000000-0000-4000-8000-000000000000',
+      30,
+      createMockContext(),
+    );
+
+    // The RCSB API returns the same 404 for "still computing" and "unknown UUID";
+    // resume must report computing, never a false not-found/failed.
+    expect(out).toEqual({ status: 'computing', uuid: '00000000-0000-4000-8000-000000000000' });
+  });
+
+  it('degrades to failed when the results poll returns a non-404 HTTP error', async () => {
+    fetchResponseMock.mockResolvedValue({
+      status: 500,
+      ok: false,
+      text: async () => '',
+    } as Response);
+
+    const out = await service().resumePair('u', 1000, createMockContext());
+    expect(out).toMatchObject({ status: 'failed', error: expect.stringMatching(/HTTP 500/) });
+  });
+});
