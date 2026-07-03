@@ -169,6 +169,51 @@ describe('protein_analyze_collection', () => {
     expect(text).toContain('release_year → 1976: 4, 1977: 1 (truncated)');
   });
 
+  it('coerces a stringified numeric interval onto the histogram spec (#15)', async () => {
+    analyzeFacets.mockResolvedValue({ total: 1, facets: [methodFacet([])] });
+    await analyzeCollection.handler(
+      analyzeCollection.input.parse({ group_by: ['resolution'], interval: '0.5' }),
+      ctx(),
+    );
+    const [spec] = analyzeFacets.mock.calls[0]?.[1] as Array<{ interval?: unknown }>;
+    expect(spec?.interval).toBe(0.5); // coerced to a number, not the string "0.5"
+  });
+
+  it('parses a string and a number interval identically (#15)', () => {
+    const fromStr = analyzeCollection.input.parse({ group_by: ['resolution'], interval: '0.5' });
+    const fromNum = analyzeCollection.input.parse({ group_by: ['resolution'], interval: 0.5 });
+    expect(fromStr.interval).toBe(0.5);
+    expect(fromNum.interval).toBe(0.5);
+  });
+
+  it('keeps a period interval string on the date-histogram arm (#15)', async () => {
+    analyzeFacets.mockResolvedValue({ total: 1, facets: [methodFacet([])] });
+    // "year" coerces to NaN on the numeric arm (rejected by .positive()) → enum arm.
+    const parsed = analyzeCollection.input.parse({ group_by: ['release_year'], interval: 'year' });
+    expect(parsed.interval).toBe('year');
+    await analyzeCollection.handler(parsed, ctx());
+    const [spec] = analyzeFacets.mock.calls[0]?.[1] as Array<{ interval?: unknown }>;
+    expect(spec?.interval).toBe('year');
+  });
+
+  it('coerces stringified max_resolution and bucket_limit (#15)', async () => {
+    const buckets = Array.from({ length: 5 }, (_, i) => ({ label: `org${i}`, count: 5 - i }));
+    analyzeFacets.mockResolvedValue({
+      total: 50,
+      facets: [{ ...methodFacet(buckets), dimension: 'organism' }],
+    });
+    const out = await analyzeCollection.handler(
+      analyzeCollection.input.parse({
+        group_by: ['organism'],
+        max_resolution: '2.5',
+        bucket_limit: '2',
+      }),
+      ctx(),
+    );
+    expect(analyzeFacets.mock.calls[0]?.[0]).toMatchObject({ maxResolution: 2.5 });
+    expect(out.facets[0]?.buckets).toHaveLength(2); // bucket_limit "2" applied as 2
+  });
+
   it('carries the declared recovery hint on the unknown_dimension guard (#10)', async () => {
     const base = analyzeCollection.input.parse({ group_by: ['method'] });
     await expect(analyzeCollection.handler({ ...base, group_by: [] }, ctx())).rejects.toMatchObject(

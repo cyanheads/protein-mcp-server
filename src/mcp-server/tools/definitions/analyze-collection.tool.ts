@@ -47,7 +47,7 @@ export const analyzeCollection = tool('protein_analyze_collection', {
       .describe('Optional free-text scope (e.g. "kinase"); omit to profile the whole PDB.'),
     organism: z.string().optional().describe('Optional source-organism scope.'),
     method: z.string().optional().describe('Optional experimental-method scope.'),
-    max_resolution: z
+    max_resolution: z.coerce
       .number()
       .positive()
       .optional()
@@ -58,7 +58,10 @@ export const analyzeCollection = tool('protein_analyze_collection', {
       .describe('Which structure universe to profile. Default experimental.'),
     interval: z
       .union([
-        z
+        // Coerce the numeric arm: many clients stringify tool args, and "0.5" must
+        // still reach the histogram path. z.coerce.number() on "year" yields NaN,
+        // which .positive() rejects, so period strings still fall through to the enum.
+        z.coerce
           .number()
           .positive()
           .describe('Numeric bin width for a value histogram (e.g. resolution Å).'),
@@ -68,7 +71,7 @@ export const analyzeCollection = tool('protein_analyze_collection', {
       .describe(
         'Bin width for a histogram dimension (number) or period for a date histogram (year/month/quarter).',
       ),
-    bucket_limit: z
+    bucket_limit: z.coerce
       .number()
       .int()
       .min(1)
