@@ -1,6 +1,6 @@
 # protein-mcp-server - Directory Structure
 
-Generated on: 2026-06-20 18:59:43
+Generated on: 2026-07-03 09:28:32
 
 ```text
 protein-mcp-server/
@@ -19,6 +19,7 @@ protein-mcp-server/
 │   └── settings.json
 ├── changelog/
 │   ├── 0.1.x/
+│   ├── 0.2.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md

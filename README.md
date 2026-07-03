@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.1.4-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.2.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -37,7 +37,7 @@ Seven tools spanning the structure-research arc — discover, fetch, find homolo
 | `protein_get_structure` | Fetch metadata and coordinate-file URLs by ID — experimental (PDB), predicted (AlphaFold), or best-available — with batch partial success and optional coordinate inlining. |
 | `protein_find_similar` | Find sequence homologs (RCSB mmseqs2) or fold homologs (Foldseek) from a sequence, PDB ID, or UniProt accession. |
 | `protein_track_ligands` | Resolve ligand names/formulas to component IDs, find structures containing a ligand, or map binding-site residues. |
-| `protein_compare_structures` | Structurally align 2–10 structures (TM-align / jFATCAT) to a reference or as a full pairwise matrix. |
+| `protein_compare_structures` | Structurally align multiple structures (TM-align / jFATCAT) to a reference or as a full pairwise matrix. |
 | `protein_analyze_collection` | Profile the PDB into distributions and trends with server-side facets — counts, histograms, timelines, and cross-tabs. |
 | `protein_get_annotations` | Fetch UniProt features and natural variants plus InterPro domain/family memberships with GO terms. |
 
@@ -72,7 +72,7 @@ Find structurally or evolutionarily related proteins, by sequence or by fold.
 - `by: sequence` runs a synchronous RCSB mmseqs2 search; `by: structure` runs an asynchronous Foldseek search against experimental and predicted databases
 - Query from a raw one-letter sequence, a PDB ID, or a UniProt accession
 - Foldseek targets default to `pdb100` + `afdb50`; override via `databases` (e.g. `afdb-swissprot`, `BFVD`)
-- Async jobs that exceed the poll budget return `status: computing` with a ticket — re-call to resume
+- Async jobs that exceed the poll budget return `status: computing` with a `ticketId` — re-call with `ticket_id` set to that value to poll the same job instead of resubmitting
 - Each hit names the engine and source database it came from
 
 ---
@@ -90,12 +90,13 @@ Ligand discovery and binding-site analysis across the PDB.
 
 ### `protein_compare_structures`
 
-Structural alignment of 2–10 structures via the RCSB Structural Comparison service.
+Structural alignment of multiple structures (up to the configured `PROTEIN_MAX_COMPARE_STRUCTURES` cap) via the RCSB Structural Comparison service.
 
 - Methods: `tm-align`, `fatcat-rigid`, `fatcat-flexible`
 - `reference: first` aligns every structure to the first; `reference: all_pairs` computes the full pairwise matrix
 - Optional per-structure `chain` restricts the alignment to a single chain
-- Each pair is an independent async job, fanned out with a concurrency cap and per-pair partial success — a pair still computing when the budget elapses returns `status: computing` with its job UUID, and a failed pair degrades its row without sinking the others
+- Each pair is an independent async job, fanned out with a concurrency cap and per-pair partial success — a pair still computing when the budget elapses returns `status: computing` with its job `uuid`, and a failed pair degrades its row without sinking the others
+- Re-call with a matching `{ a, b, uuid }` entry in `resume[]` (copied from a prior response's `pairs[]`) to poll a computing pair's job instead of resubmitting
 - Returns TM-score, RMSD, and aligned-residue count per pair
 
 ---
@@ -146,7 +147,7 @@ Protein-specific:
 - One federated surface over experimental (PDB) and predicted (AlphaFold / 3D-Beacons) structures — search, fetch, and compare treat both universes the same
 - Keyless across every upstream — RCSB, AlphaFold DB, 3D-Beacons, UniProt, InterPro, and Foldseek, no API keys to provision
 - Corpus analytics run server-side on RCSB's facet engine — distributions, histograms, and cross-tabs in one call, no row pull and no SQL workspace
-- Async alignment and Foldseek jobs poll within a bounded budget and hand back a resumable ticket instead of blocking
+- Async alignment and Foldseek jobs poll within a bounded budget and hand back a job ticket (`ticketId` / per-pair `uuid`) instead of blocking — re-call with `ticket_id` or a `resume[]` entry to poll the same job instead of resubmitting
 
 Agent-friendly output:
 
