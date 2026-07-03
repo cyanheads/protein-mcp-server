@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.2](changelog/0.3.x/0.3.2.md) — 2026-07-03
+
+protein_track_ligands find_ligand now ranks by deposition frequency instead of name order; structures_with_ligand sorts by resolution instead of a constant score; protein_find_similar sequence hits emit a chainable entry id with the entity id preserved separately.
+
 ## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-07-03
 
 best_available confidence scores are now scale-correct and self-describing instead of overloading meanPlddt; experimental best_available picks return the full cif/pdb/bcif coordinate set, matching source: experimental.
