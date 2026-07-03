@@ -9,6 +9,7 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import type { ServerConfig } from '@/config/server-config.js';
 import { type PollStep, withAsyncPoll } from '../shared/async.js';
@@ -40,10 +41,11 @@ export interface FoldseekHit {
   uniprotAccession?: string;
 }
 
-/** Outcome of a structural search. */
+/** Outcome of a structural search or ticket resume. */
 export type FoldseekOutcome =
   | { status: 'complete'; ticketId: string; hits: FoldseekHit[] }
   | { status: 'computing'; ticketId: string }
+  | { status: 'not_found'; ticketId: string }
   | { status: 'failed'; error: string };
 
 export class FoldseekService {
@@ -93,6 +95,38 @@ export class FoldseekService {
         ? { status: 'complete', ticketId, hits: outcome.value }
         : { status: 'computing', ticketId };
     } catch (err) {
+      return { status: 'failed', error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
+   * Resume an existing ticket: bounded-poll a ticket returned by a prior `search`
+   * without resubmitting. A bogus or expired ticket is a clean `400 "invalid ID"`
+   * from Foldseek — surfaced as `{ status: 'not_found' }`, distinct from an
+   * in-flight job (`computing`) or a processing error (`failed`). Never throws.
+   */
+  async resume(
+    params: { ticketId: string; limit: number; timeoutMs: number },
+    ctx: Context,
+  ): Promise<FoldseekOutcome> {
+    try {
+      const outcome = await withAsyncPoll<FoldseekHit[]>({
+        step: () => this.pollTicket(params.ticketId, params.limit, ctx),
+        timeoutMs: params.timeoutMs,
+        ctx,
+        intervalMs: 1500,
+        maxIntervalMs: 2500,
+      });
+      return outcome.status === 'complete'
+        ? { status: 'complete', ticketId: params.ticketId, hits: outcome.value }
+        : { status: 'computing', ticketId: params.ticketId };
+    } catch (err) {
+      // A 400 from the ticket/result endpoint is Foldseek's "invalid ID" — the
+      // ticket never existed or has expired. `fetchWithTimeout` maps 400 →
+      // InvalidParams, so key the not-found branch off that code.
+      if (err instanceof McpError && err.code === JsonRpcErrorCode.InvalidParams) {
+        return { status: 'not_found', ticketId: params.ticketId };
+      }
       return { status: 'failed', error: err instanceof Error ? err.message : String(err) };
     }
   }

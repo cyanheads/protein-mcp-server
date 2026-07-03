@@ -19,8 +19,9 @@ vi.mock('@/services/rcsb/rcsb-service.js', () => ({
 }));
 
 const foldseekSearch = vi.fn();
+const foldseekResume = vi.fn();
 vi.mock('@/services/foldseek/foldseek-service.js', () => ({
-  getFoldseekService: () => ({ search: foldseekSearch }),
+  getFoldseekService: () => ({ search: foldseekSearch, resume: foldseekResume }),
 }));
 
 const getUniProtSequence = vi.fn();
@@ -237,6 +238,53 @@ describe('protein_find_similar — by:structure', () => {
       ctx(),
     );
     expect(foldseekSearch.mock.calls[0]?.[0]).toMatchObject({ databases: ['afdb-swissprot'] });
+  });
+
+  it('resumes an existing ticket (polls, no resubmit, no coordinate fetch) when ticket_id is set', async () => {
+    foldseekResume.mockResolvedValue({
+      status: 'complete',
+      ticketId: 'resume-me',
+      hits: [
+        {
+          target: '2HHB-A',
+          database: 'pdb100',
+          targetType: 'pdb',
+          pdbId: '2HHB',
+          chain: 'A',
+          score: 800,
+        },
+      ],
+    });
+    const out = await findSimilar.handler(
+      findSimilar.input.parse({ by: 'structure', ticket_id: 'resume-me' }),
+      ctx(),
+    );
+
+    expect(out).toMatchObject({ by: 'structure', engine: 'Foldseek', status: 'complete' });
+    expect(out.hits[0]).toMatchObject({ id: '2HHB', source: 'experimental' });
+    // Polled the given ticket — never submitted a fresh search or fetched coordinates.
+    expect(foldseekResume.mock.calls[0]?.[0]).toMatchObject({ ticketId: 'resume-me' });
+    expect(foldseekSearch).not.toHaveBeenCalled();
+    expect(fetchTextMock).not.toHaveBeenCalled();
+  });
+
+  it('re-reports computing with the same ticket when a resumed job is still running', async () => {
+    foldseekResume.mockResolvedValue({ status: 'computing', ticketId: 'resume-me' });
+    const c = ctx();
+    const out = await findSimilar.handler(
+      findSimilar.input.parse({ by: 'structure', ticket_id: 'resume-me' }),
+      c,
+    );
+    expect(out).toMatchObject({ status: 'computing', ticketId: 'resume-me', hits: [] });
+    expect(String(getEnrichment(c).notice)).toMatch(/ticket_id/i);
+  });
+
+  it('throws ticket_not_found when the resumed ticket is invalid or expired', async () => {
+    foldseekResume.mockResolvedValue({ status: 'not_found', ticketId: 'bogus' });
+    await expect(
+      findSimilar.handler(findSimilar.input.parse({ by: 'structure', ticket_id: 'bogus' }), ctx()),
+    ).rejects.toMatchObject({ data: { reason: 'ticket_not_found' } });
+    expect(foldseekSearch).not.toHaveBeenCalled();
   });
 });
 

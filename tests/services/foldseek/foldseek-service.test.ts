@@ -6,6 +6,7 @@
  * @module tests/services/foldseek/foldseek-service.test
  */
 
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -167,5 +168,50 @@ describe('FoldseekService.search — async / failure branches', () => {
     fetchJsonMock.mockRejectedValueOnce(new Error('submit boom'));
     const out = await service().search(params(), createMockContext());
     expect(out).toEqual({ status: 'failed', error: 'submit boom' });
+  });
+});
+
+describe('FoldseekService.resume — poll an existing ticket without resubmitting', () => {
+  const resumeParams = { ticketId: 'ticket-1', limit: 25, timeoutMs: 1000 };
+
+  it('polls the given ticket (no submit) and returns complete hits', async () => {
+    // Only the ticket-status poll + results fetch — never a submit POST.
+    fetchJsonMock.mockResolvedValueOnce({ status: 'COMPLETE' }).mockResolvedValueOnce(RESULT);
+
+    const out = await service().resume(resumeParams, createMockContext());
+
+    expect(out).toMatchObject({ status: 'complete', ticketId: 'ticket-1' });
+    if (out.status !== 'complete') throw new Error('expected complete');
+    expect(out.hits).toHaveLength(3);
+    // First upstream call is the ticket-status poll, not a /api/ticket submit.
+    expect(fetchJsonMock.mock.calls[0]?.[0]).toContain('/api/ticket/ticket-1');
+  });
+
+  it('returns computing with the same ticket when the budget elapses', async () => {
+    fetchJsonMock.mockResolvedValue({ status: 'PENDING' });
+    const out = await service().resume({ ...resumeParams, timeoutMs: 30 }, createMockContext());
+    expect(out).toEqual({ status: 'computing', ticketId: 'ticket-1' });
+  });
+
+  it('returns not_found when the ticket is a 400 "invalid ID" (bogus/expired)', async () => {
+    // fetchWithTimeout maps a 400 to McpError(InvalidParams); the resume method
+    // keys the not-found branch off that code.
+    fetchJsonMock.mockRejectedValue(new McpError(JsonRpcErrorCode.InvalidParams, 'invalid ID'));
+    const out = await service().resume(resumeParams, createMockContext());
+    expect(out).toEqual({ status: 'not_found', ticketId: 'ticket-1' });
+  });
+
+  it('degrades to failed when the resumed ticket reports ERROR', async () => {
+    fetchJsonMock.mockResolvedValueOnce({ status: 'ERROR' });
+    const out = await service().resume(resumeParams, createMockContext());
+    expect(out).toMatchObject({ status: 'failed' });
+    if (out.status !== 'failed') throw new Error('expected failed');
+    expect(out.error).toMatch(/error/i);
+  });
+
+  it('degrades to failed (not not_found) on a non-400 upstream error', async () => {
+    fetchJsonMock.mockRejectedValue(new Error('network boom'));
+    const out = await service().resume(resumeParams, createMockContext());
+    expect(out).toEqual({ status: 'failed', error: 'network boom' });
   });
 });
