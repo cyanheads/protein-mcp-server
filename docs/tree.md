@@ -1,6 +1,6 @@
 # protein-mcp-server - Directory Structure
 
-Generated on: 2026-07-03 09:28:32
+Generated on: 2026-07-03 12:00:29
 
 ```text
 protein-mcp-server/
@@ -20,6 +20,7 @@ protein-mcp-server/
 ├── changelog/
 │   ├── 0.1.x/
 │   ├── 0.2.x/
+│   ├── 0.3.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -162,6 +163,7 @@ protein-mcp-server/
 │   │   │   └── types.ts
 │   │   ├── shared/
 │   │   │   ├── async.ts
+│   │   │   ├── attribution.ts
 │   │   │   ├── http.ts
 │   │   │   └── identifiers.ts
 │   │   └── uniprot/
@@ -210,6 +212,7 @@ protein-mcp-server/
 ├── bun.lock
 ├── bunfig.toml
 ├── CHANGELOG.md
+├── CITATION.cff
 ├── CLAUDE.md
 ├── devcheck.config.json
 ├── Dockerfile

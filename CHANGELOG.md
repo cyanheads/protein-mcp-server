@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-07-03
+
+protein_get_annotations disambiguates multi-chain PDB entries via a new chain input; protein_get_structure and protein_get_annotations both carry upstream data-source attribution (license + citation).
+
 ## [0.2.1](changelog/0.2.x/0.2.1.md) — 2026-07-03
 
 Nested cross-tab facet children now carry a truncated flag; declared error recovery hints reach the wire; protein_track_ligands binding_site honors limit.
