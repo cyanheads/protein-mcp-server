@@ -45,7 +45,24 @@ const structureRecordSchema = z
     resolution: z.number().optional().describe('Resolution in Å (experimental).'),
     organism: z.string().optional().describe('Source organism.'),
     provider: z.string().optional().describe('Model provider (predicted / best_available).'),
-    meanPlddt: z.number().optional().describe('Mean pLDDT confidence 0–100 (predicted).'),
+    confidence: z
+      .number()
+      .optional()
+      .describe(
+        'Model confidence on its native scale; confidenceType names the metric and range (e.g. pLDDT 0–100, QMEANDisCo 0–1). Present for predicted models that report a score.',
+      ),
+    confidenceType: z
+      .string()
+      .optional()
+      .describe(
+        'Name of the confidence metric carried in confidence (e.g. "pLDDT", "QMEANDisCo"). Providers score on different scales; this names the one in use.',
+      ),
+    meanPlddt: z
+      .number()
+      .optional()
+      .describe(
+        'Mean pLDDT confidence (0–100); present only for pLDDT-scored models. For other metrics read confidence + confidenceType.',
+      ),
     confidenceBuckets: confidenceBucketsSchema
       .optional()
       .describe('pLDDT confidence-band fractions (predicted).'),
@@ -78,10 +95,12 @@ export const getStructure = tool('protein_get_structure', {
   description:
     'Fetch structures with metadata and coordinate-file URLs. source "experimental" takes PDB entry IDs ' +
     '(batched in one call); "predicted" takes UniProt accessions (AlphaFold, with pLDDT/PAE confidence); ' +
-    '"best_available" takes UniProt accessions and returns the top federated model (experimental if one ' +
-    'exists, else the best prediction). Resolves up to the configured batch cap per call with per-ID partial ' +
-    'success — missed IDs are listed in failed[]. Set include_coords to inline coordinate content; if that ' +
-    'overflows, a section outline is returned — re-call with sections:[ids] to inline specific structures.',
+    '"best_available" takes UniProt accessions and returns the top federated model — the highest-resolution ' +
+    'experimental structure if one exists (optimizing resolution, not biological representativeness, so it can ' +
+    'return an engineered mutant over the wild-type entry), else the best prediction. Resolves up to the ' +
+    'configured batch cap per call with per-ID partial success — missed IDs are listed in failed[]. Set ' +
+    'include_coords to inline coordinate content; if that overflows, a section outline is returned — re-call ' +
+    'with sections:[ids] to inline specific structures.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   errors: [
@@ -287,6 +306,9 @@ export const getStructure = tool('protein_get_structure', {
         typeof s.resolution === 'number' ? `**Resolution:** ${s.resolution} Å` : null,
         s.organism ? `**Organism:** ${s.organism}` : null,
         s.provider ? `**Provider:** ${s.provider}` : null,
+        typeof s.confidence === 'number'
+          ? `**Confidence:** ${s.confidence}${s.confidenceType ? ` (${s.confidenceType})` : ''}`
+          : null,
         typeof s.meanPlddt === 'number' ? `**Mean pLDDT:** ${s.meanPlddt.toFixed(1)}` : null,
       ].filter(Boolean);
       if (meta.length > 0) lines.push(meta.join(' | '));
@@ -425,16 +447,16 @@ async function fetchBest(accession: string, ctx: Context): Promise<StructureReco
   const isExperimental = /experimentally/i.test(best.modelCategory ?? '');
 
   // For an experimental pick the federated id is the chosen PDB entry; surface it
-  // explicitly so the agent can cite the structure, and fetch its title for parity
-  // with source "experimental". The title is best-effort — a failed lookup must
-  // not drop the structure the agent already has.
+  // explicitly so the agent can cite the structure, fetch its title for parity with
+  // source "experimental", and emit the full cif/pdb/bcif set from RCSB (matching
+  // fetchExperimental) instead of the single beacon modelUrl. The title is
+  // best-effort — a failed lookup must not drop the structure the agent already has.
+  const rcsb = getRcsbService();
   let pdbId: string | undefined;
   let title: string | undefined;
   if (isExperimental && best.modelIdentifier) {
     pdbId = best.modelIdentifier.toUpperCase();
-    const entries = await getRcsbService()
-      .getEntries([pdbId], ctx)
-      .catch(() => []);
+    const entries = await rcsb.getEntries([pdbId], ctx).catch(() => []);
     title = entries[0]?.title;
   }
 
@@ -446,10 +468,25 @@ async function fetchBest(accession: string, ctx: Context): Promise<StructureReco
     ...(best.provider ? { provider: best.provider } : {}),
     ...(typeof best.resolution === 'number' ? { resolution: best.resolution } : {}),
     ...(best.experimentalMethod ? { method: best.experimentalMethod } : {}),
+    ...(best.confidenceType ? { confidenceType: best.confidenceType } : {}),
     ...(typeof best.confidenceAvgLocalScore === 'number'
+      ? { confidence: best.confidenceAvgLocalScore }
+      : {}),
+    // meanPlddt is pLDDT-only (0–100); never surface another provider's metric
+    // (e.g. QMEANDisCo, 0–1) under it. Non-pLDDT scores stay in confidence.
+    ...(typeof best.confidenceAvgLocalScore === 'number' &&
+    best.confidenceType?.toLowerCase() === 'plddt'
       ? { meanPlddt: best.confidenceAvgLocalScore }
       : {}),
-    coordinateUrls: best.modelUrl ? coordinateUrlFor(best.modelUrl) : {},
+    coordinateUrls: pdbId
+      ? {
+          cif: rcsb.coordinateFileUrl(pdbId, 'cif'),
+          pdb: rcsb.coordinateFileUrl(pdbId, 'pdb'),
+          bcif: rcsb.coordinateFileUrl(pdbId, 'bcif'),
+        }
+      : best.modelUrl
+        ? coordinateUrlFor(best.modelUrl)
+        : {},
   };
 }
 

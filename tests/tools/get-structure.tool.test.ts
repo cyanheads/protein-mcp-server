@@ -1,9 +1,11 @@
 /**
  * @fileoverview Tests for protein_get_structure: source/ID-type guarding, batched
  * partial success (failed[]), the predicted (AlphaFold) path, the best_available
- * federated pick (experimental pdbId + title promotion), the coordinate overflow →
- * section-outline collapse, and the per-response attribution union (RCSB PDB /
- * AlphaFold DB, derived from structures[]). Services and the HTTP layer are mocked.
+ * federated pick (experimental pdbId + title promotion, full cif/pdb/bcif parity
+ * with source experimental, scale-correct confidence that keeps a non-pLDDT metric
+ * out of meanPlddt), the coordinate overflow → section-outline collapse, and the
+ * per-response attribution union (RCSB PDB / AlphaFold DB, derived from
+ * structures[]). Services and the HTTP layer are mocked.
  * @module tests/tools/get-structure.tool.test
  */
 
@@ -153,7 +155,7 @@ describe('protein_get_structure', () => {
     expect(text).toContain('**PDB:** 2W72');
   });
 
-  it('best_available leaves pdbId unset for a predicted pick (no entry fetch)', async () => {
+  it('best_available leaves pdbId unset for a predicted pick, and a pLDDT score populates meanPlddt + confidence', async () => {
     getSummary.mockResolvedValue({
       accession: 'P00001',
       found: true,
@@ -163,6 +165,7 @@ describe('protein_get_structure', () => {
           modelCategory: 'AB-INITIO',
           provider: 'AlphaFold DB',
           modelUrl: 'https://alphafold.test/af.cif',
+          confidenceType: 'pLDDT',
           confidenceAvgLocalScore: 92.5,
         },
       ],
@@ -170,9 +173,97 @@ describe('protein_get_structure', () => {
     const input = getStructure.input.parse({ ids: ['P00001'], source: 'best_available' });
     const out = await getStructure.handler(input, ctx());
 
-    expect(out.structures[0]).toMatchObject({ id: 'P00001', source: 'predicted', meanPlddt: 92.5 });
+    // pLDDT keeps the 0–100 meanPlddt convenience field, and also carries the
+    // self-describing confidence + confidenceType pair.
+    expect(out.structures[0]).toMatchObject({
+      id: 'P00001',
+      source: 'predicted',
+      meanPlddt: 92.5,
+      confidence: 92.5,
+      confidenceType: 'pLDDT',
+    });
     expect(out.structures[0]?.pdbId).toBeUndefined();
+    // Predicted pick keeps the single provider modelUrl — no RCSB entry fetch.
+    expect(out.structures[0]?.coordinateUrls).toEqual({ cif: 'https://alphafold.test/af.cif' });
     expect(getEntries).not.toHaveBeenCalled();
+  });
+
+  it('best_available surfaces a non-pLDDT score under confidence + confidenceType, never meanPlddt (#14)', async () => {
+    // Live 3D-Beacons shape for Q6ZS81: a SWISS-MODEL QMEANDisCo model on the 0–1 scale.
+    getSummary.mockResolvedValue({
+      accession: 'Q6ZS81',
+      found: true,
+      models: [
+        {
+          modelIdentifier: 'Q6ZS81_2390-2821:1t77.1.A',
+          modelCategory: 'TEMPLATE-BASED',
+          provider: 'SWISS-MODEL',
+          modelUrl:
+            'https://swissmodel.expasy.org/3d-beacons/uniprot/Q6ZS81.cif?range=2390-2821&template=1t77.1.A&provider=swissmodel',
+          confidenceType: 'QMEANDisCo',
+          confidenceAvgLocalScore: 0.63,
+        },
+      ],
+    });
+    const input = getStructure.input.parse({ ids: ['Q6ZS81'], source: 'best_available' });
+    const out = await getStructure.handler(input, ctx());
+
+    const rec = out.structures[0];
+    expect(rec).toMatchObject({
+      id: 'Q6ZS81',
+      source: 'predicted',
+      provider: 'SWISS-MODEL',
+      confidence: 0.63,
+      confidenceType: 'QMEANDisCo',
+    });
+    // A 0–1 QMEANDisCo score must not masquerade as pLDDT 0–100.
+    expect(rec?.meanPlddt).toBeUndefined();
+    // Predicted pick keeps the single provider cif URL — no RCSB entry fetch.
+    expect(rec?.coordinateUrls).toEqual({ cif: expect.stringContaining('swissmodel.expasy.org') });
+    expect(getEntries).not.toHaveBeenCalled();
+
+    const text = (getStructure.format?.(out)?.[0] as { text: string }).text;
+    expect(text).toContain('**Confidence:** 0.63 (QMEANDisCo)');
+    expect(text).not.toContain('Mean pLDDT');
+  });
+
+  it('best_available emits all three coordinate URLs for an experimental pick, matching source experimental (#16)', async () => {
+    // Live 3D-Beacons shape for P69905: the top experimental model is 2W72 @ 1.07 Å,
+    // whose beacon modelUrl is a single PDBe cif. best_available must instead emit the
+    // full cif/pdb/bcif set from RCSB, identical to source: experimental.
+    getSummary.mockResolvedValue({
+      accession: 'P69905',
+      found: true,
+      models: [
+        {
+          modelIdentifier: '2w72',
+          modelCategory: 'EXPERIMENTALLY DETERMINED',
+          provider: 'PDBe',
+          modelUrl: 'https://www.ebi.ac.uk/pdbe/static/entry/2w72_updated.cif',
+          resolution: 1.07,
+          experimentalMethod: 'X-RAY DIFFRACTION',
+        },
+      ],
+    });
+    getEntries.mockResolvedValue([experimentalMeta('2W72')]);
+    const input = getStructure.input.parse({ ids: ['P69905'], source: 'best_available' });
+    const out = await getStructure.handler(input, ctx());
+
+    const rec = out.structures[0];
+    expect(rec?.pdbId).toBe('2W72');
+    // Full three-format set built from the chosen pdbId via the same RCSB URL builder
+    // fetchExperimental uses — not the single beacon modelUrl.
+    expect(rec?.coordinateUrls).toEqual({
+      cif: 'https://files/2W72.cif',
+      pdb: 'https://files/2W72.pdb',
+      bcif: 'https://files/2W72.bcif',
+    });
+    expect(coordinateFileUrl).toHaveBeenCalledWith('2W72', 'cif');
+    expect(coordinateFileUrl).toHaveBeenCalledWith('2W72', 'pdb');
+    expect(coordinateFileUrl).toHaveBeenCalledWith('2W72', 'bcif');
+    // Experimental pick reports no predicted-confidence fields.
+    expect(rec?.meanPlddt).toBeUndefined();
+    expect(rec?.confidence).toBeUndefined();
   });
 });
 
