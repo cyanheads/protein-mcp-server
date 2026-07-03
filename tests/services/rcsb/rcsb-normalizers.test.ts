@@ -456,6 +456,73 @@ describe('RcsbService search helpers', () => {
       ],
     });
   });
+
+  it('adds a [label, label+interval) range to numeric histogram buckets from the fixed bin width', async () => {
+    // A real sparse resolution tail: 16.0 then 17.0 (no 16.5) — the histogram omits
+    // empty bins, so the returned labels jump by 1.0 even though the bin width is 0.5.
+    fetchJsonMock.mockResolvedValue({
+      total_count: 100,
+      facets: [
+        {
+          name: 'resolution',
+          attribute: 'rcsb_entry_info.resolution_combined',
+          buckets: [
+            { label: '0.5', population: 1249 },
+            { label: '16.0', population: 26 },
+            { label: '17.0', population: 30 },
+          ],
+        },
+      ],
+    });
+    const spec = {
+      dimension: 'resolution',
+      attribute: 'rcsb_entry_info.resolution_combined',
+      aggregation: 'histogram' as const,
+      interval: 0.5,
+    };
+    const out = await service().analyzeFacets({}, [spec], createMockContext());
+    // rangeTo is label + interval (16.0 → 16.5), NOT the next returned label (17.0).
+    expect(out.facets[0]?.buckets).toEqual([
+      { label: '0.5', count: 1249, rangeFrom: 0.5, rangeTo: 1.0 },
+      { label: '16.0', count: 26, rangeFrom: 16.0, rangeTo: 16.5 },
+      { label: '17.0', count: 30, rangeFrom: 17.0, rangeTo: 17.5 },
+    ]);
+  });
+
+  it('omits the numeric range for term and date-period facets (the label is the value)', async () => {
+    fetchJsonMock.mockResolvedValue({
+      total_count: 100,
+      facets: [
+        {
+          name: 'organism',
+          attribute: 'rcsb_entity_source_organism.ncbi_scientific_name',
+          buckets: [{ label: 'Homo sapiens', population: 81957 }],
+        },
+        {
+          name: 'release_year',
+          attribute: 'rcsb_accession_info.initial_release_date',
+          buckets: [{ label: '1976', population: 13 }],
+        },
+      ],
+    });
+    const specs = [
+      {
+        dimension: 'organism',
+        attribute: 'rcsb_entity_source_organism.ncbi_scientific_name',
+        aggregation: 'terms' as const,
+      },
+      {
+        dimension: 'release_year',
+        attribute: 'rcsb_accession_info.initial_release_date',
+        aggregation: 'date_histogram' as const,
+        interval: 'year',
+      },
+    ];
+    const out = await service().analyzeFacets({}, specs, createMockContext());
+    // A date interval is a period word, not a numeric bin width — no numeric range.
+    expect(out.facets[0]?.buckets[0]).toEqual({ label: 'Homo sapiens', count: 81957 });
+    expect(out.facets[1]?.buckets[0]).toEqual({ label: '1976', count: 13 });
+  });
 });
 
 describe('RcsbService.coordinateFileUrl', () => {

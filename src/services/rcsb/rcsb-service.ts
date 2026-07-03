@@ -506,22 +506,45 @@ function normalizeFacets(raw: RawFacet[] | undefined, specs: FacetSpec[]): Facet
     return {
       dimension: spec.dimension,
       attribute: spec.attribute,
-      buckets: normalizeBuckets(match?.buckets, spec.child),
+      buckets: normalizeBuckets(match?.buckets, spec),
     };
   });
 }
 
-function normalizeBuckets(raw: RawBucket[] | undefined, child?: FacetSpec): FacetBucket[] {
+/**
+ * The fixed bin width for a numeric histogram facet, or `undefined` for term and
+ * date-period facets. Only numeric histograms carry an interpretable numeric
+ * `[label, label + interval)` range; date_histogram intervals are period words
+ * (`year`) and terms have no interval.
+ */
+function binInterval(spec: FacetSpec): number | undefined {
+  return spec.aggregation === 'histogram' && typeof spec.interval === 'number'
+    ? spec.interval
+    : undefined;
+}
+
+function normalizeBuckets(raw: RawBucket[] | undefined, spec: FacetSpec): FacetBucket[] {
+  const interval = binInterval(spec);
+  const child = spec.child;
   return (raw ?? []).map((b) => {
     const label = b.label ?? (b.value != null ? String(b.value) : '');
     const count = b.population ?? b.count ?? 0;
     const bucket: FacetBucket = { label, count };
+    if (interval !== undefined) {
+      const from = Number(label);
+      // Range from the fixed bin width, not the next label — the histogram drops
+      // empty bins, so adjacent labels can be >1 interval apart at the sparse tail.
+      if (Number.isFinite(from)) {
+        bucket.rangeFrom = from;
+        bucket.rangeTo = from + interval;
+      }
+    }
     if (child && b.facets) {
       bucket.children = [
         {
           dimension: child.dimension,
           attribute: child.attribute,
-          buckets: normalizeBuckets(b.facets[0]?.buckets, child.child),
+          buckets: normalizeBuckets(b.facets[0]?.buckets, child),
         },
       ];
     }

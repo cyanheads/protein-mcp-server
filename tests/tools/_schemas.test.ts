@@ -96,6 +96,53 @@ describe('toFacetOutput', () => {
     const out = toFacetOutput(dim([{ label: 'X-RAY', count: 800 }]), 50);
     expect(out.buckets[0]).not.toHaveProperty('children');
   });
+
+  it('carries rangeFrom/rangeTo through for numeric histogram buckets (#21)', () => {
+    const out = toFacetOutput(
+      {
+        dimension: 'resolution',
+        attribute: 'rcsb_entry_info.resolution_combined',
+        buckets: [
+          { label: '0.5', count: 1249, rangeFrom: 0.5, rangeTo: 1.0 },
+          { label: '17.0', count: 30, rangeFrom: 17.0, rangeTo: 17.5 },
+        ],
+      },
+      50,
+    );
+    expect(out.buckets[0]).toEqual({ label: '0.5', count: 1249, rangeFrom: 0.5, rangeTo: 1.0 });
+    expect(out.buckets[1]).toEqual({ label: '17.0', count: 30, rangeFrom: 17.0, rangeTo: 17.5 });
+  });
+
+  it('omits rangeFrom/rangeTo on term buckets (#21)', () => {
+    const out = toFacetOutput(dim([{ label: 'X-RAY', count: 800 }]), 50);
+    expect(out.buckets[0]).not.toHaveProperty('rangeFrom');
+    expect(out.buckets[0]).not.toHaveProperty('rangeTo');
+  });
+
+  it('carries ranges through nested numeric cross-tab children (#21)', () => {
+    const out = toFacetOutput(
+      dim([
+        {
+          label: 'X-RAY',
+          count: 800,
+          children: [
+            {
+              dimension: 'resolution',
+              attribute: 'rcsb_entry_info.resolution_combined',
+              buckets: [{ label: '1.5', count: 60, rangeFrom: 1.5, rangeTo: 2.0 }],
+            },
+          ],
+        },
+      ]),
+      50,
+    );
+    expect(out.buckets[0]?.children?.[0]?.buckets[0]).toEqual({
+      label: '1.5',
+      count: 60,
+      rangeFrom: 1.5,
+      rangeTo: 2.0,
+    });
+  });
 });
 
 describe('renderFacets', () => {
@@ -170,5 +217,20 @@ describe('renderFacets', () => {
       },
     ]);
     expect(lines.join('\n')).toContain('  - release_year → 2020: 60, 2021: 70 (truncated)');
+  });
+
+  it('renders the half-open [rangeFrom–rangeTo) bin for numeric histogram buckets (#21)', () => {
+    const lines = renderFacets([
+      {
+        dimension: 'resolution',
+        buckets: [
+          { label: '0.5', count: 1249, rangeFrom: 0.5, rangeTo: 1.0 },
+          { label: '17.0', count: 30, rangeFrom: 17.0, rangeTo: 17.5 },
+        ],
+      },
+    ]);
+    const text = lines.join('\n');
+    expect(text).toContain('- 0.5 [0.5–1): 1249');
+    expect(text).toContain('- 17.0 [17–17.5): 30');
   });
 });

@@ -38,7 +38,11 @@ export const searchStructures = tool('protein_search_structures', {
     'protein sequence (triggers an mmseqs2 similarity search), and/or organism, method, and ' +
     'resolution filters. Returns ranked hits; the experimental page is enriched with title, method, ' +
     'resolution, and organism. Chain hit IDs into protein_get_structure. Optionally returns a facet ' +
-    'breakdown (counts by method / organism / release year / …) alongside the hits at no extra call.',
+    'breakdown (counts by method / organism / release year / …) alongside the hits at no extra call. ' +
+    'A facet on a dimension you are already filtering (e.g. the organism facet while organism is set) ' +
+    'lists unfiltered alternatives by design — it does not constrain by its own active filter, so you ' +
+    'can see sibling values to pivot to. Numeric histogram buckets (resolution, molecular weight) carry ' +
+    'explicit rangeFrom/rangeTo bounds so a boundary label is unambiguous.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   errors: [

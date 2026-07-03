@@ -21,6 +21,18 @@ export interface FacetBucket {
   count: number;
   /** Bucket label (category value, numeric bin start, or period). */
   label: string;
+  /**
+   * Inclusive lower bound of a numeric histogram bin (= `Number(label)`). Present
+   * only for numeric histogram facets (resolution, molecular_weight); absent for
+   * term and date-period facets.
+   */
+  rangeFrom?: number;
+  /**
+   * Exclusive upper bound of a numeric histogram bin (`rangeFrom + bin interval`).
+   * Uses the facet's fixed bin width, not the next bucket's label — the histogram
+   * omits empty bins, so consecutive labels are not necessarily one interval apart.
+   */
+  rangeTo?: number;
 }
 
 /** A facet dimension and its buckets. */

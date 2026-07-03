@@ -14,6 +14,18 @@ const leafBucketSchema = z
   .object({
     label: z.string().describe('Bucket value — category, numeric bin start, or period.'),
     count: z.number().describe('Number of entries in the bucket.'),
+    rangeFrom: z
+      .number()
+      .optional()
+      .describe(
+        'Inclusive lower bound of a numeric histogram bin (= label). Present only for numeric facets (resolution, molecular_weight); absent for term/period facets.',
+      ),
+    rangeTo: z
+      .number()
+      .optional()
+      .describe(
+        'Exclusive upper bound of a numeric histogram bin (rangeFrom + bin interval), so the bin covers [rangeFrom, rangeTo). Present only for numeric facets.',
+      ),
   })
   .describe('A leaf aggregation bucket: a value and its entry count.');
 
@@ -34,6 +46,18 @@ const bucketSchema = z
   .object({
     label: z.string().describe('Bucket value — category, numeric bin start, or period.'),
     count: z.number().describe('Number of entries in the bucket.'),
+    rangeFrom: z
+      .number()
+      .optional()
+      .describe(
+        'Inclusive lower bound of a numeric histogram bin (= label). Present only for numeric facets (resolution, molecular_weight); absent for term/period facets.',
+      ),
+    rangeTo: z
+      .number()
+      .optional()
+      .describe(
+        'Exclusive upper bound of a numeric histogram bin (rangeFrom + bin interval), so the bin covers [rangeFrom, rangeTo). Present only for numeric facets.',
+      ),
     children: z
       .array(childDimensionSchema)
       .optional()
@@ -59,6 +83,15 @@ export const facetDimensionSchema = z
 
 export type FacetDimensionOutput = z.infer<typeof facetDimensionSchema>;
 
+/** Copy the numeric-histogram range onto an output bucket when present. */
+function withRange<T extends { rangeFrom?: number; rangeTo?: number }>(
+  b: T,
+): { rangeFrom: number; rangeTo: number } | Record<string, never> {
+  return b.rangeFrom !== undefined && b.rangeTo !== undefined
+    ? { rangeFrom: b.rangeFrom, rangeTo: b.rangeTo }
+    : {};
+}
+
 /** Project a domain {@link FacetDimension} to the output shape, capping buckets. */
 export function toFacetOutput(facet: FacetDimension, cap: number): FacetDimensionOutput {
   const truncated = facet.buckets.length > cap;
@@ -67,11 +100,14 @@ export function toFacetOutput(facet: FacetDimension, cap: number): FacetDimensio
     buckets: facet.buckets.slice(0, cap).map((b) => ({
       label: b.label,
       count: b.count,
+      ...withRange(b),
       ...(b.children
         ? {
             children: b.children.map((c) => ({
               dimension: c.dimension,
-              buckets: c.buckets.slice(0, cap).map((cb) => ({ label: cb.label, count: cb.count })),
+              buckets: c.buckets
+                .slice(0, cap)
+                .map((cb) => ({ label: cb.label, count: cb.count, ...withRange(cb) })),
               ...(c.buckets.length > cap ? { truncated: true } : {}),
             })),
           }
@@ -81,15 +117,31 @@ export function toFacetOutput(facet: FacetDimension, cap: number): FacetDimensio
   };
 }
 
+/**
+ * Render one bucket's `label: count` line, annotating numeric histogram buckets
+ * with their explicit half-open `[rangeFrom, rangeTo)` bin so the bare boundary
+ * label isn't ambiguous (does `1.0` count `[0.5, 1.0)` or `[1.0, 1.5)`?).
+ */
+function renderBucket(b: {
+  label: string;
+  count: number;
+  rangeFrom?: number | undefined;
+  rangeTo?: number | undefined;
+}): string {
+  const range =
+    b.rangeFrom !== undefined && b.rangeTo !== undefined ? ` [${b.rangeFrom}–${b.rangeTo})` : '';
+  return `${b.label}${range}: ${b.count}`;
+}
+
 /** Render a list of facet dimensions to markdown lines for `format()` parity. */
 export function renderFacets(facets: FacetDimensionOutput[]): string[] {
   const lines: string[] = [];
   for (const f of facets) {
     lines.push(`\n**${f.dimension}**${f.truncated ? ' (truncated)' : ''}`);
     for (const b of f.buckets) {
-      lines.push(`- ${b.label}: ${b.count}`);
+      lines.push(`- ${renderBucket(b)}`);
       for (const c of b.children ?? []) {
-        const inner = c.buckets.map((cb) => `${cb.label}: ${cb.count}`).join(', ');
+        const inner = c.buckets.map(renderBucket).join(', ');
         lines.push(`  - ${c.dimension} → ${inner}${c.truncated ? ' (truncated)' : ''}`);
       }
     }
