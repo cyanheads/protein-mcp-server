@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-07-03
+
+protein_get_annotations gains a per-class limit to cap features/variants/domains independently, and protein_compare_structures documents TM-score's length-normalization sensitivity to terminal length differences.
+
 ## [0.3.3](changelog/0.3.x/0.3.3.md) — 2026-07-03
 
 protein_analyze_collection accepts stringified numeric inputs, protein_track_ligands find_ligand decouples its ranking pool from the display limit, and numeric facet histogram buckets carry explicit rangeFrom/rangeTo bounds.
