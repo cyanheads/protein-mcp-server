@@ -153,12 +153,14 @@ export const trackLigands = tool('protein_track_ligands', {
         throw ctx.fail('missing_param', 'mode find_ligand requires a name or formula in "query".', {
           ...ctx.recoveryFor('missing_param'),
         });
-      const ids = await rcsb.findChemComps(input.query, input.limit, ctx);
-      // Resolve each candidate's metadata and its deposition frequency (entries
-      // containing it) in parallel, then re-rank by that count — the canonical
-      // component (e.g. HEM for "heme") is the most-deposited, but RCSB's name
-      // ranking buries it below near-namesakes. Re-rank, never filter: same set,
-      // reordered. Candidate count is already bounded by `limit` via findChemComps.
+      // Over-fetch a candidate pool larger than the display limit, then re-rank by
+      // deposition frequency and slice to the limit. The canonical component (e.g.
+      // HEM for "heme") is the most-deposited but RCSB name-ranks it low, so a small
+      // `limit` would never fetch it — the count re-rank can only reorder what it
+      // pulls. Re-rank, never filter. RCSB returns a bounded candidate set per name,
+      // so a pool of ~25 stays cheap while still covering low-name-ranked canonicals.
+      const candidatePool = Math.max(input.limit, 25);
+      const ids = await rcsb.findChemComps(input.query, candidatePool, ctx);
       const resolved = await mapWithConcurrency(ids, cfg.fanoutConcurrency, async (id) => {
         const [chem, depositionCount] = await Promise.all([
           rcsb.getChemComp(id, ctx),
@@ -168,7 +170,8 @@ export const trackLigands = tool('protein_track_ligands', {
       });
       const ligands = resolved
         .filter((c): c is ChemComp & { depositionCount: number } => c != null)
-        .sort((a, b) => b.depositionCount - a.depositionCount);
+        .sort((a, b) => b.depositionCount - a.depositionCount)
+        .slice(0, input.limit);
       if (ligands.length === 0) {
         throw ctx.fail('not_found', `No chemical component matched "${input.query}".`, {
           recovery: {

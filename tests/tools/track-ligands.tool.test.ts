@@ -77,6 +77,26 @@ describe('protein_track_ligands — find_ligand', () => {
     expect(out.ligands?.map((l) => l.depositionCount)).toEqual([6475, 1218, 202]);
   });
 
+  it('over-fetches beyond the display limit so a low-name-ranked canonical still surfaces, then slices to limit (#17)', async () => {
+    // RCSB name order returns HEM last; at limit 2 a limit-coupled fetch would pull
+    // only the first two names and never see HEM. The pool must exceed the display
+    // limit so the most-deposited canonical is fetched, re-ranked, and surfaced. The
+    // mock respects the requested count, so a coupled fetch (limit 2) fails this.
+    findChemComps.mockImplementation(async (_q: string, limit: number) =>
+      ['AAA', 'BBB', 'CCC', 'DDD', 'HEM'].slice(0, limit),
+    );
+    getChemComp.mockImplementation(async (id: string) => ({ compId: id }));
+    countEntriesWithLigand.mockImplementation(
+      async (id: string) => ({ HEM: 6475, AAA: 5, BBB: 4, CCC: 3, DDD: 2 })[id] ?? 0,
+    );
+    const out = await trackLigands.handler(
+      trackLigands.input.parse({ mode: 'find_ligand', query: 'heme', limit: 2 }),
+      ctx(),
+    );
+    // Sliced to the display limit (2), most-deposited first.
+    expect(out.ligands?.map((l) => l.compId)).toEqual(['HEM', 'AAA']);
+  });
+
   it('drops nulls from the per-id metadata fan-out', async () => {
     findChemComps.mockResolvedValue(['HEM', 'GONE']);
     getChemComp.mockImplementation(async (id: string) => (id === 'HEM' ? { compId: 'HEM' } : null));
