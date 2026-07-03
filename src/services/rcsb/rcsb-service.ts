@@ -27,6 +27,7 @@ import type {
   SearchHit,
   SearchResult,
   StructureSearchParams,
+  UniProtXref,
 } from './types.js';
 
 /** RCSB return types relevant to this server. */
@@ -225,24 +226,36 @@ export class RcsbService {
     return (data.entries ?? []).filter((e): e is RawEntry => e != null).map(normalizeEntry);
   }
 
-  /** Resolve a PDB entry to its cross-referenced UniProt accession(s). */
-  async resolveUniprot(pdbId: string, ctx: Context): Promise<string[]> {
+  /**
+   * Resolve a PDB entry to its UniProt-cross-referenced polymer entities. Each
+   * returned entry carries the author chain IDs it covers, the mapped UniProt
+   * accession, and the polymer description — entity-grained so a caller can
+   * disambiguate a multi-chain entry by chain. One entry per polymer entity that
+   * carries a UniProt xref; entities without one are skipped. Single round trip.
+   */
+  async resolveUniprotEntities(pdbId: string, ctx: Context): Promise<UniProtXref[]> {
     const data = await this.graphql<{ entry: RawXrefEntry | null }>(
       XREF_QUERY,
       { id: pdbId.toUpperCase() },
       ctx,
-      'RcsbService.resolveUniprot',
+      'RcsbService.resolveUniprotEntities',
     );
-    const accessions = new Set<string>();
+    const xrefs: UniProtXref[] = [];
     for (const entity of data.entry?.polymer_entities ?? []) {
-      for (const ref of entity.rcsb_polymer_entity_container_identifiers
-        ?.reference_sequence_identifiers ?? []) {
-        if (/uniprot/i.test(ref.database_name ?? '') && ref.database_accession) {
-          accessions.add(ref.database_accession.toUpperCase());
-        }
-      }
+      const container = entity.rcsb_polymer_entity_container_identifiers;
+      const accession = container?.reference_sequence_identifiers?.find(
+        (ref) => /uniprot/i.test(ref.database_name ?? '') && ref.database_accession,
+      )?.database_accession;
+      if (!accession) continue;
+      xrefs.push({
+        accession: accession.toUpperCase(),
+        chains: container?.auth_asym_ids ?? [],
+        ...(entity.rcsb_polymer_entity?.pdbx_description
+          ? { proteinName: entity.rcsb_polymer_entity.pdbx_description }
+          : {}),
+      });
     }
-    return [...accessions];
+    return xrefs;
   }
 
   /** First polymer entity's one-letter sequence for a PDB entry. */
@@ -591,7 +604,9 @@ interface RawNonpolymerEntity {
 
 interface RawXrefEntry {
   polymer_entities?: Array<{
+    rcsb_polymer_entity?: { pdbx_description?: string };
     rcsb_polymer_entity_container_identifiers?: {
+      auth_asym_ids?: string[];
       reference_sequence_identifiers?: Array<{
         database_accession?: string;
         database_name?: string;
@@ -656,7 +671,9 @@ const ENTRIES_QUERY = `query Entries($ids: [String!]!) {
 const XREF_QUERY = `query Xref($id: String!) {
   entry(entry_id: $id) {
     polymer_entities {
+      rcsb_polymer_entity { pdbx_description }
       rcsb_polymer_entity_container_identifiers {
+        auth_asym_ids
         reference_sequence_identifiers { database_accession database_name }
       }
     }

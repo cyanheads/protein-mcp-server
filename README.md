@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.2.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.3.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -62,6 +62,7 @@ Fetch structures with metadata and coordinate-file URLs, resolving across provid
 - `source: best_available` takes UniProt accessions and returns the top federated model (experimental if one exists, else the best prediction)
 - Per-ID partial success — unresolved IDs are listed in `failed[]`, not a batch-level error
 - `include_coords` inlines coordinate content; when a batch overflows the response budget it returns a per-structure size outline, so you can re-call with `sections: [ids]` for specific structures
+- Every response carries an `attribution` block naming the upstream data licenses and citations (see [Upstream data licensing](#upstream-data-licensing))
 
 ---
 
@@ -119,8 +120,10 @@ Sequence and functional annotation for a protein.
 
 - UniProt features (domains, binding sites, PTMs) and natural sequence variants
 - InterPro domain/family memberships (Pfam, PROSITE, …) with associated GO terms
-- Provide a UniProt accession directly, or a PDB ID — resolved to its accession via the structure's sequence cross-reference
+- Provide a UniProt accession directly, or a PDB ID — resolved to a UniProt accession via the structure's sequence cross-reference
+- A multi-chain PDB entry can map to several accessions; the default is the deterministic lowest-author-chain pick, with the alternatives listed under `ambiguity`. Pass `chain` (an author chain ID, e.g. `A`) to select a specific one
 - `include` scopes which annotation classes are fetched: `features`, `domains`, `variants`, or `all`
+- Every response carries an `attribution` block naming the upstream data licenses and citations (see [Upstream data licensing](#upstream-data-licensing))
 
 ## Resources
 
@@ -339,6 +342,22 @@ Issues and pull requests are welcome. Run checks and tests before submitting:
 bun run devcheck
 bun run test
 ```
+
+## Upstream data licensing
+
+Structure and annotation data comes from public upstream databases, each under its own license. `protein_get_structure` and `protein_get_annotations` carry an `attribution` block on every response — the license, citation, and homepage for each source that contributed to that specific response — so the attribution obligation travels with the data to downstream consumers rather than living only here. CC BY / CC BY-SA sources require attribution on redistribution; CC0 sources are citation-only (attribution encouraged, not required).
+
+| Source | Contributes to | License |
+|:---|:---|:---|
+| [RCSB PDB](https://www.rcsb.org/) | `protein_get_structure` — experimental records | CC0 1.0 Universal |
+| [AlphaFold DB](https://alphafold.ebi.ac.uk/) | `protein_get_structure` — predicted models | CC BY 4.0 |
+| [SWISS-MODEL](https://swissmodel.expasy.org/) | `protein_get_structure` — `best_available` models | CC BY-SA 4.0 |
+| [BFVD](https://bfvd.steineggerlab.workers.dev/) | `protein_get_structure` — `best_available` models | CC BY 4.0 |
+| [UniProt](https://www.uniprot.org/) | `protein_get_annotations` | CC BY 4.0 |
+| [InterPro](https://www.ebi.ac.uk/interpro/) | `protein_get_annotations` — domain/family data | CC0 1.0 Universal |
+| [GO](https://geneontology.org/) | `protein_get_annotations` — GO terms | CC BY 4.0 |
+
+`best_available` federates predicted models through [3D-Beacons](https://3d-beacons.org/), so the `attribution` block credits the actual contributing provider (AlphaFold DB, SWISS-MODEL, BFVD, …); a provider without a curated license entry carries a `See provider terms` fallback pointing back to 3D-Beacons rather than a fabricated license. InterPro's own domain/family classifications are CC0; the GO terms carried alongside them are separately CC BY 4.0, so each is credited independently only when it actually contributes. Full citations for each source travel in the `attribution` block of the relevant tool responses. This covers upstream *data* licensing — the server's own code is licensed separately (see [License](#license)).
 
 ## License
 

@@ -4,6 +4,7 @@
  * GraphQL call with per-ID partial success (`failed[]`). Optionally inlines
  * coordinate-file content; when that overflows a byte budget it returns a
  * per-structure section outline for targeted re-call instead of truncating.
+ * Carries upstream data attribution (RCSB PDB / AlphaFold DB) per response.
  * @module mcp-server/tools/definitions/get-structure.tool
  */
 
@@ -15,8 +16,10 @@ import { getAlphaFoldService } from '@/services/alphafold/alphafold-service.js';
 import { getBeaconsService } from '@/services/beacons/beacons-service.js';
 import { getRcsbService } from '@/services/rcsb/rcsb-service.js';
 import { mapWithConcurrency } from '@/services/shared/async.js';
+import { attributionsFor } from '@/services/shared/attribution.js';
 import { fetchText } from '@/services/shared/http.js';
 import { isPdbId, isUniProtAccession } from '@/services/shared/identifiers.js';
+import { attributionSchema, renderAttribution } from './_schemas.js';
 
 const confidenceBucketsSchema = z.object({
   veryLow: z.number().describe('Fraction of residues with pLDDT < 50.'),
@@ -135,6 +138,11 @@ export const getStructure = tool('protein_get_structure', {
           .describe('A requested ID that did not resolve, with the reason.'),
       )
       .describe('IDs that could not be resolved (partial success).'),
+    attribution: z
+      .array(attributionSchema)
+      .describe(
+        'Upstream data-source licenses and citations for every source present in structures[] — RCSB PDB for experimental records, AlphaFold DB for predicted. Always present — the attribution obligation travels with the data.',
+      ),
     overflow: z
       .object({
         sections: z
@@ -244,7 +252,28 @@ export const getStructure = tool('protein_get_structure', {
       );
     }
 
-    return { structures, failed, ...(overflow ? { overflow } : {}) };
+    // Attribution is a per-response union of the sources actually present, keyed
+    // off each record's real provider. Experimental data is fetched from RCSB
+    // regardless of the beacon's provider label. best_available federates predicted
+    // models through 3D-Beacons (AlphaFold DB, SWISS-MODEL, BFVD, …), so a predicted
+    // record's provider — not the binary source — determines the credit; an
+    // uncurated provider falls back to an honest no-license entry. Crediting every
+    // predicted model as AlphaFold would mis-attribute a SWISS-MODEL structure.
+    const sources = new Set<string>();
+    for (const s of structures) {
+      sources.add(
+        s.source === 'experimental'
+          ? 'RCSB PDB'
+          : (s.provider ?? '3D-Beacons (provider unspecified)'),
+      );
+    }
+
+    return {
+      structures,
+      failed,
+      attribution: attributionsFor(sources),
+      ...(overflow ? { overflow } : {}),
+    };
   },
 
   format: (result) => {
@@ -294,6 +323,10 @@ export const getStructure = tool('protein_get_structure', {
       lines.push(`\n### Coordinates withheld (over budget)`);
       lines.push(result.overflow.notice);
       for (const s of result.overflow.sections) lines.push(`- ${s.id}: ${s.bytes} bytes`);
+    }
+    if (result.attribution.length > 0) {
+      lines.push(`\n### Attribution`);
+      lines.push(...renderAttribution(result.attribution));
     }
     return [{ type: 'text', text: lines.join('\n') }];
   },

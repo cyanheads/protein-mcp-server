@@ -2,13 +2,16 @@
  * @fileoverview protein_get_annotations — sequence & functional annotation for a
  * protein: UniProt features (domains, binding sites, PTMs, variants) and InterPro
  * domain/family memberships with GO terms. Keyed by UniProt accession; resolves a
- * PDB ID to its accession when needed.
+ * PDB ID to its accession when needed — deterministically by default, by author
+ * chain when a multi-chain entry is ambiguous. Carries upstream data attribution.
  * @module mcp-server/tools/definitions/get-annotations.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getRcsbService } from '@/services/rcsb/rcsb-service.js';
+import type { UniProtXref } from '@/services/rcsb/types.js';
+import { attributionsFor, type CuratedSource } from '@/services/shared/attribution.js';
 import { isUniProtAccession } from '@/services/shared/identifiers.js';
 import type {
   AnnotationInclude,
@@ -16,6 +19,7 @@ import type {
   SequenceFeature,
 } from '@/services/uniprot/uniprot-service.js';
 import { getUniProtService } from '@/services/uniprot/uniprot-service.js';
+import { attributionSchema, renderAttribution } from './_schemas.js';
 
 const featureSchema = z
   .object({
@@ -51,13 +55,41 @@ const domainSchema = z
   })
   .describe('An InterPro domain/family membership with GO terms.');
 
+const ambiguitySchema = z
+  .object({
+    accessions: z
+      .array(
+        z
+          .object({
+            chain: z
+              .array(z.string())
+              .describe('Author chain IDs (auth_asym_id) this entity covers (e.g. ["A", "C"]).'),
+            accession: z.string().describe('UniProt accession the chains map to.'),
+            proteinName: z.string().optional().describe('Polymer entity description.'),
+          })
+          .describe('One chain-group → UniProt accession mapping within the entry.'),
+      )
+      .describe('Every distinct UniProt mapping for the entry, lowest-chain first.'),
+    notice: z
+      .string()
+      .describe('Why multiple mappings exist and how to select one via the chain input.'),
+  })
+  .describe(
+    'Present only when a PDB ID mapped to more than one distinct UniProt accession and no chain was supplied. The returned accession is the deterministic lowest-chain pick — re-call with chain set to a specific author chain ID to select another.',
+  );
+
+type AnnotationAmbiguity = z.infer<typeof ambiguitySchema>;
+
 export const getAnnotations = tool('protein_get_annotations', {
   title: 'protein-mcp-server: get annotations',
   description:
     'Sequence and functional annotation for a protein: UniProt features (domains, binding sites, PTMs), ' +
     'natural variants, and InterPro domain/family memberships (Pfam, PROSITE, …) with GO terms. Provide a ' +
     "UniProt accession directly, or a PDB ID — it is resolved to its UniProt accession via the structure's " +
-    'sequence cross-reference. Use the "include" parameter to scope which annotation classes are fetched.',
+    'sequence cross-reference. A multi-chain PDB entry can map to several accessions; the default pick is ' +
+    'deterministic (lowest author chain ID) and the alternatives are listed in "ambiguity" — pass "chain" to ' +
+    'select a specific one. Use "include" to scope which annotation classes are fetched. Every response carries ' +
+    'an "attribution" block with the upstream data licenses and citations.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   errors: [
@@ -67,6 +99,13 @@ export const getAnnotations = tool('protein_get_annotations', {
       when: 'A PDB ID has no UniProt cross-reference (e.g. nucleic-acid-only entry), or neither uniprot nor pdb_id was provided.',
       recovery:
         'Pass a UniProt accession directly, or use protein_search_structures to find a structure with a modeled protein chain.',
+    },
+    {
+      reason: 'chain_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'A supplied chain matches no UniProt-mapped polymer entity in the resolved PDB entry.',
+      recovery:
+        'Omit chain for the deterministic default mapping, or pass an author chain ID the entry exposes (see polymerEntities[].chains in the pdb://{entry_id} resource).',
     },
   ],
 
@@ -79,6 +118,12 @@ export const getAnnotations = tool('protein_get_annotations', {
       .string()
       .optional()
       .describe('PDB entry ID; resolved to a UniProt accession via cross-reference.'),
+    chain: z
+      .string()
+      .optional()
+      .describe(
+        'Author chain ID (auth_asym_id, e.g. "A") that disambiguates a multi-chain PDB entry to a specific UniProt accession. Case-sensitive — must match the author chain ID exactly (large structures can carry distinct "A" and "a" chains). Only applies with pdb_id; ignored when uniprot is supplied directly. See polymerEntities[].chains in the pdb://{entry_id} resource for an entry\'s author chain IDs.',
+      ),
     include: z
       .enum(['features', 'domains', 'variants', 'all'])
       .default('all')
@@ -97,6 +142,16 @@ export const getAnnotations = tool('protein_get_annotations', {
     features: z.array(featureSchema).optional().describe('Structural/functional features.'),
     variants: z.array(featureSchema).optional().describe('Natural sequence variants.'),
     domains: z.array(domainSchema).optional().describe('InterPro domain/family memberships.'),
+    ambiguity: ambiguitySchema
+      .optional()
+      .describe(
+        'Alternative UniProt mappings when a PDB ID resolved ambiguously (no chain given).',
+      ),
+    attribution: z
+      .array(attributionSchema)
+      .describe(
+        'Upstream data-source licenses and citations for every source that contributed to this response. Always present — the attribution obligation travels with the data.',
+      ),
   }),
 
   enrichment: {
@@ -113,11 +168,43 @@ export const getAnnotations = tool('protein_get_annotations', {
 
     let accession = input.uniprot?.toUpperCase();
     let resolvedFrom: string | undefined;
+    let ambiguity: AnnotationAmbiguity | undefined;
+
     if (!accession && input.pdb_id) {
-      const accessions = await rcsb.resolveUniprot(input.pdb_id, ctx);
-      accession = accessions[0];
+      const entities = await rcsb.resolveUniprotEntities(input.pdb_id, ctx);
       resolvedFrom = input.pdb_id.toUpperCase();
+      const chain = input.chain?.trim();
+      if (chain) {
+        const match = entities.find((e) => e.chains.includes(chain));
+        if (!match) {
+          const available = entities.flatMap((e) => e.chains);
+          throw ctx.fail(
+            'chain_not_found',
+            `Chain "${chain}" matches no UniProt-mapped polymer entity in ${resolvedFrom}.`,
+            {
+              recovery: {
+                hint: available.length
+                  ? `Author chains in ${resolvedFrom}: ${available.join(', ')}. Pass one of these, or omit chain for the deterministic default mapping.`
+                  : `${resolvedFrom} exposes no UniProt-mapped protein chains. Pass a UniProt accession directly.`,
+              },
+            },
+          );
+        }
+        accession = match.accession;
+      } else {
+        // Deterministic default: order entities by their lowest author chain ID and
+        // take the first, so the same entry always yields the same accession
+        // regardless of upstream GraphQL entity ordering. When more than one distinct
+        // accession exists, surface the alternatives so the caller can pick a chain.
+        const ordered = orderByLowestChain(entities);
+        accession = ordered[0]?.accession;
+        const distinct = new Set(entities.map((e) => e.accession));
+        if (accession && distinct.size > 1) {
+          ambiguity = buildAmbiguity(resolvedFrom, accession, ordered, distinct.size);
+        }
+      }
     }
+
     if (!accession) {
       throw ctx.fail(
         'no_uniprot_mapping',
@@ -143,6 +230,14 @@ export const getAnnotations = tool('protein_get_annotations', {
     const wantFeatures = include === 'features' || include === 'all';
     const wantVariants = include === 'variants' || include === 'all';
 
+    // Attribution rides with the data. UniProt always contributes on success;
+    // InterPro only when it returned entries; GO only when a returned entry carries
+    // GO terms. InterPro (CC0) and GO (CC BY 4.0) are gated independently — an
+    // InterPro entry can exist with zero GO terms.
+    const sources = new Set<CuratedSource>(['UniProt']);
+    if (interpro.length > 0) sources.add('InterPro');
+    if (interpro.some((d) => d.goTerms.length > 0)) sources.add('GO');
+
     if (resolvedFrom) ctx.enrich({ resolvedFrom });
 
     return {
@@ -155,6 +250,8 @@ export const getAnnotations = tool('protein_get_annotations', {
       ...(wantFeatures ? { features: toFeatureOutput(features) } : {}),
       ...(wantVariants ? { variants: toFeatureOutput(variants) } : {}),
       ...(wantInterPro ? { domains: interpro } : {}),
+      ...(ambiguity ? { ambiguity } : {}),
+      attribution: attributionsFor(sources),
     };
   },
 
@@ -169,6 +266,16 @@ export const getAnnotations = tool('protein_get_annotations', {
     ].filter(Boolean);
     if (head.length > 0) lines.push(head.join(' | '));
     if (result.function) lines.push(`\n**Function:** ${result.function}`);
+
+    if (result.ambiguity) {
+      lines.push(`\n### Multiple UniProt mappings`);
+      lines.push(result.ambiguity.notice);
+      for (const m of result.ambiguity.accessions) {
+        lines.push(
+          `- **${m.accession}**${m.proteinName ? ` — ${m.proteinName}` : ''} (chains ${m.chain.join(', ') || 'none'})`,
+        );
+      }
+    }
 
     if (result.features && result.features.length > 0) {
       lines.push(`\n### Features (${result.features.length})`);
@@ -188,9 +295,43 @@ export const getAnnotations = tool('protein_get_annotations', {
           lines.push(`  - ${g.id} ${g.name}${g.category ? ` [${g.category}]` : ''}`);
       }
     }
+    if (result.attribution.length > 0) {
+      lines.push(`\n### Attribution`);
+      lines.push(...renderAttribution(result.attribution));
+    }
     return [{ type: 'text', text: lines.join('\n') }];
   },
 });
+
+/** Lowest author chain ID for an entity (code-unit order); '' when it has none. */
+function lowestChain(entity: UniProtXref): string {
+  return [...entity.chains].sort()[0] ?? '';
+}
+
+/** Order UniProt xrefs by their lowest author chain ID — the deterministic default pick. */
+function orderByLowestChain(entities: UniProtXref[]): UniProtXref[] {
+  return [...entities].sort((a, b) => lowestChain(a).localeCompare(lowestChain(b)));
+}
+
+/** Assemble the ambiguity block: every distinct mapping, lowest-chain first, with a notice. */
+function buildAmbiguity(
+  entryId: string,
+  chosen: string,
+  ordered: UniProtXref[],
+  distinctCount: number,
+): AnnotationAmbiguity {
+  return {
+    accessions: ordered.map((e) => ({
+      chain: e.chains,
+      accession: e.accession,
+      ...(e.proteinName ? { proteinName: e.proteinName } : {}),
+    })),
+    notice:
+      `${entryId} maps to ${distinctCount} distinct UniProt accessions across its chains. ` +
+      `Returning ${chosen}, the deterministic lowest-chain pick. ` +
+      'Re-call with chain set to a specific author chain ID to select another.',
+  };
+}
 
 function toFeatureOutput(features: SequenceFeature[]) {
   return features.map((f) => ({

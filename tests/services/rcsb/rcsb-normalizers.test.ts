@@ -129,25 +129,29 @@ describe('RcsbService.getEntries', () => {
   });
 });
 
-describe('RcsbService.resolveUniprot', () => {
-  it('collects distinct UniProt accessions across polymer entities, case-folded', async () => {
+describe('RcsbService.resolveUniprotEntities', () => {
+  it('returns one entry per UniProt-mapped polymer entity with its chains, accession, and description', async () => {
     fetchJsonMock.mockResolvedValue(
       gql({
         entry: {
+          // Real 4HHB shape: two protein entities, alpha (chains A/C) and beta (B/D).
           polymer_entities: [
             {
+              rcsb_polymer_entity: { pdbx_description: 'Hemoglobin subunit alpha' },
               rcsb_polymer_entity_container_identifiers: {
+                auth_asym_ids: ['A', 'C'],
                 reference_sequence_identifiers: [
-                  { database_name: 'UniProt', database_accession: 'p69905' },
+                  { database_name: 'UniProt', database_accession: 'p69905' }, // case-folded
                   { database_name: 'GenBank', database_accession: 'X00001' }, // non-UniProt, skipped
                 ],
               },
             },
             {
+              rcsb_polymer_entity: { pdbx_description: 'Hemoglobin subunit beta' },
               rcsb_polymer_entity_container_identifiers: {
+                auth_asym_ids: ['B', 'D'],
                 reference_sequence_identifiers: [
                   { database_name: 'UniProtKB', database_accession: 'P68871' },
-                  { database_name: 'UniProt', database_accession: 'P69905' }, // dup
                 ],
               },
             },
@@ -155,13 +159,46 @@ describe('RcsbService.resolveUniprot', () => {
         },
       }),
     );
-    const out = await service().resolveUniprot('4hhb', createMockContext());
-    expect(out).toEqual(['P69905', 'P68871']);
+    const out = await service().resolveUniprotEntities('4hhb', createMockContext());
+    expect(out).toEqual([
+      { chains: ['A', 'C'], accession: 'P69905', proteinName: 'Hemoglobin subunit alpha' },
+      { chains: ['B', 'D'], accession: 'P68871', proteinName: 'Hemoglobin subunit beta' },
+    ]);
   });
 
-  it('returns [] when the entry has no UniProt xrefs', async () => {
+  it('skips entities with no UniProt xref and tolerates missing chains/description', async () => {
+    fetchJsonMock.mockResolvedValue(
+      gql({
+        entry: {
+          polymer_entities: [
+            {
+              // no chains, no description — still maps
+              rcsb_polymer_entity_container_identifiers: {
+                reference_sequence_identifiers: [
+                  { database_name: 'UniProt', database_accession: 'P0DTD1' },
+                ],
+              },
+            },
+            {
+              // GenBank only → not UniProt-mapped → skipped
+              rcsb_polymer_entity_container_identifiers: {
+                auth_asym_ids: ['X'],
+                reference_sequence_identifiers: [
+                  { database_name: 'GenBank', database_accession: 'X1' },
+                ],
+              },
+            },
+          ],
+        },
+      }),
+    );
+    const out = await service().resolveUniprotEntities('1abc', createMockContext());
+    expect(out).toEqual([{ chains: [], accession: 'P0DTD1' }]);
+  });
+
+  it('returns [] when the entry has no polymer entities', async () => {
     fetchJsonMock.mockResolvedValue(gql({ entry: { polymer_entities: [] } }));
-    expect(await service().resolveUniprot('1ABC', createMockContext())).toEqual([]);
+    expect(await service().resolveUniprotEntities('1ABC', createMockContext())).toEqual([]);
   });
 });
 

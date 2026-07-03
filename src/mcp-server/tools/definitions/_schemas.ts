@@ -96,3 +96,28 @@ export function renderFacets(facets: FacetDimensionOutput[]): string[] {
   }
   return lines;
 }
+
+/** License + citation for one upstream data source that contributed to a response. */
+export const attributionSchema = z
+  .object({
+    source: z
+      .string()
+      .describe(
+        'Contributing data-source display name (e.g. "RCSB PDB", "AlphaFold DB", "SWISS-MODEL", "UniProt"). Open-ended — best_available structures are federated through 3D-Beacons providers.',
+      ),
+    license: z.string().describe('License the source data is released under (e.g. "CC BY 4.0").'),
+    citation: z.string().describe('Primary-literature citation to credit the source.'),
+    homepage: z.string().describe('Source homepage (absolute URL).'),
+  })
+  .describe('Upstream data-source attribution: license, citation, and homepage.');
+
+export type AttributionOutput = z.infer<typeof attributionSchema>;
+
+/** Render an attribution list to one compact markdown line per source for `format()` parity. */
+export function renderAttribution(attributions: AttributionOutput[]): string[] {
+  const lines: string[] = [];
+  for (const a of attributions) {
+    lines.push(`- **${a.source}** (${a.license}) — ${a.citation} — ${a.homepage}`);
+  }
+  return lines;
+}

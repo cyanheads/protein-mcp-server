@@ -61,6 +61,16 @@ export interface PolymerEntityMeta {
   sequenceLength?: number;
 }
 
+/** One polymer entity's UniProt cross-reference: the chains it covers and the mapped accession. */
+export interface UniProtXref {
+  /** UniProt accession this entity maps to. */
+  accession: string;
+  /** Author chain IDs (auth_asym_id) this entity covers (e.g. ["A", "C"]). */
+  chains: string[];
+  /** Polymer entity description (e.g. "Hemoglobin subunit alpha"). */
+  proteinName?: string;
+}
+
 /** A bound non-polymer (ligand) component within an entry. */
 export interface LigandMeta {
   /** Chemical component ID (e.g. `HEM`, `STI`). */
