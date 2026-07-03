@@ -22,6 +22,10 @@ const childDimensionSchema = z
   .object({
     dimension: z.string().describe('Nested dimension name.'),
     buckets: z.array(leafBucketSchema).describe('Nested buckets within the parent bucket.'),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe('True when this nested bucket list was capped by the per-dimension bucket limit.'),
   })
   .describe('A nested cross-tab dimension within a parent bucket.');
 
@@ -68,6 +72,7 @@ export function toFacetOutput(facet: FacetDimension, cap: number): FacetDimensio
             children: b.children.map((c) => ({
               dimension: c.dimension,
               buckets: c.buckets.slice(0, cap).map((cb) => ({ label: cb.label, count: cb.count })),
+              ...(c.buckets.length > cap ? { truncated: true } : {}),
             })),
           }
         : {}),
@@ -85,7 +90,7 @@ export function renderFacets(facets: FacetDimensionOutput[]): string[] {
       lines.push(`- ${b.label}: ${b.count}`);
       for (const c of b.children ?? []) {
         const inner = c.buckets.map((cb) => `${cb.label}: ${cb.count}`).join(', ');
-        lines.push(`  - ${c.dimension} → ${inner}`);
+        lines.push(`  - ${c.dimension} → ${inner}${c.truncated ? ' (truncated)' : ''}`);
       }
     }
   }

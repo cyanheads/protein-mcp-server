@@ -62,9 +62,34 @@ describe('toFacetOutput', () => {
       ]),
       2,
     );
-    // Child buckets capped at 2 as well.
+    // Child buckets capped at 2 as well, and the child carries its own truncation flag (#13).
     expect(out.buckets[0]?.children?.[0]?.buckets).toHaveLength(2);
     expect(out.buckets[0]?.children?.[0]).toMatchObject({ dimension: 'release_year' });
+    expect(out.buckets[0]?.children?.[0]?.truncated).toBe(true);
+  });
+
+  it('leaves a nested child untruncated when its buckets are within the cap (#13)', () => {
+    const out = toFacetOutput(
+      dim([
+        {
+          label: 'X-RAY',
+          count: 800,
+          children: [
+            {
+              dimension: 'release_year',
+              attribute: 'rcsb_accession_info.initial_release_date',
+              buckets: [
+                { label: '2020', count: 60 },
+                { label: '2021', count: 70 },
+              ],
+            },
+          ],
+        },
+      ]),
+      5,
+    );
+    expect(out.buckets[0]?.children?.[0]?.buckets).toHaveLength(2);
+    expect(out.buckets[0]?.children?.[0]).not.toHaveProperty('truncated');
   });
 
   it('omits children on a leaf bucket', () => {
@@ -120,5 +145,30 @@ describe('renderFacets', () => {
     ]);
     const text = lines.join('\n');
     expect(text).toContain('  - release_year → 2020: 60, 2021: 70');
+  });
+
+  it('marks a truncated nested child dimension in the inline list (#13)', () => {
+    const lines = renderFacets([
+      {
+        dimension: 'method',
+        buckets: [
+          {
+            label: 'X-RAY',
+            count: 800,
+            children: [
+              {
+                dimension: 'release_year',
+                truncated: true,
+                buckets: [
+                  { label: '2020', count: 60 },
+                  { label: '2021', count: 70 },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    ]);
+    expect(lines.join('\n')).toContain('  - release_year → 2020: 60, 2021: 70 (truncated)');
   });
 });
