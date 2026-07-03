@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.3.1](changelog/0.3.x/0.3.1.md) — 2026-07-03
+
+best_available confidence scores are now scale-correct and self-describing instead of overloading meanPlddt; experimental best_available picks return the full cif/pdb/bcif coordinate set, matching source: experimental.
+
 ## [0.3.0](changelog/0.3.x/0.3.0.md) — 2026-07-03
 
 protein_get_annotations disambiguates multi-chain PDB entries via a new chain input; protein_get_structure and protein_get_annotations both carry upstream data-source attribution (license + citation).
