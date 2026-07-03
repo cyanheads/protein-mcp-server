@@ -122,10 +122,13 @@ export const getAnnotations = tool('protein_get_annotations', {
       throw ctx.fail(
         'no_uniprot_mapping',
         'Provide a UniProt accession, or a PDB ID with a modeled protein chain.',
+        { ...ctx.recoveryFor('no_uniprot_mapping') },
       );
     }
     if (!isUniProtAccession(accession)) {
-      throw ctx.fail('no_uniprot_mapping', `"${accession}" is not a valid UniProt accession.`);
+      throw ctx.fail('no_uniprot_mapping', `"${accession}" is not a valid UniProt accession.`, {
+        ...ctx.recoveryFor('no_uniprot_mapping'),
+      });
     }
 
     const include = input.include as AnnotationInclude;

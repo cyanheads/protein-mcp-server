@@ -147,7 +147,9 @@ export const searchStructures = tool('protein_search_structures', {
 
   async handler(input, ctx) {
     if (!input.query && !input.sequence && !input.organism) {
-      throw ctx.fail('no_criteria', 'Provide a query, sequence, or organism to search on.');
+      throw ctx.fail('no_criteria', 'Provide a query, sequence, or organism to search on.', {
+        ...ctx.recoveryFor('no_criteria'),
+      });
     }
     const cfg = getServerConfig();
     const rcsb = getRcsbService();

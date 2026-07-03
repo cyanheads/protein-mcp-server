@@ -116,10 +116,15 @@ describe('protein_find_similar — by:sequence', () => {
     ).rejects.toMatchObject({ data: { reason: 'no_sequence' } });
   });
 
-  it('throws missing_query when no sequence source is provided', async () => {
+  it('throws missing_query (with its declared recovery hint) when no sequence source is provided', async () => {
     await expect(
       findSimilar.handler(findSimilar.input.parse({ by: 'sequence' }), ctx()),
-    ).rejects.toMatchObject({ data: { reason: 'missing_query' } });
+    ).rejects.toMatchObject({
+      data: {
+        reason: 'missing_query',
+        recovery: { hint: expect.stringContaining('raw sequence') },
+      },
+    });
   });
 
   it('forwards max_evalue and min_identity to the sequence search', async () => {

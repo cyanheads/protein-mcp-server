@@ -177,12 +177,14 @@ export const getStructure = tool('protein_get_structure', {
         throw ctx.fail(
           'mixed_id_types',
           'source experimental expects PDB entry IDs, but UniProt accessions were present.',
+          { ...ctx.recoveryFor('mixed_id_types') },
         );
       }
     } else if (ids.some((id) => isPdbId(id) && !isUniProtAccession(id))) {
       throw ctx.fail(
         'mixed_id_types',
         `source ${input.source} expects UniProt accessions, but PDB IDs were present.`,
+        { ...ctx.recoveryFor('mixed_id_types') },
       );
     }
 
@@ -195,6 +197,7 @@ export const getStructure = tool('protein_get_structure', {
       throw ctx.fail(
         'all_failed',
         `None of the ${ids.length} requested IDs resolved to a structure.`,
+        { ...ctx.recoveryFor('all_failed') },
       );
     }
 

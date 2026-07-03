@@ -99,7 +99,10 @@ export const analyzeCollection = tool('protein_analyze_collection', {
           : 'experimental';
 
     const [primary, secondary] = input.group_by;
-    if (!primary) throw ctx.fail('unknown_dimension', 'group_by requires at least one dimension.');
+    if (!primary)
+      throw ctx.fail('unknown_dimension', 'group_by requires at least one dimension.', {
+        ...ctx.recoveryFor('unknown_dimension'),
+      });
     const spec = buildFacetSpec(primary, input.interval, secondary);
 
     const { total, facets } = await rcsb.analyzeFacets(

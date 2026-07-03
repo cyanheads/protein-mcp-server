@@ -14,18 +14,66 @@ vi.mock('@/services/rcsb/rcsb-service.js', () => ({
   getRcsbService: () => ({ search, getEntries }),
 }));
 
+import { getServerConfig } from '@/config/server-config.js';
 import { searchStructures } from '@/mcp-server/tools/definitions/search-structures.tool.js';
 
 const ctx = () => createMockContext({ errors: searchStructures.errors });
+const FACET_CAP = getServerConfig().facetBucketCap;
 
 beforeEach(() => vi.clearAllMocks());
 
 describe('protein_search_structures', () => {
-  it('throws no_criteria when nothing to search on', async () => {
+  it('throws no_criteria (with its declared recovery hint) when nothing to search on', async () => {
     const input = searchStructures.input.parse({});
     await expect(searchStructures.handler(input, ctx())).rejects.toMatchObject({
-      data: { reason: 'no_criteria' },
+      data: {
+        reason: 'no_criteria',
+        recovery: { hint: expect.stringContaining('free-text query') },
+      },
     });
+  });
+
+  it('marks nested cross-tab child dimensions as truncated in the shared facet projection (#13)', async () => {
+    // Simulate a nested facet from upstream whose child list exceeds the bucket cap.
+    const childBuckets = Array.from({ length: FACET_CAP + 3 }, (_, i) => ({
+      label: String(2000 + i),
+      count: FACET_CAP + 3 - i,
+    }));
+    search.mockResolvedValue({
+      total: 500,
+      hits: [],
+      facets: [
+        {
+          dimension: 'method',
+          attribute: 'exptl.method',
+          buckets: [
+            {
+              label: 'X-RAY DIFFRACTION',
+              count: 400,
+              children: [
+                {
+                  dimension: 'release_year',
+                  attribute: 'rcsb_accession_info.initial_release_date',
+                  buckets: childBuckets,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    getEntries.mockResolvedValue([]);
+    const out = await searchStructures.handler(
+      searchStructures.input.parse({ query: 'hemoglobin', facets: ['method', 'release_year'] }),
+      ctx(),
+    );
+    const child = out.facets?.[0]?.buckets[0]?.children?.[0];
+    expect(child?.buckets).toHaveLength(FACET_CAP);
+    expect(child?.truncated).toBe(true);
+    // format() marks the nested truncation in the text surface too.
+    const text = (searchStructures.format?.(out)?.[0] as { text: string }).text;
+    expect(text).toContain('release_year →');
+    expect(text).toContain('(truncated)');
   });
 
   it('parses a UniProt accession out of a predicted computed-model hit', async () => {

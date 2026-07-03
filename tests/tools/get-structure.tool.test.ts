@@ -56,11 +56,14 @@ describe('protein_get_structure', () => {
     });
   });
 
-  it('throws all_failed when no experimental ID resolves', async () => {
+  it('throws all_failed (with its declared recovery hint) when no experimental ID resolves', async () => {
     getEntries.mockResolvedValue([]);
     const input = getStructure.input.parse({ ids: ['4HHB'], source: 'experimental' });
     await expect(getStructure.handler(input, ctx())).rejects.toMatchObject({
-      data: { reason: 'all_failed' },
+      data: {
+        reason: 'all_failed',
+        recovery: { hint: expect.stringContaining('Verify ID formats') },
+      },
     });
   });
 

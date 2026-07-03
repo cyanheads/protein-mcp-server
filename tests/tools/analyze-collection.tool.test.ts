@@ -127,6 +127,60 @@ describe('protein_analyze_collection', () => {
     expect(specs[0]).toMatchObject({ dimension: 'method', child: { dimension: 'release_year' } });
   });
 
+  it('marks nested cross-tab child dimensions truncated over bucket_limit (#13)', async () => {
+    analyzeFacets.mockResolvedValue({
+      total: 100,
+      facets: [
+        {
+          dimension: 'method',
+          attribute: 'exptl.method',
+          buckets: [
+            {
+              label: 'X-RAY DIFFRACTION',
+              count: 90,
+              children: [
+                {
+                  dimension: 'release_year',
+                  attribute: 'rcsb_accession_info.initial_release_date',
+                  buckets: [
+                    { label: '1976', count: 4 },
+                    { label: '1977', count: 1 },
+                    { label: '1978', count: 1 },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    const out = await analyzeCollection.handler(
+      analyzeCollection.input.parse({
+        group_by: ['method', 'release_year'],
+        query: 'hemoglobin',
+        bucket_limit: 2,
+      }),
+      ctx(),
+    );
+    const child = out.facets[0]?.buckets[0]?.children?.[0];
+    expect(child?.buckets).toHaveLength(2);
+    expect(child?.truncated).toBe(true);
+    const text = (analyzeCollection.format?.(out)?.[0] as { text: string }).text;
+    expect(text).toContain('release_year → 1976: 4, 1977: 1 (truncated)');
+  });
+
+  it('carries the declared recovery hint on the unknown_dimension guard (#10)', async () => {
+    const base = analyzeCollection.input.parse({ group_by: ['method'] });
+    await expect(analyzeCollection.handler({ ...base, group_by: [] }, ctx())).rejects.toMatchObject(
+      {
+        data: {
+          reason: 'unknown_dimension',
+          recovery: { hint: expect.stringContaining('supported dimension') },
+        },
+      },
+    );
+  });
+
   it('output conforms to the declared schema', async () => {
     analyzeFacets.mockResolvedValue({
       total: 1000,

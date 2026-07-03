@@ -96,7 +96,10 @@ describe('protein_compare_structures', () => {
       resume: [{ a: '9XXX', b: '8YYY', uuid: 'u' }],
     });
     await expect(compareStructures.handler(input, ctx())).rejects.toMatchObject({
-      data: { reason: 'resume_pair_unmatched' },
+      data: {
+        reason: 'resume_pair_unmatched',
+        recovery: { hint: expect.stringContaining('verbatim') },
+      },
     });
     expect(comparePair).not.toHaveBeenCalled();
     expect(resumePair).not.toHaveBeenCalled();

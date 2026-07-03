@@ -75,6 +75,19 @@ describe('protein_track_ligands — find_ligand', () => {
       trackLigands.handler(trackLigands.input.parse({ mode: 'find_ligand', query: 'zzz' }), ctx()),
     ).rejects.toMatchObject({ data: { reason: 'not_found' } });
   });
+
+  it('carries the declared recovery hint on the missing_param error (#10)', async () => {
+    await expect(
+      trackLigands.handler(trackLigands.input.parse({ mode: 'find_ligand' }), ctx()),
+    ).rejects.toMatchObject({
+      data: {
+        reason: 'missing_param',
+        recovery: {
+          hint: expect.stringContaining('Provide the parameter the selected mode requires'),
+        },
+      },
+    });
+  });
 });
 
 describe('protein_track_ligands — structures_with_ligand', () => {
@@ -159,6 +172,36 @@ describe('protein_track_ligands — binding_site', () => {
         ctx(),
       ),
     ).rejects.toMatchObject({ data: { reason: 'not_found' } });
+  });
+
+  const fourHemSites = ['A', 'B', 'C', 'D'].map((chain) => ({
+    ligandCompId: 'HEM',
+    ligandAsymId: chain,
+    residues: [{ residueCompId: 'HIS', asymId: chain, seqId: 87, distance: 2.1 }],
+  }));
+
+  it('caps binding-site instances at limit and emits a truncation notice (#9)', async () => {
+    getBindingSites.mockResolvedValue(fourHemSites);
+    const c = ctx();
+    const out = await trackLigands.handler(
+      trackLigands.input.parse({ mode: 'binding_site', pdb_id: '4HHB', comp_id: 'hem', limit: 2 }),
+      c,
+    );
+    expect(out.bindingSites).toHaveLength(2);
+    // Instance-level cap, nearest-first order preserved (A, B — not the residue lists).
+    expect(out.bindingSites?.map((s) => s.ligandAsymId)).toEqual(['A', 'B']);
+    expect(String(getEnrichment(c).notice)).toMatch(/showing 2 of 4 binding-site instances/i);
+  });
+
+  it('returns every binding site with no notice when under the limit (#9)', async () => {
+    getBindingSites.mockResolvedValue(fourHemSites);
+    const c = ctx();
+    const out = await trackLigands.handler(
+      trackLigands.input.parse({ mode: 'binding_site', pdb_id: '4HHB', comp_id: 'hem', limit: 25 }),
+      c,
+    );
+    expect(out.bindingSites).toHaveLength(4);
+    expect(getEnrichment(c).notice).toBeUndefined();
   });
 });
 

@@ -83,10 +83,15 @@ describe('protein_get_annotations', () => {
     expect(getEnrichment(c)).toMatchObject({ resolvedFrom: '4HHB' });
   });
 
-  it('throws no_uniprot_mapping when neither uniprot nor pdb_id is given', async () => {
+  it('throws no_uniprot_mapping (with its declared recovery hint) when neither uniprot nor pdb_id is given', async () => {
     await expect(
       getAnnotations.handler(getAnnotations.input.parse({}), ctx()),
-    ).rejects.toMatchObject({ data: { reason: 'no_uniprot_mapping' } });
+    ).rejects.toMatchObject({
+      data: {
+        reason: 'no_uniprot_mapping',
+        recovery: { hint: expect.stringContaining('Pass a UniProt accession directly') },
+      },
+    });
   });
 
   it('throws no_uniprot_mapping when the PDB entry has no UniProt cross-reference', async () => {

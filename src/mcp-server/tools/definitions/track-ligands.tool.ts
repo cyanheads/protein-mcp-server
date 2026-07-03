@@ -136,7 +136,9 @@ export const trackLigands = tool('protein_track_ligands', {
 
     if (input.mode === 'find_ligand') {
       if (!input.query)
-        throw ctx.fail('missing_param', 'mode find_ligand requires a name or formula in "query".');
+        throw ctx.fail('missing_param', 'mode find_ligand requires a name or formula in "query".', {
+          ...ctx.recoveryFor('missing_param'),
+        });
       const ids = await rcsb.findChemComps(input.query, input.limit, ctx);
       const ligands = (
         await mapWithConcurrency(ids, cfg.fanoutConcurrency, (id) => rcsb.getChemComp(id, ctx))
@@ -154,7 +156,9 @@ export const trackLigands = tool('protein_track_ligands', {
     if (input.mode === 'structures_with_ligand') {
       const compId = input.comp_id?.toUpperCase();
       if (!compId)
-        throw ctx.fail('missing_param', 'mode structures_with_ligand requires a "comp_id".');
+        throw ctx.fail('missing_param', 'mode structures_with_ligand requires a "comp_id".', {
+          ...ctx.recoveryFor('missing_param'),
+        });
       const result = await rcsb.searchByLigand(compId, { limit: input.limit }, ctx);
       ctx.enrich.total(result.total);
       ctx.enrich({ resolvedCompId: compId });
@@ -173,7 +177,10 @@ export const trackLigands = tool('protein_track_ligands', {
 
     // binding_site
     const compId = input.comp_id?.toUpperCase();
-    if (!input.pdb_id) throw ctx.fail('missing_param', 'mode binding_site requires a "pdb_id".');
+    if (!input.pdb_id)
+      throw ctx.fail('missing_param', 'mode binding_site requires a "pdb_id".', {
+        ...ctx.recoveryFor('missing_param'),
+      });
     const sites = await rcsb.getBindingSites(input.pdb_id, compId, ctx);
     if (sites.length === 0) {
       throw ctx.fail(
@@ -186,8 +193,16 @@ export const trackLigands = tool('protein_track_ligands', {
         },
       );
     }
+    // Cap binding-site INSTANCES to the shared limit (mode-consistent top-N; the
+    // other two modes already bound their results). Disclose the drop via notice.
+    const bindingSites = sites.slice(0, input.limit);
+    if (sites.length > input.limit) {
+      ctx.enrich.notice(
+        `Showing ${input.limit} of ${sites.length} binding-site instances in ${input.pdb_id.toUpperCase()}${compId ? ` for ${compId}` : ''}; raise limit to see more.`,
+      );
+    }
     if (compId) ctx.enrich({ resolvedCompId: compId });
-    return { mode: input.mode, bindingSites: sites };
+    return { mode: input.mode, bindingSites };
   },
 
   format: (result) => {

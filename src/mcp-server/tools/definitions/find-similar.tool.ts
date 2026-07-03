@@ -312,6 +312,7 @@ async function resolveSequence(input: FindSimilarInput, ctx: Ctx): Promise<strin
       throw ctx.fail(
         'no_sequence',
         `No protein sequence found for PDB entry ${input.pdb_id.toUpperCase()}.`,
+        { ...ctx.recoveryFor('no_sequence') },
       );
     return seq.sequence;
   }
@@ -321,10 +322,13 @@ async function resolveSequence(input: FindSimilarInput, ctx: Ctx): Promise<strin
       throw ctx.fail(
         'no_sequence',
         `No sequence found for UniProt accession ${input.uniprot.toUpperCase()}.`,
+        { ...ctx.recoveryFor('no_sequence') },
       );
     return seq;
   }
-  throw ctx.fail('missing_query', 'Provide a sequence, pdb_id, or uniprot to search from.');
+  throw ctx.fail('missing_query', 'Provide a sequence, pdb_id, or uniprot to search from.', {
+    ...ctx.recoveryFor('missing_query'),
+  });
 }
 
 /** Resolve a query coordinate file (PDB-format text) from a PDB ID or UniProt accession. */
@@ -344,6 +348,7 @@ async function resolveCoordinateFile(
       throw ctx.fail(
         'no_sequence',
         `No predicted model with coordinates found for ${input.uniprot.toUpperCase()}.`,
+        { ...ctx.recoveryFor('no_sequence') },
       );
     }
     return {
@@ -354,6 +359,7 @@ async function resolveCoordinateFile(
   throw ctx.fail(
     'missing_query',
     'by:structure requires a pdb_id or uniprot accession to derive coordinates.',
+    { ...ctx.recoveryFor('missing_query') },
   );
 }
 
