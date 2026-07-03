@@ -70,7 +70,17 @@ const outputSchema = z.object({
     .array(
       z
         .object({
-          id: z.string().describe('Hit identifier (PDB entry/entity ID or UniProt accession).'),
+          id: z
+            .string()
+            .describe(
+              'Hit identifier that chains directly into protein_get_structure: a bare PDB entry ID (e.g. 1A00), or a UniProt accession for predicted hits.',
+            ),
+          entityId: z
+            .string()
+            .optional()
+            .describe(
+              'Matched polymer-entity ID (e.g. 1A00_1) for sequence hits; the chainable entry ID is in `id`.',
+            ),
           source: z
             .enum(['experimental', 'predicted'])
             .describe('Whether the hit is an experimental or predicted structure.'),
@@ -171,6 +181,7 @@ export const findSimilar = tool('protein_find_similar', {
       lines.push(`\n### ${h.id} _(${h.source})_`);
       if (h.title) lines.push(h.title);
       const parts = [
+        h.entityId ? `**Entity:** ${h.entityId}` : null,
         typeof h.score === 'number' ? `**Score:** ${h.score}` : null,
         typeof h.evalue === 'number' ? `**E-value:** ${h.evalue}` : null,
         typeof h.identity === 'number' ? `**Identity:** ${h.identity}` : null,
@@ -217,9 +228,14 @@ async function runSequence(
     engine: 'RCSB mmseqs2',
     status: 'complete',
     hits: result.hits.map((h) => {
-      const meta = metaById.get(entryIdOf(h.id));
+      // mmseqs2 emits polymer-entity IDs (1A00_1); expose the bare entry ID as
+      // `id` so it chains uniformly into protein_get_structure like the other
+      // tools, and keep the raw entity ID as `entityId` for the matched entity.
+      const entryId = entryIdOf(h.id);
+      const meta = metaById.get(entryId);
       return {
-        id: h.id,
+        id: entryId,
+        entityId: h.id,
         source: 'experimental' as const,
         score: h.score,
         ...(meta?.title ? { title: meta.title } : {}),

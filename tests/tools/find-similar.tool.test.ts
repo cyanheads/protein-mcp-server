@@ -41,6 +41,7 @@ vi.mock('@/services/shared/http.js', async (importOriginal) => {
 
 import { findSimilar } from '@/mcp-server/tools/definitions/find-similar.tool.js';
 import { fetchText } from '@/services/shared/http.js';
+import { entryIdOf } from '@/services/shared/identifiers.js';
 
 const fetchTextMock = vi.mocked(fetchText);
 const ctx = () => createMockContext({ errors: findSimilar.errors });
@@ -66,8 +67,11 @@ describe('protein_find_similar — by:sequence', () => {
     );
 
     expect(out).toMatchObject({ by: 'sequence', engine: 'RCSB mmseqs2', status: 'complete' });
+    // The bare entry ID chains into protein_get_structure; the raw polymer-entity
+    // ID is preserved as entityId. Metadata enrichment keys off the entry ID.
     expect(out.hits[0]).toMatchObject({
-      id: '4HHB_1',
+      id: '4HHB',
+      entityId: '4HHB_1',
       source: 'experimental',
       title: 'Deoxyhaemoglobin',
       organism: 'Homo sapiens',
@@ -75,6 +79,25 @@ describe('protein_find_similar — by:sequence', () => {
     // Whitespace is stripped before the sequence search.
     expect(searchSequence.mock.calls[0]?.[0]).toBe('MVLSPADK');
     expect(getEnrichment(c)).toMatchObject({ totalCount: 42 });
+  });
+
+  it('emits a bare, chainable entry ID plus the raw entityId for each hit (#18)', async () => {
+    searchSequence.mockResolvedValue({
+      total: 2,
+      hits: [
+        { id: '1A00_1', score: 1 },
+        { id: '1A01_1', score: 0.98 },
+      ],
+    });
+    getEntries.mockResolvedValue([]);
+    const out = await findSimilar.handler(
+      findSimilar.input.parse({ by: 'sequence', sequence: 'MVLSPADK' }),
+      ctx(),
+    );
+    // id is exactly what entryIdOf produces from the polymer-entity ID; entityId keeps the raw form.
+    expect(out.hits[0]).toMatchObject({ id: '1A00', entityId: '1A00_1' });
+    expect(out.hits[0]?.id).toBe(entryIdOf('1A00_1'));
+    expect(out.hits.map((h) => h.id)).toEqual(['1A00', '1A01']);
   });
 
   it('derives the query sequence from a PDB ID', async () => {
@@ -303,6 +326,7 @@ describe('protein_find_similar — format', () => {
       hits: [
         {
           id: '2HHB',
+          entityId: '2HHB_1',
           source: 'experimental',
           score: 800,
           evalue: 1e-30,
@@ -315,6 +339,7 @@ describe('protein_find_similar — format', () => {
     expect(text).toContain('## Foldseek (by:structure) — computing');
     expect(text).toContain('**Ticket:** tkt-1');
     expect(text).toContain('### 2HHB _(experimental)_');
+    expect(text).toContain('**Entity:** 2HHB_1');
     expect(text).toContain('Deoxyhaemoglobin');
     expect(text).toContain('**DB:** pdb100');
   });
