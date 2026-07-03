@@ -87,7 +87,15 @@ const outputSchema = z.object({
           a: z.string().describe('First structure of the pair (entry[.chain]).'),
           b: z.string().describe('Second structure of the pair (entry[.chain]).'),
           status: z.enum(['complete', 'computing', 'failed']).describe('Outcome for this pair.'),
-          tmScore: z.number().optional().describe('TM-score (0–1; higher is more similar).'),
+          tmScore: z
+            .number()
+            .optional()
+            .describe(
+              'TM-score (0–1; higher is more similar). Length-normalized, so it can be sensitive to ' +
+                'terminal length differences between the two structures — a one-residue overhang can flip ' +
+                'the greedy superposition into a worse local optimum, dropping the score sharply. Cross-check ' +
+                'rmsd and alignedResidues to spot such cases.',
+            ),
           rmsd: z.number().optional().describe('RMSD in Å over aligned residues.'),
           alignedResidues: z.number().optional().describe('Number of aligned residue pairs.'),
           uuid: z
@@ -112,7 +120,10 @@ export const compareStructures = tool('protein_compare_structures', {
     'job, fanned out with a concurrency cap and per-pair partial success — a pair still computing when the ' +
     'budget elapses returns status "computing" with its job UUID, and a failed pair degrades its row without ' +
     "sinking the others. Re-call with a matching entry in resume[] to poll a computing pair's UUID instead " +
-    'of resubmitting. Returns TM-score, RMSD, and aligned-residue count per pair.',
+    'of resubmitting. Returns TM-score, RMSD, and aligned-residue count per pair. TM-score is ' +
+    'length-normalized and can shift sharply between structures that differ only by a terminal residue or ' +
+    'two — the greedy superposition can settle into a worse local optimum — so read tmScore alongside rmsd ' +
+    'and alignedResidues, the columns that make such cases diagnosable.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   errors: [

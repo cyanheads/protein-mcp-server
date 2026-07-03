@@ -5,6 +5,7 @@
  * @module tests/tools/compare-structures.tool.test
  */
 
+import { z } from '@cyanheads/mcp-ts-core';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -161,5 +162,23 @@ describe('protein_compare_structures', () => {
     expect(text).toContain('4HHB ↔ 2HHB');
     expect(text).toContain('job u1');
     expect(text).toContain('no structure');
+  });
+});
+
+describe('protein_compare_structures TM-score length-normalization caveat', () => {
+  it('documents the length-normalization caveat in the tool description', () => {
+    expect(compareStructures.description).toMatch(/length-normalized/i);
+    expect(compareStructures.description).toMatch(/terminal/i);
+  });
+
+  it('documents the caveat on the tmScore output field, pointing at rmsd and alignedResidues', () => {
+    const js = z.toJSONSchema(compareStructures.output) as {
+      properties: { pairs: { items: { properties: { tmScore: { description?: string } } } } };
+    };
+    const desc = js.properties.pairs.items.properties.tmScore.description ?? '';
+    expect(desc).toMatch(/length-normalized/i);
+    expect(desc).toMatch(/terminal/i);
+    expect(desc).toMatch(/rmsd/i);
+    expect(desc).toMatch(/alignedResidues/i);
   });
 });
