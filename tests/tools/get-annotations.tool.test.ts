@@ -56,6 +56,16 @@ const interProDomain = (goTerms: unknown[] = []) => ({
   goTerms,
 });
 
+/** N synthetic records of one category — mirrors a dense annotation class (e.g. HBA's 151 variants). */
+const many = (category: 'feature' | 'variant', n: number) =>
+  Array.from({ length: n }, (_, i) => ({
+    category,
+    type: category === 'variant' ? 'Natural variant' : 'Region',
+    description: `${category} ${i + 1}`,
+    start: i + 1,
+    end: i + 1,
+  }));
+
 beforeEach(() => vi.clearAllMocks());
 
 describe('protein_get_annotations', () => {
@@ -154,6 +164,78 @@ describe('protein_get_annotations', () => {
       ctx(),
     );
     expect(out).toEqual(expect.schemaMatching(getAnnotations.output));
+  });
+});
+
+describe('protein_get_annotations per-class limit', () => {
+  it('caps a dense variant class to the limit and discloses it in one notice (151-variant shape)', async () => {
+    getEntry.mockResolvedValue(entry({ features: many('variant', 151) }));
+    const c = ctx();
+    const out = await getAnnotations.handler(
+      getAnnotations.input.parse({ uniprot: 'P69905', include: 'variants' }),
+      c,
+    );
+    expect(out.variants).toHaveLength(50); // default per-class cap
+    expect(getEntry).toHaveBeenCalledWith('P69905', 'variants', expect.anything());
+    expect(getEnrichment(c).notice).toContain('Showing 50 of 151 variants');
+    expect(getEnrichment(c).truncated).toBe(true);
+  });
+
+  it('caps features, variants, and domains independently, composing one notice per capped class', async () => {
+    getEntry.mockResolvedValue(entry({ features: [...many('feature', 3), ...many('variant', 3)] }));
+    getInterPro.mockResolvedValue([interProDomain(), interProDomain(), interProDomain()]);
+    const c = ctx();
+    const out = await getAnnotations.handler(
+      getAnnotations.input.parse({ uniprot: 'P69905', include: 'all', limit: 2 }),
+      c,
+    );
+    expect(out.features).toHaveLength(2);
+    expect(out.variants).toHaveLength(2);
+    expect(out.domains).toHaveLength(2);
+    const notice = String(getEnrichment(c).notice);
+    expect(notice).toContain('Showing 2 of 3 features');
+    expect(notice).toContain('Showing 2 of 3 variants');
+    expect(notice).toContain('Showing 2 of 3 domains');
+    expect(getEnrichment(c).truncated).toBe(true);
+  });
+
+  it('leaves an under-limit class intact and composes a capped class and a no-data class into one notice', async () => {
+    // features over the limit (capped), variants empty (no-data advisory), domains under the limit (intact).
+    getEntry.mockResolvedValue(entry({ features: many('feature', 60) }));
+    getInterPro.mockResolvedValue([interProDomain(), interProDomain()]);
+    const c = ctx();
+    const out = await getAnnotations.handler(
+      getAnnotations.input.parse({ uniprot: 'P69905', include: 'all' }),
+      c,
+    );
+    expect(out.features).toHaveLength(50); // capped at the default
+    expect(out.variants).toEqual([]); // requested, none present
+    expect(out.domains).toHaveLength(2); // under the limit — not truncated
+    const notice = String(getEnrichment(c).notice);
+    expect(notice).toContain('Showing 50 of 60 features'); // truncation fragment
+    expect(notice).toContain('No variants present'); // no-data fragment, same single notice
+    expect(getEnrichment(c).truncated).toBe(true);
+  });
+
+  it('sets a no-data notice without flagging truncation when a requested class is merely empty', async () => {
+    getEntry.mockResolvedValue(entry()); // 1 feature + 1 variant, both under the limit
+    getInterPro.mockResolvedValue([]); // domains requested but empty
+    const c = ctx();
+    await getAnnotations.handler(
+      getAnnotations.input.parse({ uniprot: 'P69905', include: 'all' }),
+      c,
+    );
+    expect(getEnrichment(c).notice).toContain('No domains present');
+    expect(getEnrichment(c)?.truncated).toBeUndefined(); // no class was capped
+  });
+
+  it('emits no notice and no truncation flag when every requested class is present and under the limit', async () => {
+    getEntry.mockResolvedValue(entry()); // 1 feature + 1 variant
+    getInterPro.mockResolvedValue([interProDomain()]); // 1 domain
+    const c = ctx();
+    await getAnnotations.handler(getAnnotations.input.parse({ uniprot: 'P69905' }), c);
+    expect(getEnrichment(c)?.notice).toBeUndefined();
+    expect(getEnrichment(c)?.truncated).toBeUndefined();
   });
 });
 

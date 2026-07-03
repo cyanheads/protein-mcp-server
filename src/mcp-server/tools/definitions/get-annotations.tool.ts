@@ -130,6 +130,18 @@ export const getAnnotations = tool('protein_get_annotations', {
       .describe(
         'Which annotation classes to fetch: features, domains (InterPro), variants, or all.',
       ),
+    limit: z
+      .number()
+      .int()
+      .min(1)
+      .max(200)
+      .default(50)
+      .describe(
+        'Per-class cap (1–200): features, natural variants, and InterPro domains are each independently ' +
+          'truncated to at most this many records. The default keeps a typical annotation set intact while ' +
+          'bounding a densely-annotated protein (a well-studied protein can carry 150+ natural variants); a ' +
+          'truncated class is disclosed in the response notice — raise it to retrieve more.',
+      ),
   }),
 
   output: z.object({
@@ -159,7 +171,18 @@ export const getAnnotations = tool('protein_get_annotations', {
       .string()
       .optional()
       .describe('PDB ID the accession was resolved from, when applicable.'),
-    notice: z.string().optional().describe('Advisory note (e.g. no variants present).'),
+    truncated: z
+      .boolean()
+      .optional()
+      .describe(
+        'True when at least one annotation class hit the per-class limit and was capped; the notice names each capped class with its pre-cap count.',
+      ),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Advisory note: a per-class "showing N of M" line for each capped class and a no-data note for any requested-but-empty class.',
+      ),
   },
 
   async handler(input, ctx) {
@@ -230,6 +253,29 @@ export const getAnnotations = tool('protein_get_annotations', {
     const wantFeatures = include === 'features' || include === 'all';
     const wantVariants = include === 'variants' || include === 'all';
 
+    // Cap each annotation class independently to the per-class limit, so one dense
+    // class (e.g. a protein's 150+ natural variants) can't dominate the payload.
+    // Collect every advisory fragment — a "showing N of M" line per truncated class
+    // plus a "no <class> present" note per requested-but-empty class — and emit them
+    // as ONE notice: ctx.enrich.notice is last-wins, so a second call would silently
+    // drop the first fragment.
+    const { limit } = input;
+    const notices: string[] = [];
+    let truncated = false;
+    for (const cls of [
+      { want: wantFeatures, count: features.length, label: 'features' },
+      { want: wantVariants, count: variants.length, label: 'variants' },
+      { want: wantInterPro, count: interpro.length, label: 'domains' },
+    ]) {
+      if (!cls.want) continue;
+      if (cls.count > limit) {
+        truncated = true;
+        notices.push(`Showing ${limit} of ${cls.count} ${cls.label}; raise limit to see more.`);
+      } else if (cls.count === 0) {
+        notices.push(`No ${cls.label} present.`);
+      }
+    }
+
     // Attribution rides with the data. UniProt always contributes on success;
     // InterPro only when it returned entries; GO only when a returned entry carries
     // GO terms. InterPro (CC0) and GO (CC BY 4.0) are gated independently — an
@@ -239,6 +285,8 @@ export const getAnnotations = tool('protein_get_annotations', {
     if (interpro.some((d) => d.goTerms.length > 0)) sources.add('GO');
 
     if (resolvedFrom) ctx.enrich({ resolvedFrom });
+    if (truncated) ctx.enrich({ truncated: true });
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     return {
       accession: entry.accession,
@@ -247,9 +295,9 @@ export const getAnnotations = tool('protein_get_annotations', {
       ...(entry.organism ? { organism: entry.organism } : {}),
       ...(entry.function ? { function: entry.function } : {}),
       ...(typeof entry.sequenceLength === 'number' ? { sequenceLength: entry.sequenceLength } : {}),
-      ...(wantFeatures ? { features: toFeatureOutput(features) } : {}),
-      ...(wantVariants ? { variants: toFeatureOutput(variants) } : {}),
-      ...(wantInterPro ? { domains: interpro } : {}),
+      ...(wantFeatures ? { features: toFeatureOutput(features.slice(0, limit)) } : {}),
+      ...(wantVariants ? { variants: toFeatureOutput(variants.slice(0, limit)) } : {}),
+      ...(wantInterPro ? { domains: interpro.slice(0, limit) } : {}),
       ...(ambiguity ? { ambiguity } : {}),
       attribution: attributionsFor(sources),
     };
