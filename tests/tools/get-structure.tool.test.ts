@@ -108,6 +108,110 @@ describe('protein_get_structure', () => {
     });
   });
 
+  it('routes a malformed predicted ID through the declared all_failed path, never a raw upstream error', async () => {
+    // "P0DOESNOT" is neither PDB- nor UniProt-shaped, so it used to reach AlphaFold
+    // and come back a 400 that escaped the tool's typed error contract entirely.
+    const input = getStructure.input.parse({ ids: ['P0DOESNOT'], source: 'predicted' });
+    await expect(getStructure.handler(input, ctx())).rejects.toMatchObject({
+      data: { reason: 'all_failed' },
+    });
+    expect(getPrediction).not.toHaveBeenCalled();
+  });
+
+  it('resolves an AlphaFold DB entry ID under predicted, not just a bare accession', async () => {
+    // Both AlphaFold and 3D-Beacons answer AF-P69905-F1 with a 200, and the af://
+    // resource emits exactly this form as `entryId` — so the shape guard added for
+    // the malformed-ID fix must not turn a working round-trip into a failed[] row.
+    getPrediction.mockResolvedValue({
+      uniprotAccession: 'P69905',
+      meanPlddt: 98,
+      cifUrl: 'https://af/cif',
+    });
+    const input = getStructure.input.parse({ ids: ['AF-P69905-F1'], source: 'predicted' });
+    const out = await getStructure.handler(input, ctx());
+
+    expect(out.failed).toHaveLength(0);
+    expect(out.structures).toHaveLength(1);
+    expect(out.structures[0]).toMatchObject({ source: 'predicted' });
+    expect(getPrediction).toHaveBeenCalledWith('AF-P69905-F1', expect.anything());
+  });
+
+  it('keeps a mixed valid+malformed predicted batch a partial success', async () => {
+    getPrediction.mockResolvedValue({
+      uniprotAccession: 'P69905',
+      meanPlddt: 98,
+      cifUrl: 'https://af/cif',
+    });
+    const input = getStructure.input.parse({
+      ids: ['P69905', 'P0DOESNOT'],
+      source: 'predicted',
+    });
+    const c = ctx();
+    const out = await getStructure.handler(input, c);
+
+    expect(out.structures).toHaveLength(1);
+    expect(out.structures[0]).toMatchObject({ id: 'P69905', source: 'predicted' });
+    expect(out.failed).toHaveLength(1);
+    expect(out.failed[0]?.id).toBe('P0DOESNOT');
+    // A malformed accession must not read as "upstream has no model for it".
+    expect(out.failed[0]?.reason).not.toBe('No predicted model found for this accession.');
+    expect(out.failed[0]?.reason).toMatch(/UniProt accession/i);
+    // Only the well-formed accession was worth a round trip.
+    expect(getPrediction).toHaveBeenCalledTimes(1);
+    expect(getPrediction).toHaveBeenCalledWith('P69905', expect.anything());
+    expect(getEnrichment(c)).toMatchObject({ requested: 2, resolved: 1 });
+  });
+
+  it('a well-formed but unknown accession still reports the upstream-miss reason', async () => {
+    // A9ZZZ9 is shape-valid: it reaches AlphaFold, 404s, and degrades per-ID.
+    getPrediction.mockResolvedValue(null);
+    const input = getStructure.input.parse({ ids: ['A9ZZZ9'], source: 'predicted' });
+    await expect(getStructure.handler(input, ctx())).rejects.toMatchObject({
+      data: {
+        reason: 'all_failed',
+        recovery: { hint: expect.stringContaining('Verify ID formats') },
+      },
+    });
+    expect(getPrediction).toHaveBeenCalledWith('A9ZZZ9', expect.anything());
+  });
+
+  it('still rejects a PDB ID under source predicted with mixed_id_types', async () => {
+    const input = getStructure.input.parse({ ids: ['4HHB'], source: 'predicted' });
+    await expect(getStructure.handler(input, ctx())).rejects.toMatchObject({
+      data: { reason: 'mixed_id_types' },
+    });
+    expect(getPrediction).not.toHaveBeenCalled();
+  });
+
+  it('applies the same per-ID guard under source best_available', async () => {
+    getSummary.mockResolvedValue({
+      accession: 'P69905',
+      found: true,
+      models: [
+        {
+          modelIdentifier: 'AF-P69905-F1',
+          modelCategory: 'AB-INITIO',
+          provider: 'AlphaFold DB',
+          modelUrl: 'https://alphafold.test/af.cif',
+          confidenceType: 'pLDDT',
+          confidenceAvgLocalScore: 96.8,
+        },
+      ],
+    });
+    const input = getStructure.input.parse({
+      ids: ['P69905', 'P0DOESNOT'],
+      source: 'best_available',
+    });
+    const out = await getStructure.handler(input, ctx());
+
+    expect(out.structures.map((s) => s.id)).toEqual(['P69905']);
+    expect(out.failed[0]).toMatchObject({
+      id: 'P0DOESNOT',
+      reason: expect.stringMatching(/UniProt accession/i),
+    });
+    expect(getSummary).toHaveBeenCalledTimes(1);
+  });
+
   it('collapses over-budget inlined coordinates into an overflow outline', async () => {
     getEntries.mockResolvedValue([experimentalMeta('4HHB'), experimentalMeta('2HHB')]);
     fetchTextMock.mockResolvedValue('A'.repeat(20_000)); // 2 × 20k = 40k > 24k budget

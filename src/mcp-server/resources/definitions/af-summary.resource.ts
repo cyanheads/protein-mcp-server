@@ -7,8 +7,9 @@
  */
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
-import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { invalidParams, notFound } from '@cyanheads/mcp-ts-core/errors';
 import { getAlphaFoldService } from '@/services/alphafold/alphafold-service.js';
+import { isAlphaFoldEntryId, isUniProtAccession } from '@/services/shared/identifiers.js';
 
 export const afSummaryResource = resource('af://{uniprot}', {
   name: 'alphafold-structure-summary',
@@ -42,6 +43,15 @@ export const afSummaryResource = resource('af://{uniprot}', {
   }),
 
   async handler(params, ctx) {
+    // AlphaFold answers a non-accession-shaped identifier with a 400 whose raw
+    // response body would otherwise surface verbatim; reject the shape locally.
+    // An AlphaFold DB entry ID resolves upstream too, and this resource emits one
+    // as `entryId`, so accept the form it hands back.
+    if (!isUniProtAccession(params.uniprot) && !isAlphaFoldEntryId(params.uniprot))
+      throw invalidParams(
+        `"${params.uniprot}" is not a UniProt accession — af:// is keyed by UniProt accession (e.g. af://P69905) or an AlphaFold DB entry ID (e.g. af://AF-P69905-F1).`,
+        { uniprot: params.uniprot },
+      );
     const model = await getAlphaFoldService().getPrediction(params.uniprot, ctx);
     if (!model)
       throw notFound(`No AlphaFold model found for ${params.uniprot.toUpperCase()}`, {

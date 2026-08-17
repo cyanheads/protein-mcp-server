@@ -18,7 +18,7 @@ import { getRcsbService } from '@/services/rcsb/rcsb-service.js';
 import { mapWithConcurrency } from '@/services/shared/async.js';
 import { attributionsFor } from '@/services/shared/attribution.js';
 import { fetchText } from '@/services/shared/http.js';
-import { isPdbId, isUniProtAccession } from '@/services/shared/identifiers.js';
+import { isAlphaFoldEntryId, isPdbId, isUniProtAccession } from '@/services/shared/identifiers.js';
 import { attributionSchema, renderAttribution } from './_schemas.js';
 
 const confidenceBucketsSchema = z.object({
@@ -400,6 +400,14 @@ async function fetchExperimental(ids: string[], ctx: Context): Promise<Resolutio
   return { structures, failed };
 }
 
+/**
+ * Per-ID failure reason for an identifier that is not accession-shaped. Kept
+ * distinct from the upstream-miss reason so a caller can tell a typo from an
+ * accession the model providers simply do not cover.
+ */
+const MALFORMED_ACCESSION =
+  'Not a UniProt accession — predicted and best_available are keyed by UniProt accession (e.g. P69905) or an AlphaFold DB entry ID (e.g. AF-P69905-F1).';
+
 async function fetchPredictedOrBest(
   ids: string[],
   source: 'predicted' | 'best_available',
@@ -407,15 +415,23 @@ async function fetchPredictedOrBest(
   ctx: Context,
 ): Promise<Resolution> {
   const results = await mapWithConcurrency(ids, concurrency, async (id) => {
+    // The handler's source guard only catches ID-*type* confusion (a PDB ID under
+    // predicted). An ID that is neither PDB- nor UniProt-shaped passes it, and a
+    // shape both upstreams reject answers with a 400, whose throw inside this
+    // worker sinks every other ID in the batch. Shape-check per ID so a malformed
+    // entry degrades only its own row, which is the "handle your own failures"
+    // contract mapWithConcurrency states. AlphaFold and 3D-Beacons both resolve an
+    // AlphaFold DB entry ID as well as a bare accession, so accept either.
+    if (!isUniProtAccession(id) && !isAlphaFoldEntryId(id))
+      return { failedId: id, reason: MALFORMED_ACCESSION };
     const record =
       source === 'predicted' ? await fetchPrediction(id, ctx) : await fetchBest(id, ctx);
-    return record ?? { failedId: id };
+    return record ?? { failedId: id, reason: 'No predicted model found for this accession.' };
   });
   const structures: StructureRecord[] = [];
   const failed: Resolution['failed'] = [];
   for (const r of results) {
-    if ('failedId' in r)
-      failed.push({ id: r.failedId, reason: 'No predicted model found for this accession.' });
+    if ('failedId' in r) failed.push({ id: r.failedId, reason: r.reason });
     else structures.push(r);
   }
   return { structures, failed };

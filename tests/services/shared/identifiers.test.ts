@@ -6,7 +6,12 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { entryIdOf, isPdbId, isUniProtAccession } from '@/services/shared/identifiers.js';
+import {
+  entryIdOf,
+  isAlphaFoldEntryId,
+  isPdbId,
+  isUniProtAccession,
+} from '@/services/shared/identifiers.js';
 
 describe('isPdbId', () => {
   it.each(['4HHB', '1IEP', '2W72', '4hhb'])('accepts the PDB ID %s', (id) => {
@@ -34,6 +39,28 @@ describe('isUniProtAccession', () => {
   it('is disjoint from PDB IDs (no value reads as both)', () => {
     for (const id of ['4HHB', 'P69905', '2W72', 'A0A1K0GXZ1']) {
       expect(isPdbId(id) && isUniProtAccession(id)).toBe(false);
+    }
+  });
+});
+
+describe('isAlphaFoldEntryId', () => {
+  it.each(['AF-P69905-F1', 'AF-A0A1K0GXZ1-F1', 'AF-P69905-F12', 'af-p69905-f1'])(
+    'accepts the AlphaFold DB entry ID %s',
+    (id) => {
+      expect(isAlphaFoldEntryId(id)).toBe(true);
+    },
+  );
+
+  it.each(['P69905', 'AF-P69905', 'AF-NOTANACC-F1', 'AF-P69905-F', '4HHB', 'P0DOESNOT'])(
+    'rejects %s',
+    (id) => {
+      expect(isAlphaFoldEntryId(id)).toBe(false);
+    },
+  );
+
+  it('is disjoint from bare accessions (no value reads as both)', () => {
+    for (const id of ['AF-P69905-F1', 'P69905', 'A0A1K0GXZ1']) {
+      expect(isAlphaFoldEntryId(id) && isUniProtAccession(id)).toBe(false);
     }
   });
 });
