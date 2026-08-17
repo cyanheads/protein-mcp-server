@@ -13,10 +13,17 @@ export interface SearchHit {
   score: number;
 }
 
-/** One facet bucket; `children` present only for multidimensional (nested) facets. */
+/** One facet bucket; `child` present only for multidimensional (nested) facets. */
 export interface FacetBucket {
-  /** Nested sub-facets for multidimensional cross-tabs. */
-  children?: FacetDimension[];
+  /**
+   * The single nested sub-facet for a multidimensional cross-tab. A facet spec
+   * carries at most one child and the request builder sends exactly one nested
+   * facet, so a bucket is never cross-tabbed by more than one dimension. Present
+   * whenever a child dimension was requested — with an empty bucket list when the
+   * scope carries no value for it (computed models have no experimental method),
+   * so the shape reflects what was asked for rather than dropping the dimension.
+   */
+  child?: FacetDimension;
   /** Count of entries in the bucket. */
   count: number;
   /** Bucket label (category value, numeric bin start, or period). */

@@ -3,8 +3,10 @@
  * breakdown and a `content_type` scope — `protein_analyze_collection` and
  * `protein_search_structures`. Facet nesting is bounded to two levels (a
  * dimension's buckets may each carry one child dimension), matching the deepest
- * cross-tab the facet engine produces. Every dimension position also reports its
- * coverage gap, so buckets that sum to less than the stated total say so.
+ * cross-tab the facet engine produces; the flat variant drops the child position
+ * for the tool that requests single-dimension breakdowns only. Every dimension
+ * position also reports its coverage gap, so buckets that sum to less than the
+ * stated total say so.
  * @module mcp-server/tools/definitions/_schemas
  */
 
@@ -61,38 +63,26 @@ const childDimensionSchema = z
   .describe('A nested cross-tab dimension within a parent bucket.');
 
 /** A top-level facet bucket, optionally carrying a nested cross-tab dimension. */
-const bucketSchema = z
-  .object({
-    label: z.string().describe('Bucket value — category, numeric bin start, or period.'),
-    count: z.number().describe('Number of entries in the bucket.'),
-    rangeFrom: z
-      .number()
+const bucketSchema = leafBucketSchema
+  .extend({
+    child: childDimensionSchema
       .optional()
       .describe(
-        'Inclusive lower bound of a numeric histogram bin (= label). Present only for numeric facets (resolution, molecular_weight); absent for term/period facets.',
-      ),
-    rangeTo: z
-      .number()
-      .optional()
-      .describe(
-        'Exclusive upper bound of a numeric histogram bin (rangeFrom + bin interval), so the bin covers [rangeFrom, rangeTo). Present only for numeric facets.',
-      ),
-    children: z
-      .array(childDimensionSchema)
-      .optional()
-      .describe(
-        'Nested dimension breakdown for cross-tabs (present only for multidimensional facets).',
+        'Nested dimension breakdown for a cross-tab. Present whenever a second dimension was requested — with an empty bucket list when nothing in this bucket carries a value for it — so its absence means no cross-tab was asked for. At most one: a bucket is never cross-tabbed by more than one dimension.',
       ),
   })
   .describe('A top-level aggregation bucket, optionally cross-tabbed by a nested dimension.');
 
-/** A facet dimension and its buckets. */
-export const facetDimensionSchema = z
+/**
+ * A facet dimension whose buckets are flat — the shape for a tool that requests
+ * single-dimension breakdowns only, so no bucket can ever carry a cross-tab.
+ */
+export const flatFacetDimensionSchema = z
   .object({
     dimension: z
       .string()
       .describe('Friendly dimension name (e.g. method, organism, release_year).'),
-    buckets: z.array(bucketSchema).describe('Aggregation buckets, count-descending for terms.'),
+    buckets: z.array(leafBucketSchema).describe('Aggregation buckets, count-descending for terms.'),
     truncated: z
       .boolean()
       .optional()
@@ -105,7 +95,16 @@ export const facetDimensionSchema = z
   })
   .describe('A facet dimension and its aggregation buckets.');
 
+/** A facet dimension whose buckets may each carry one nested cross-tab dimension. */
+export const facetDimensionSchema = flatFacetDimensionSchema
+  .extend({
+    buckets: z.array(bucketSchema).describe('Aggregation buckets, count-descending for terms.'),
+  })
+  .describe('A facet dimension and its aggregation buckets, each optionally cross-tabbed.');
+
 export type FacetDimensionOutput = z.infer<typeof facetDimensionSchema>;
+
+export type FlatFacetDimensionOutput = z.infer<typeof flatFacetDimensionSchema>;
 
 /** Copy the numeric-histogram range onto an output bucket when present. */
 function withRange<T extends { rangeFrom?: number; rangeTo?: number }>(
@@ -154,16 +153,16 @@ export function toFacetOutput(
       label: b.label,
       count: b.count,
       ...withRange(b),
-      ...(b.children
+      ...(b.child
         ? {
-            children: b.children.map((c) => ({
-              dimension: c.dimension,
-              buckets: c.buckets
+            child: {
+              dimension: b.child.dimension,
+              buckets: b.child.buckets
                 .slice(0, cap)
                 .map((cb) => ({ label: cb.label, count: cb.count, ...withRange(cb) })),
-              ...(c.buckets.length > cap ? { truncated: true } : {}),
-              missingValueCount: missingValueCount(c.buckets, b.count),
-            })),
+              ...(b.child.buckets.length > cap ? { truncated: true } : {}),
+              missingValueCount: missingValueCount(b.child.buckets, b.count),
+            },
           }
         : {}),
     })),
@@ -223,13 +222,13 @@ export function renderFacets(facets: FacetDimensionOutput[]): string[] {
     }
     for (const b of f.buckets) {
       lines.push(`- ${renderBucket(b)}`);
-      for (const c of b.children ?? []) {
-        const inner =
-          c.buckets.length === 0
-            ? EMPTY_CHILD_DIMENSION_TEXT
-            : c.buckets.map(renderBucket).join(', ');
-        lines.push(`  - ${c.dimension} → ${inner}${dimensionFlags(c)}`);
-      }
+      const c = b.child;
+      if (!c) continue;
+      const inner =
+        c.buckets.length === 0
+          ? EMPTY_CHILD_DIMENSION_TEXT
+          : c.buckets.map(renderBucket).join(', ');
+      lines.push(`  - ${c.dimension} → ${inner}${dimensionFlags(c)}`);
     }
   }
   return lines;
@@ -275,13 +274,13 @@ function coveragePositions(facets: FacetDimensionOutput[], total: number): Cover
     });
     const children = new Map<string, Omit<CoveragePosition, 'dimension'>>();
     for (const b of f.buckets) {
-      for (const c of b.children ?? []) {
-        const acc = children.get(c.dimension) ?? { missing: 0, scope: 0, bucketCount: 0 };
-        acc.missing += c.missingValueCount;
-        acc.scope += b.count;
-        acc.bucketCount += c.buckets.length;
-        children.set(c.dimension, acc);
-      }
+      const c = b.child;
+      if (!c) continue;
+      const acc = children.get(c.dimension) ?? { missing: 0, scope: 0, bucketCount: 0 };
+      acc.missing += c.missingValueCount;
+      acc.scope += b.count;
+      acc.bucketCount += c.buckets.length;
+      children.set(c.dimension, acc);
     }
     for (const [dimension, acc] of children) positions.push({ dimension, ...acc });
   }

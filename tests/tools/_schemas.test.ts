@@ -55,32 +55,30 @@ describe('toFacetOutput', () => {
     expect(toFacetOutput(dim(buckets), 3, 3)).not.toHaveProperty('truncated');
   });
 
-  it('projects and caps nested cross-tab children independently', () => {
+  it('projects and caps the nested cross-tab child independently', () => {
     const out = toFacetOutput(
       dim([
         {
           label: 'X-RAY',
           count: 800,
-          children: [
-            {
-              dimension: 'release_year',
-              attribute: 'rcsb_accession_info.initial_release_date',
-              buckets: [
-                { label: '2019', count: 50 },
-                { label: '2020', count: 60 },
-                { label: '2021', count: 70 },
-              ],
-            },
-          ],
+          child: {
+            dimension: 'release_year',
+            attribute: 'rcsb_accession_info.initial_release_date',
+            buckets: [
+              { label: '2019', count: 50 },
+              { label: '2020', count: 60 },
+              { label: '2021', count: 70 },
+            ],
+          },
         },
       ]),
       2,
       800,
     );
     // Child buckets capped at 2 as well, and the child carries its own truncation flag (#13).
-    expect(out.buckets[0]?.children?.[0]?.buckets).toHaveLength(2);
-    expect(out.buckets[0]?.children?.[0]).toMatchObject({ dimension: 'release_year' });
-    expect(out.buckets[0]?.children?.[0]?.truncated).toBe(true);
+    expect(out.buckets[0]?.child?.buckets).toHaveLength(2);
+    expect(out.buckets[0]?.child).toMatchObject({ dimension: 'release_year' });
+    expect(out.buckets[0]?.child?.truncated).toBe(true);
   });
 
   it('leaves a nested child untruncated when its buckets are within the cap (#13)', () => {
@@ -89,27 +87,46 @@ describe('toFacetOutput', () => {
         {
           label: 'X-RAY',
           count: 800,
-          children: [
-            {
-              dimension: 'release_year',
-              attribute: 'rcsb_accession_info.initial_release_date',
-              buckets: [
-                { label: '2020', count: 60 },
-                { label: '2021', count: 70 },
-              ],
-            },
-          ],
+          child: {
+            dimension: 'release_year',
+            attribute: 'rcsb_accession_info.initial_release_date',
+            buckets: [
+              { label: '2020', count: 60 },
+              { label: '2021', count: 70 },
+            ],
+          },
         },
       ]),
       5,
       800,
     );
-    expect(out.buckets[0]?.children?.[0]?.buckets).toHaveLength(2);
-    expect(out.buckets[0]?.children?.[0]).not.toHaveProperty('truncated');
+    expect(out.buckets[0]?.child?.buckets).toHaveLength(2);
+    expect(out.buckets[0]?.child).not.toHaveProperty('truncated');
   });
 
-  it('omits children on a leaf bucket', () => {
+  it('projects a child that aggregated to nothing, charging the whole parent bucket (#31)', () => {
+    const out = toFacetOutput(
+      dim([
+        {
+          label: 'Glycine max',
+          count: 55796,
+          child: { dimension: 'method', attribute: 'exptl.method', buckets: [] },
+        },
+      ]),
+      50,
+      1062058,
+    );
+    expect(out.buckets[0]?.child).toEqual({
+      dimension: 'method',
+      buckets: [],
+      missingValueCount: 55796,
+    });
+  });
+
+  it('omits the child on a leaf bucket', () => {
     const out = toFacetOutput(dim([{ label: 'X-RAY', count: 800 }]), 50, 800);
+    expect(out.buckets[0]).not.toHaveProperty('child');
+    // The pre-flatten array field is gone from the contract entirely (#28).
     expect(out.buckets[0]).not.toHaveProperty('children');
   });
 
@@ -136,25 +153,23 @@ describe('toFacetOutput', () => {
     expect(out.buckets[0]).not.toHaveProperty('rangeTo');
   });
 
-  it('carries ranges through nested numeric cross-tab children (#21)', () => {
+  it('carries ranges through a nested numeric cross-tab child (#21)', () => {
     const out = toFacetOutput(
       dim([
         {
           label: 'X-RAY',
           count: 800,
-          children: [
-            {
-              dimension: 'resolution',
-              attribute: 'rcsb_entry_info.resolution_combined',
-              buckets: [{ label: '1.5', count: 60, rangeFrom: 1.5, rangeTo: 2.0 }],
-            },
-          ],
+          child: {
+            dimension: 'resolution',
+            attribute: 'rcsb_entry_info.resolution_combined',
+            buckets: [{ label: '1.5', count: 60, rangeFrom: 1.5, rangeTo: 2.0 }],
+          },
         },
       ]),
       50,
       800,
     );
-    expect(out.buckets[0]?.children?.[0]?.buckets[0]).toEqual({
+    expect(out.buckets[0]?.child?.buckets[0]).toEqual({
       label: '1.5',
       count: 60,
       rangeFrom: 1.5,
@@ -230,27 +245,23 @@ describe('toFacetOutput coverage gap (#32)', () => {
           {
             label: 'homomeric protein',
             count: 1000,
-            children: [
-              {
-                dimension: 'method',
-                attribute: 'exptl.method',
-                buckets: [
-                  { label: 'X-RAY', count: 300 },
-                  { label: 'EM', count: 100 },
-                ],
-              },
-            ],
+            child: {
+              dimension: 'method',
+              attribute: 'exptl.method',
+              buckets: [
+                { label: 'X-RAY', count: 300 },
+                { label: 'EM', count: 100 },
+              ],
+            },
           },
           {
             label: 'RNA',
             count: 50,
-            children: [
-              {
-                dimension: 'method',
-                attribute: 'exptl.method',
-                buckets: [{ label: 'X-RAY', count: 50 }],
-              },
-            ],
+            child: {
+              dimension: 'method',
+              attribute: 'exptl.method',
+              buckets: [{ label: 'X-RAY', count: 50 }],
+            },
           },
         ],
       },
@@ -258,18 +269,18 @@ describe('toFacetOutput coverage gap (#32)', () => {
       1050,
     );
     expect(out.missingValueCount).toBe(0);
-    expect(out.buckets[0]?.children?.[0]?.missingValueCount).toBe(600);
-    expect(out.buckets[1]?.children?.[0]?.missingValueCount).toBe(0);
+    expect(out.buckets[0]?.child?.missingValueCount).toBe(600);
+    expect(out.buckets[1]?.child?.missingValueCount).toBe(0);
   });
 
   it('measures a nested child on its uncapped list while the cap slices the output', () => {
     const childBuckets = Array.from({ length: 6 }, (_, i) => ({ label: `y${i}`, count: 10 }));
     const out = toFacetOutput(
-      dim([{ label: 'X-RAY', count: 100, children: [childDim(childBuckets)] }]),
+      dim([{ label: 'X-RAY', count: 100, child: childDim(childBuckets) }]),
       2,
       100,
     );
-    const child = out.buckets[0]?.children?.[0];
+    const child = out.buckets[0]?.child;
     expect(child?.truncated).toBe(true);
     expect(child?.buckets).toHaveLength(2);
     // 6 uncapped buckets × 10 = 60 of the parent's 100 accounted for.
@@ -307,7 +318,7 @@ describe('renderFacets', () => {
     expect(lines.join('\n')).toContain('**organism** (truncated)');
   });
 
-  it('renders nested cross-tab children as an indented inline list', () => {
+  it('renders the nested cross-tab child as an indented inline line', () => {
     const lines = renderFacets([
       {
         dimension: 'method',
@@ -316,16 +327,14 @@ describe('renderFacets', () => {
           {
             label: 'X-RAY',
             count: 800,
-            children: [
-              {
-                dimension: 'release_year',
-                missingValueCount: 0,
-                buckets: [
-                  { label: '2020', count: 60 },
-                  { label: '2021', count: 70 },
-                ],
-              },
-            ],
+            child: {
+              dimension: 'release_year',
+              missingValueCount: 0,
+              buckets: [
+                { label: '2020', count: 60 },
+                { label: '2021', count: 70 },
+              ],
+            },
           },
         ],
       },
@@ -343,17 +352,15 @@ describe('renderFacets', () => {
           {
             label: 'X-RAY',
             count: 800,
-            children: [
-              {
-                dimension: 'release_year',
-                truncated: true,
-                missingValueCount: 0,
-                buckets: [
-                  { label: '2020', count: 60 },
-                  { label: '2021', count: 70 },
-                ],
-              },
-            ],
+            child: {
+              dimension: 'release_year',
+              truncated: true,
+              missingValueCount: 0,
+              buckets: [
+                { label: '2020', count: 60 },
+                { label: '2021', count: 70 },
+              ],
+            },
           },
         ],
       },
@@ -400,7 +407,7 @@ describe('renderFacets', () => {
           {
             label: 'Homo sapiens',
             count: 9,
-            children: [{ dimension: 'method', missingValueCount: 0, buckets: [] }],
+            child: { dimension: 'method', missingValueCount: 0, buckets: [] },
           },
         ],
       },
@@ -466,13 +473,11 @@ describe('renderFacets', () => {
           {
             label: 'homomeric protein',
             count: 1000,
-            children: [
-              {
-                dimension: 'method',
-                missingValueCount: 600,
-                buckets: [{ label: 'X-RAY', count: 400 }],
-              },
-            ],
+            child: {
+              dimension: 'method',
+              missingValueCount: 600,
+              buckets: [{ label: 'X-RAY', count: 400 }],
+            },
           },
         ],
       },
@@ -542,6 +547,29 @@ describe('coverageNotices (#32)', () => {
     );
   });
 
+  it('stays silent for a cross-tab child that aggregated to nothing (#31)', () => {
+    // Every parent bucket carries an empty child: a 100% gap the empty-child
+    // render line already reports, so quantifying it on top adds nothing.
+    expect(
+      coverageNotices(
+        [
+          {
+            dimension: 'organism',
+            missingValueCount: 0,
+            buckets: [
+              {
+                label: 'Glycine max',
+                count: 55796,
+                child: { dimension: 'method', missingValueCount: 55796, buckets: [] },
+              },
+            ],
+          },
+        ],
+        55796,
+      ),
+    ).toEqual([]);
+  });
+
   it('aggregates a cross-tab child dimension into one fragment', () => {
     const notices = coverageNotices(
       [
@@ -552,24 +580,20 @@ describe('coverageNotices (#32)', () => {
             {
               label: 'homomeric protein',
               count: 98505,
-              children: [
-                {
-                  dimension: 'method',
-                  missingValueCount: 57602,
-                  buckets: [{ label: 'X-RAY', count: 40903 }],
-                },
-              ],
+              child: {
+                dimension: 'method',
+                missingValueCount: 57602,
+                buckets: [{ label: 'X-RAY', count: 40903 }],
+              },
             },
             {
               label: 'heteromeric protein',
               count: 19214,
-              children: [
-                {
-                  dimension: 'method',
-                  missingValueCount: 687,
-                  buckets: [{ label: 'X-RAY', count: 18527 }],
-                },
-              ],
+              child: {
+                dimension: 'method',
+                missingValueCount: 687,
+                buckets: [{ label: 'X-RAY', count: 18527 }],
+              },
             },
           ],
         },

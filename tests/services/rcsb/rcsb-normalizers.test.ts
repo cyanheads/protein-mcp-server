@@ -491,13 +491,70 @@ describe('RcsbService search helpers', () => {
 
     expect(out.total).toBe(1000);
     expect(out.facets[0]?.buckets[0]).toMatchObject({ label: 'X-RAY DIFFRACTION', count: 800 });
-    expect(out.facets[0]?.buckets[0]?.children?.[0]).toMatchObject({
+    expect(out.facets[0]?.buckets[0]?.child).toMatchObject({
       dimension: 'release_year',
       buckets: [
         { label: '2020', count: 100 },
         { label: '2021', count: 120 },
       ],
     });
+  });
+
+  it('projects an empty child when the requested cross-tab facet is absent upstream (#31)', async () => {
+    // group_by ["organism", "method"] under predicted content: computed models
+    // carry no experimental method, so RCSB omits the nested facet key entirely
+    // rather than returning it with an empty bucket list.
+    fetchJsonMock.mockResolvedValue({
+      total_count: 1062058,
+      facets: [
+        {
+          name: 'organism',
+          attribute: 'rcsb_entity_source_organism.ncbi_scientific_name',
+          buckets: [
+            { label: 'Glycine max', population: 55796 },
+            { label: 'Mus musculus', population: 36 },
+          ],
+        },
+      ],
+    });
+    const spec: FacetSpec = {
+      dimension: 'organism',
+      attribute: 'rcsb_entity_source_organism.ncbi_scientific_name',
+      aggregation: 'terms',
+      child: { dimension: 'method', attribute: 'exptl.method', aggregation: 'terms' },
+    };
+    const out = await service().analyzeFacets({}, [spec], createMockContext());
+
+    // The requested dimension is present with an empty bucket list — "it
+    // aggregated to nothing", distinct from a bucket that asked for no cross-tab.
+    expect(out.facets[0]?.buckets).toHaveLength(2);
+    for (const bucket of out.facets[0]?.buckets ?? []) {
+      expect(bucket.child).toEqual({
+        dimension: 'method',
+        attribute: 'exptl.method',
+        buckets: [],
+      });
+    }
+  });
+
+  it('leaves the child unset when no cross-tab dimension was requested (#31)', async () => {
+    fetchJsonMock.mockResolvedValue({
+      total_count: 100,
+      facets: [
+        {
+          name: 'organism',
+          attribute: 'rcsb_entity_source_organism.ncbi_scientific_name',
+          buckets: [{ label: 'Homo sapiens', population: 100 }],
+        },
+      ],
+    });
+    const spec: FacetSpec = {
+      dimension: 'organism',
+      attribute: 'rcsb_entity_source_organism.ncbi_scientific_name',
+      aggregation: 'terms',
+    };
+    const out = await service().analyzeFacets({}, [spec], createMockContext());
+    expect(out.facets[0]?.buckets[0]).not.toHaveProperty('child');
   });
 
   it('adds a [label, label+interval) range to numeric histogram buckets from the fixed bin width', async () => {

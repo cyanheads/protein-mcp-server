@@ -545,14 +545,18 @@ function normalizeBuckets(raw: RawBucket[] | undefined, spec: FacetSpec): FacetB
         bucket.rangeTo = from + interval;
       }
     }
-    if (child && b.facets) {
-      bucket.children = [
-        {
-          dimension: child.dimension,
-          attribute: child.attribute,
-          buckets: normalizeBuckets(b.facets[0]?.buckets, child),
-        },
-      ];
+    // Keyed on the SPEC, not the response: RCSB omits the nested facet key
+    // outright when nothing in the parent bucket carries a value for the child
+    // attribute (computed models have no experimental method). Emitting the child
+    // with an empty bucket list keeps a two-dimension request two-dimensional, so
+    // a present child means "a cross-tab was requested" and empty buckets mean
+    // "it aggregated to nothing" — conditions an absent child conflated.
+    if (child) {
+      bucket.child = {
+        dimension: child.dimension,
+        attribute: child.attribute,
+        buckets: normalizeBuckets(b.facets?.[0]?.buckets, child),
+      };
     }
     return bucket;
   });
