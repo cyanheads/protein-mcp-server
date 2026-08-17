@@ -8,8 +8,11 @@
  * `best_available` structures are federated through 3D-Beacons, an open set of
  * model providers (AlphaFold DB, SWISS-MODEL, BFVD, AlphaFill, …), so an uncurated
  * provider gets an honest fallback entry that asserts no license rather than a
- * fabricated one. Pure data + a projection helper; the Zod output schema and
- * renderer live in the tools' shared `_schemas.ts`.
+ * fabricated one. Computed structure models fetched by RCSB ID (`AF_*` / `MA_*`)
+ * credit their modelling provider (AlphaFold DB, ModelArchive) rather than the
+ * PDB — the RCSB entry endpoint serves them, but the license is the provider's.
+ * Pure data + a projection helper; the Zod output schema and renderer live in
+ * the tools' shared `_schemas.ts`.
  * @module services/shared/attribution
  */
 
@@ -23,6 +26,7 @@ export const CURATED_SOURCES = [
   'AlphaFold DB',
   'SWISS-MODEL',
   'BFVD',
+  'ModelArchive',
   'UniProt',
   'InterPro',
   'GO',
@@ -79,6 +83,13 @@ const ATTRIBUTIONS: Record<CuratedSource, Attribution> = {
     citation:
       'Kim et al., "BFVD—a large repository of predicted viral protein structures," Nucleic Acids Research 53(D1):D340–D347 (2025). DOI: 10.1093/nar/gkae1119',
     homepage: 'https://bfvd.steineggerlab.workers.dev/',
+  },
+  ModelArchive: {
+    source: 'ModelArchive',
+    license: 'CC BY 4.0',
+    citation:
+      'ModelArchive (SIB Swiss Institute of Bioinformatics / Biozentrum, University of Basel). Each deposited model carries its own DOI — cite the model accession alongside its depositors.',
+    homepage: 'https://www.modelarchive.org/',
   },
   UniProt: {
     source: 'UniProt',

@@ -94,7 +94,9 @@ export const getStructure = tool('protein_get_structure', {
   title: 'protein-mcp-server: get structure',
   description:
     'Fetch structures with metadata and coordinate-file URLs. source "experimental" takes PDB entry IDs ' +
-    '(batched in one call); "predicted" takes UniProt accessions (AlphaFold, with pLDDT/PAE confidence); ' +
+    '(batched in one call), and also resolves the computed-model IDs protein_search_structures returns ' +
+    '(AF_*/MA_*), which come back marked source "predicted" with their modelling provider; ' +
+    '"predicted" takes UniProt accessions (AlphaFold, with pLDDT/PAE confidence); ' +
     '"best_available" takes UniProt accessions and returns the top federated model — the highest-resolution ' +
     'experimental structure if one exists (optimizing resolution, not biological representativeness, so it can ' +
     'return an engineered mutant over the wild-type entry), else the best prediction. Resolves up to the ' +
@@ -125,7 +127,7 @@ export const getStructure = tool('protein_get_structure', {
       .array(z.string().min(1))
       .min(1)
       .describe(
-        'PDB entry IDs (source experimental) or UniProt accessions (predicted / best_available).',
+        'PDB entry IDs or computed-model IDs such as AF_AFP69905F1 (source experimental), or UniProt accessions (predicted / best_available).',
       ),
     source: z
       .enum(['experimental', 'predicted', 'best_available'])
@@ -160,7 +162,7 @@ export const getStructure = tool('protein_get_structure', {
     attribution: z
       .array(attributionSchema)
       .describe(
-        'Upstream data-source licenses and citations for every source present in structures[] — RCSB PDB for experimental records, AlphaFold DB for predicted. Always present — the attribution obligation travels with the data.',
+        'Upstream data-source licenses and citations for every source present in structures[] — RCSB PDB for experimental records, the modelling provider (AlphaFold DB, ModelArchive, SWISS-MODEL, …) for predicted ones. Always present — the attribution obligation travels with the data.',
       ),
     overflow: z
       .object({
@@ -375,9 +377,15 @@ async function fetchExperimental(ids: string[], ctx: Context): Promise<Resolutio
       failed.push({ id, reason: 'No PDB entry found for this ID.' });
       continue;
     }
+    // RCSB serves computed structure models (AF_* / MA_*) from the same entry
+    // endpoint as experimental entries, and protein_search_structures surfaces
+    // their IDs under the default content_type. Read the provenance rather than
+    // stamping every resolved ID experimental — that would both contradict the
+    // record and credit an AlphaFold/ModelArchive model to the PDB's CC0.
     structures.push({
       id: meta.id,
-      source: 'experimental',
+      source: meta.computedModelProvider ? 'predicted' : 'experimental',
+      ...(meta.computedModelProvider ? { provider: meta.computedModelProvider } : {}),
       ...(meta.title ? { title: meta.title } : {}),
       ...(meta.methods && meta.methods.length > 0 ? { method: meta.methods.join(', ') } : {}),
       ...(typeof meta.resolution === 'number' ? { resolution: meta.resolution } : {}),

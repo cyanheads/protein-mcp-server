@@ -151,7 +151,7 @@ describe('protein_get_structure', () => {
     });
     // The chosen entry's title is fetched to match the source "experimental" shape.
     expect(getEntries).toHaveBeenCalledWith(['2W72'], expect.anything());
-    const text = (getStructure.format?.(out)?.[0] as { text: string }).text;
+    const text = (getStructure.format!(out)[0] as { text: string }).text;
     expect(text).toContain('**PDB:** 2W72');
   });
 
@@ -222,7 +222,7 @@ describe('protein_get_structure', () => {
     expect(rec?.coordinateUrls).toEqual({ cif: expect.stringContaining('swissmodel.expasy.org') });
     expect(getEntries).not.toHaveBeenCalled();
 
-    const text = (getStructure.format?.(out)?.[0] as { text: string }).text;
+    const text = (getStructure.format!(out)[0] as { text: string }).text;
     expect(text).toContain('**Confidence:** 0.63 (QMEANDisCo)');
     expect(text).not.toContain('Mean pLDDT');
   });
@@ -264,6 +264,89 @@ describe('protein_get_structure', () => {
     // Experimental pick reports no predicted-confidence fields.
     expect(rec?.meanPlddt).toBeUndefined();
     expect(rec?.confidence).toBeUndefined();
+  });
+});
+
+describe('protein_get_structure computed structure models', () => {
+  /**
+   * What RCSB's entry endpoint returns for a computed-model ID: no method, no
+   * resolution, and a modelling provider in place of experimental provenance.
+   */
+  const csmMeta = (id: string, computedModelProvider: string) => ({
+    id,
+    computedModelProvider,
+    title: `Computed structure model of ${id}`,
+    organisms: ['Mus musculus'],
+    polymerEntities: [],
+    ligands: [],
+  });
+
+  it('marks an RCSB-served computed model predicted, not experimental', async () => {
+    getEntries.mockResolvedValue([csmMeta('AF_AFQ9Z1K5F1', 'AlphaFold DB')]);
+    const input = getStructure.input.parse({
+      ids: ['AF_AFQ9Z1K5F1'],
+      source: 'experimental',
+    });
+    const out = await getStructure.handler(input, ctx());
+
+    // The ID arrives here straight from protein_search_structures under the
+    // default content_type, so stamping it experimental contradicts the record.
+    expect(out.structures[0]).toMatchObject({
+      id: 'AF_AFQ9Z1K5F1',
+      source: 'predicted',
+      provider: 'AlphaFold DB',
+    });
+    const text = (getStructure.format!(out)[0] as { text: string }).text;
+    expect(text).toContain('AF_AFQ9Z1K5F1 _(predicted)_');
+    expect(text).not.toContain('AF_AFQ9Z1K5F1 _(experimental)_');
+  });
+
+  it('credits the modelling provider, not the PDB, for a computed model', async () => {
+    getEntries.mockResolvedValue([csmMeta('AF_AFQ9Z1K5F1', 'AlphaFold DB')]);
+    const out = await getStructure.handler(
+      getStructure.input.parse({ ids: ['AF_AFQ9Z1K5F1'], source: 'experimental' }),
+      ctx(),
+    );
+    // AlphaFold data is CC BY 4.0 with an attribution obligation; crediting it to
+    // the PDB's CC0 would understate the license the consumer inherits.
+    expect(out.attribution.map((a) => a.source)).toEqual(['AlphaFold DB']);
+    expect(out.attribution[0]?.license).toBe('CC BY 4.0');
+    expect(out.attribution.some((a) => a.source === 'RCSB PDB')).toBe(false);
+  });
+
+  it('credits ModelArchive for an MA_* model', async () => {
+    getEntries.mockResolvedValue([csmMeta('MA_MAT3VR3570', 'ModelArchive')]);
+    const out = await getStructure.handler(
+      getStructure.input.parse({ ids: ['MA_MAT3VR3570'], source: 'experimental' }),
+      ctx(),
+    );
+    expect(out.structures[0]).toMatchObject({ source: 'predicted', provider: 'ModelArchive' });
+    expect(out.attribution.map((a) => a.source)).toEqual(['ModelArchive']);
+    expect(out.attribution[0]?.license).toBe('CC BY 4.0');
+  });
+
+  it('unions both credits when a batch mixes a PDB entry and a computed model', async () => {
+    getEntries.mockResolvedValue([
+      experimentalMeta('6LOH'),
+      csmMeta('AF_AFQ9Z1K5F1', 'AlphaFold DB'),
+    ]);
+    const out = await getStructure.handler(
+      getStructure.input.parse({ ids: ['6LOH', 'AF_AFQ9Z1K5F1'], source: 'experimental' }),
+      ctx(),
+    );
+    expect(out.structures.map((s) => s.source)).toEqual(['experimental', 'predicted']);
+    expect(out.attribution.map((a) => a.source)).toEqual(['RCSB PDB', 'AlphaFold DB']);
+  });
+
+  it('leaves a genuine PDB entry experimental and PDB-credited', async () => {
+    getEntries.mockResolvedValue([experimentalMeta('4HHB')]);
+    const out = await getStructure.handler(
+      getStructure.input.parse({ ids: ['4HHB'], source: 'experimental' }),
+      ctx(),
+    );
+    expect(out.structures[0]).toMatchObject({ source: 'experimental' });
+    expect(out.structures[0]).not.toHaveProperty('provider');
+    expect(out.attribution.map((a) => a.source)).toEqual(['RCSB PDB']);
   });
 });
 
@@ -328,7 +411,7 @@ describe('protein_get_structure attribution', () => {
 
     // Per-response union, canonical order: RCSB PDB (experimental pick) then AlphaFold DB (predicted).
     expect(out.attribution.map((a) => a.source)).toEqual(['RCSB PDB', 'AlphaFold DB']);
-    const text = (getStructure.format?.(out)?.[0] as { text: string }).text;
+    const text = (getStructure.format!(out)[0] as { text: string }).text;
     expect(text).toContain('### Attribution');
     expect(text).toContain('**RCSB PDB** (CC0 1.0 Universal)');
     expect(text).toContain('**AlphaFold DB** (CC BY 4.0)');
@@ -355,7 +438,7 @@ describe('protein_get_structure attribution', () => {
     const swiss = out.attribution.find((a) => a.source === 'SWISS-MODEL');
     expect(swiss?.license).toBe('CC BY-SA 4.0'); // ShareAlike, distinct from AlphaFold's CC BY 4.0
     expect(out.attribution.some((a) => a.source === 'AlphaFold DB')).toBe(false);
-    const text = (getStructure.format?.(out)?.[0] as { text: string }).text;
+    const text = (getStructure.format!(out)[0] as { text: string }).text;
     expect(text).toContain('**SWISS-MODEL** (CC BY-SA 4.0)');
   });
 

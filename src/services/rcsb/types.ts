@@ -95,6 +95,13 @@ export interface LigandMeta {
 
 /** Normalized entry-level metadata from the GraphQL batch. */
 export interface EntryMeta {
+  /**
+   * Modelling provider display name when this ID is a computed structure model
+   * (`AF_*` / `MA_*`) rather than an experimental entry — e.g. "AlphaFold DB",
+   * "ModelArchive". Absent for experimental entries. RCSB serves both universes
+   * through the same entry endpoint, so this is what separates them.
+   */
+  computedModelProvider?: string;
   /** PDB entry ID. */
   id: string;
   /** Bound ligands (non-polymer entities). */
@@ -155,13 +162,17 @@ export interface ChemComp {
   type?: string;
 }
 
-/** Content-type scope for a search. */
+/** One structure universe RCSB can scope results to. */
 export type ContentType = 'experimental' | 'computational';
 
 /** Inputs to a structure search (shared by search + analyze tools). */
 export interface StructureSearchParams {
-  /** Result content scope. */
-  contentType?: ContentType;
+  /**
+   * Result content universes, sent as `results_content_type`. Pass both members
+   * for a union — omitting the field is NOT a union upstream, it is RCSB's
+   * experimental-only default, which drops every computed model.
+   */
+  contentType?: ContentType[];
   /** Page size. */
   limit?: number;
   /** Max E-value for a sequence query. */

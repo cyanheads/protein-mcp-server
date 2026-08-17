@@ -118,7 +118,7 @@ export class RcsbService {
   /** mmseqs2 sequence-similarity search. Returns polymer-entity hits. */
   async searchSequence(
     sequence: string,
-    opts: { maxEvalue?: number; minIdentity?: number; limit?: number; contentType?: ContentType },
+    opts: { maxEvalue?: number; minIdentity?: number; limit?: number; contentType?: ContentType[] },
     ctx: Context,
   ): Promise<SearchResult> {
     const body = {
@@ -152,7 +152,7 @@ export class RcsbService {
    */
   async searchByLigand(
     compId: string,
-    opts: { limit?: number; contentType?: ContentType },
+    opts: { limit?: number; contentType?: ContentType[] },
     ctx: Context,
   ): Promise<SearchResult> {
     const raw = await this.postSearch(
@@ -337,6 +337,7 @@ export class RcsbService {
           operation: 'RcsbService.getChemComp',
           label: 'RCSB Data API',
           baseDelayMs: 400,
+          expectedStatuses: [404],
         },
       );
     } catch (err) {
@@ -442,9 +443,14 @@ function textNode(attribute: string, operator: string, value: string | number): 
   return { type: 'terminal', service: 'text', parameters: { attribute, operator, value } };
 }
 
-function contentTypeOption(contentType?: ContentType): { results_content_type?: string[] } {
-  if (!contentType) return {};
-  return { results_content_type: [contentType] };
+/**
+ * Emit the `results_content_type` request option for a content scope. Omitting
+ * the option is not a union — RCSB defaults to experimental only — so a caller
+ * wanting both universes must list both members explicitly.
+ */
+function contentTypeOption(contentTypes?: ContentType[]): { results_content_type?: ContentType[] } {
+  if (!contentTypes || contentTypes.length === 0) return {};
+  return { results_content_type: contentTypes };
 }
 
 /**
@@ -455,7 +461,7 @@ function contentTypeOption(contentType?: ContentType): { results_content_type?: 
  */
 function ligandContainmentQuery(
   compId: string,
-  contentType: ContentType | undefined,
+  contentType: ContentType[] | undefined,
   rows: number,
   sortByResolution: boolean,
 ): unknown {
@@ -471,7 +477,7 @@ function ligandContainmentQuery(
     },
     return_type: 'entry',
     request_options: {
-      ...contentTypeOption(contentType ?? 'experimental'),
+      ...contentTypeOption(contentType ?? ['experimental']),
       paginate: { start: 0, rows },
       ...(sortByResolution
         ? { sort: [{ sort_by: 'rcsb_entry_info.resolution_combined', direction: 'asc' }] }
@@ -552,7 +558,20 @@ function normalizeBuckets(raw: RawBucket[] | undefined, spec: FacetSpec): FacetB
   });
 }
 
+/**
+ * RCSB's `source_db` spelling for a computed structure model → the attribution
+ * display name for that provider. An unrecognized value passes through verbatim
+ * rather than being dropped: crediting an unknown modelling provider by its own
+ * name beats silently attributing its model to the PDB.
+ */
+const CSM_PROVIDER_NAMES: Record<string, string> = {
+  AlphaFoldDB: 'AlphaFold DB',
+  ModelArchive: 'ModelArchive',
+};
+
 function normalizeEntry(raw: RawEntry): EntryMeta {
+  const sourceDb = raw.rcsb_comp_model_provenance?.source_db;
+  const computedModelProvider = sourceDb ? (CSM_PROVIDER_NAMES[sourceDb] ?? sourceDb) : undefined;
   const polymerEntities = (raw.polymer_entities ?? []).map(normalizePolymerEntity);
   const organisms = [
     ...new Set(polymerEntities.map((e) => e.organism).filter((o): o is string => !!o)),
@@ -564,6 +583,7 @@ function normalizeEntry(raw: RawEntry): EntryMeta {
   const resolution = raw.rcsb_entry_info?.resolution_combined?.[0];
   return {
     id: raw.rcsb_id,
+    ...(computedModelProvider ? { computedModelProvider } : {}),
     ...(raw.struct?.title ? { title: raw.struct.title } : {}),
     ...(methods.length > 0 ? { methods } : {}),
     ...(typeof resolution === 'number' ? { resolution } : {}),
@@ -648,6 +668,8 @@ interface RawEntry {
   nonpolymer_entities?: RawNonpolymerEntity[];
   polymer_entities?: RawPolymerEntity[];
   rcsb_accession_info?: { initial_release_date?: string };
+  /** Present only on computed structure models; `null` for experimental entries. */
+  rcsb_comp_model_provenance?: { source_db?: string } | null;
   rcsb_entry_info?: { resolution_combined?: number[]; molecular_weight?: number };
   rcsb_id: string;
   struct?: { title?: string };
@@ -716,6 +738,7 @@ const ENTRIES_QUERY = `query Entries($ids: [String!]!) {
     rcsb_id
     struct { title }
     exptl { method }
+    rcsb_comp_model_provenance { source_db }
     rcsb_entry_info { resolution_combined molecular_weight }
     rcsb_accession_info { initial_release_date }
     polymer_entities {

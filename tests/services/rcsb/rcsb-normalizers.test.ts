@@ -3,7 +3,8 @@
  * realistic upstream payloads (HTTP mocked): entry-metadata normalization, UniProt
  * xref resolution, sequence extraction, binding-site assembly with distance sort,
  * chem-comp normalization (SMILES/InChIKey fallback chain) with the 404 → null
- * branch, sequence/ligand/chem-comp search hit normalization, and the GraphQL
+ * branch, sequence/ligand/chem-comp search hit normalization, the
+ * `results_content_type` scope emitted on every search path, and the GraphQL
  * errors → throw path.
  * @module tests/services/rcsb/rcsb-normalizers.test
  */
@@ -17,7 +18,7 @@ vi.mock('@/services/shared/http.js', async (importOriginal) => {
   return { ...actual, fetchJson: vi.fn() };
 });
 
-import { RcsbService } from '@/services/rcsb/rcsb-service.js';
+import { type FacetSpec, RcsbService } from '@/services/rcsb/rcsb-service.js';
 import { fetchJson } from '@/services/shared/http.js';
 
 const fetchJsonMock = vi.mocked(fetchJson);
@@ -97,6 +98,48 @@ describe('RcsbService.getEntries', () => {
     expect(meta?.ligands).toEqual([
       { compId: 'HEM', name: 'PROTOPORPHYRIN IX CONTAINING FE', formula: 'C34 H32 Fe N4 O4' },
     ]);
+  });
+
+  it('leaves computedModelProvider unset for an experimental entry', async () => {
+    fetchJsonMock.mockResolvedValue(gql({ entries: [ENTRY_4HHB] }));
+    const [meta] = await service().getEntries(['4HHB'], createMockContext());
+    expect(meta).not.toHaveProperty('computedModelProvider');
+  });
+
+  it('reads the modelling provider off a computed structure model', async () => {
+    // RCSB serves AF_* / MA_* models from the same entry endpoint as PDB entries;
+    // rcsb_comp_model_provenance is the only thing separating them.
+    for (const [sourceDb, expected] of [
+      ['AlphaFoldDB', 'AlphaFold DB'],
+      ['ModelArchive', 'ModelArchive'],
+      // An unrecognized provider is credited by its own name rather than dropped
+      // (which would silently attribute the model to the PDB).
+      ['SomeFutureModelDB', 'SomeFutureModelDB'],
+    ] as const) {
+      fetchJsonMock.mockResolvedValue(
+        gql({
+          entries: [
+            {
+              rcsb_id: 'AF_AFQ9Z1K5F1',
+              struct: { title: 'Computed structure model of E3 ubiquitin-protein ligase ARIH1' },
+              rcsb_comp_model_provenance: { source_db: sourceDb },
+            },
+          ],
+        }),
+      );
+      const [meta] = await service().getEntries(['AF_AFQ9Z1K5F1'], createMockContext());
+      expect(meta?.computedModelProvider).toBe(expected);
+      // A computed model carries no experimental provenance to normalize.
+      expect(meta?.methods).toBeUndefined();
+      expect(meta?.resolution).toBeUndefined();
+    }
+  });
+
+  it('requests the computed-model provenance field', async () => {
+    fetchJsonMock.mockResolvedValue(gql({ entries: [] }));
+    await service().getEntries(['4HHB'], createMockContext());
+    const opts = fetchJsonMock.mock.calls[0]?.[2] as unknown as { body: string };
+    expect(JSON.parse(opts.body).query).toContain('rcsb_comp_model_provenance');
   });
 
   it('upper-cases ids in the GraphQL variables', async () => {
@@ -522,6 +565,86 @@ describe('RcsbService search helpers', () => {
     // A date interval is a period word, not a numeric bin width — no numeric range.
     expect(out.facets[0]?.buckets[0]).toEqual({ label: 'Homo sapiens', count: 81957 });
     expect(out.facets[1]?.buckets[0]).toEqual({ label: '1976', count: 13 });
+  });
+});
+
+describe('RcsbService results_content_type emission (#29)', () => {
+  /** The `request_options` of the single search body posted by the call under test. */
+  const requestOptions = (): { results_content_type?: string[] } => {
+    const opts = fetchJsonMock.mock.calls[0]?.[2] as unknown as { body: string };
+    return (JSON.parse(opts.body) as { request_options: { results_content_type?: string[] } })
+      .request_options;
+  };
+
+  const methodSpec: FacetSpec = {
+    dimension: 'method',
+    attribute: 'exptl.method',
+    aggregation: 'terms',
+  };
+
+  beforeEach(() => fetchJsonMock.mockResolvedValue({ total_count: 0, result_set: [] }));
+
+  it('emits both universes for a union scope', async () => {
+    await service().search(
+      { text: 'hemoglobin', contentType: ['experimental', 'computational'] },
+      createMockContext(),
+    );
+    expect(requestOptions().results_content_type).toEqual(['experimental', 'computational']);
+  });
+
+  it('emits a single-member scope verbatim', async () => {
+    await service().search(
+      { text: 'hemoglobin', contentType: ['computational'] },
+      createMockContext(),
+    );
+    expect(requestOptions().results_content_type).toEqual(['computational']);
+  });
+
+  it('omits the option entirely when no scope is given', async () => {
+    await service().search({ text: 'hemoglobin' }, createMockContext());
+    expect(requestOptions()).not.toHaveProperty('results_content_type');
+  });
+
+  it('omits the option for an empty scope array', async () => {
+    await service().search({ text: 'hemoglobin', contentType: [] }, createMockContext());
+    expect(requestOptions()).not.toHaveProperty('results_content_type');
+  });
+
+  it('carries a union scope through the facet-only aggregation path', async () => {
+    await service().analyzeFacets(
+      { text: 'hemoglobin', contentType: ['experimental', 'computational'] },
+      [methodSpec],
+      createMockContext(),
+    );
+    expect(requestOptions().results_content_type).toEqual(['experimental', 'computational']);
+  });
+
+  it('scopes a sequence search to the requested universes', async () => {
+    await service().searchSequence(
+      'MVLS',
+      { contentType: ['experimental', 'computational'] },
+      createMockContext(),
+    );
+    expect(requestOptions().results_content_type).toEqual(['experimental', 'computational']);
+  });
+
+  it('keeps the explicit experimental default on the ligand-containment search', async () => {
+    await service().searchByLigand('HEM', {}, createMockContext());
+    expect(requestOptions().results_content_type).toEqual(['experimental']);
+  });
+
+  it('keeps the explicit experimental default on the ligand deposition count', async () => {
+    await service().countEntriesWithLigand('HEM', createMockContext());
+    expect(requestOptions().results_content_type).toEqual(['experimental']);
+  });
+
+  it('lets an explicit ligand scope override the experimental default', async () => {
+    await service().searchByLigand(
+      'HEM',
+      { contentType: ['experimental', 'computational'] },
+      createMockContext(),
+    );
+    expect(requestOptions().results_content_type).toEqual(['experimental', 'computational']);
   });
 });
 
