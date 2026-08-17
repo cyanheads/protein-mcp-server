@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.1](changelog/0.4.x/0.4.1.md) — 2026-08-16
+
+protein_search_structures' default content_type union now returns computed models, facet dimensions disclose coverage gaps and empty-dimension explanations, and protein_get_structure credits computed-model IDs to their modelling provider instead of the PDB.
+
 ## [0.4.0](changelog/0.4.x/0.4.0.md) — 2026-07-03
 
 protein_get_annotations gains a per-class limit to cap features/variants/domains independently, and protein_compare_structures documents TM-score's length-normalization sensitivity to terminal length differences.
