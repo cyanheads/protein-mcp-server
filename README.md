@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.4.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.5.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -48,7 +48,7 @@ Federated search across experimental (PDB) and predicted (computed-model) struct
 - Free-text, protein-sequence (triggers an mmseqs2 similarity search), and organism / method / resolution filters
 - `content_type` scopes the search to `experimental`, `predicted`, or `all` — the default `all` is a genuine union of both universes, so computed models appear alongside PDB entries
 - Every hit names its `source`; experimental hits are enriched with title, method, resolution, and organism, while computed models carry the UniProt accession parsed from their ID
-- Optional `facets` return a method / organism / release-year breakdown alongside the hits at no extra call, each reporting how many matches carry no value for that dimension
+- Optional `facets` return a method / organism / release-year breakdown alongside the hits at no extra call, each reporting how many matches carry no value for that dimension; each dimension may be listed once
 - Chain hit IDs straight into `protein_get_structure`
 
 ---
@@ -96,6 +96,7 @@ Structural alignment of multiple structures (up to the configured `PROTEIN_MAX_C
 - Methods: `tm-align`, `fatcat-rigid`, `fatcat-flexible`
 - `reference: first` aligns every structure to the first; `reference: all_pairs` computes the full pairwise matrix
 - Optional per-structure `chain` restricts the alignment to a single chain
+- A structure repeated in `structures[]` is compared once — the repeat would only add a self-alignment and a mirrored pair, which the resume mechanism cannot tell apart from the original
 - Each pair is an independent async job, fanned out with a concurrency cap and per-pair partial success — a pair still computing when the budget elapses returns `status: computing` with its job `uuid`, and a failed pair degrades its row without sinking the others
 - Re-call with a matching `{ a, b, uuid }` entry in `resume[]` (copied from a prior response's `pairs[]`) to poll a computing pair's job instead of resubmitting
 - Returns TM-score, RMSD, and aligned-residue count per pair, plus `modeledResidues` and `coverage` — each a `[a, b]` tuple, with coverage a 0–100 percentage of that structure's own modeled-residue count
@@ -107,7 +108,7 @@ Structural alignment of multiple structures (up to the configured `PROTEIN_MAX_C
 Profile the PDB into distributions and trends over an optional scoping query — backed by RCSB's server-side facet engine (one call, compact buckets, no row pull).
 
 - Group by `method`, `organism`, `polymer_type`, `resolution`, `release_year`, or `molecular_weight`
-- One `group_by` dimension for a breakdown, or two for a cross-tab (the first nests the second)
+- One `group_by` dimension for a breakdown, or two distinct dimensions for a cross-tab (the first nests the second); a repeated dimension is rejected
 - `interval` sets the bin width for value histograms or the period for date histograms (`year` / `month` / `quarter`)
 - Scope with a free-text `query`, `organism`, `method`, or `max_resolution`; `content_type` selects the structure universe
 - `bucket_limit` caps buckets per dimension; truncation is flagged in the response
