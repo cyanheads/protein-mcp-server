@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.4.2](changelog/0.4.x/0.4.2.md) — 2026-08-16
+
+protein_find_similar's Foldseek identity score now returns a 0–1 fraction as declared, protein_get_structure and af:// no longer lose a whole predicted-source batch to one malformed ID, and protein_compare_structures reports per-structure modeled-residue count and coverage.
+
 ## [0.4.1](changelog/0.4.x/0.4.1.md) — 2026-08-16
 
 protein_search_structures' default content_type union now returns computed models, facet dimensions disclose coverage gaps and empty-dimension explanations, and protein_get_structure credits computed-model IDs to their modelling provider instead of the PDB.
