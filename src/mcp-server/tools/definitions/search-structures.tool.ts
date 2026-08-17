@@ -16,7 +16,7 @@ import { entryIdOf } from '@/services/shared/identifiers.js';
 import {
   CONTENT_TYPE_SCOPES,
   coverageNotices,
-  facetDimensionSchema,
+  flatFacetDimensionSchema,
   renderFacets,
   toFacetOutput,
 } from './_schemas.js';
@@ -66,6 +66,12 @@ export const searchStructures = tool('protein_search_structures', {
       recovery:
         'Provide a free-text query, a protein sequence, or an organism name (filters alone are not enough).',
     },
+    {
+      reason: 'duplicate_dimension',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'facets lists the same dimension twice, which would return that breakdown twice.',
+      recovery: 'List each facet dimension at most once; drop the repeated value and re-call.',
+    },
   ],
 
   input: z.object({
@@ -112,7 +118,9 @@ export const searchStructures = tool('protein_search_structures', {
     facets: z
       .array(z.enum(FACET_DIMENSION_NAMES))
       .optional()
-      .describe('Optional dimensions to summarize as a facet breakdown alongside the hits.'),
+      .describe(
+        'Optional dimensions to summarize as a facet breakdown alongside the hits. Each dimension at most once; repeating one is rejected.',
+      ),
     limit: z.number().int().min(1).max(100).default(25).describe('Maximum hits to return (1–100).'),
   }),
 
@@ -148,9 +156,11 @@ export const searchStructures = tool('protein_search_structures', {
       )
       .describe('Ranked structure hits.'),
     facets: z
-      .array(facetDimensionSchema)
+      .array(flatFacetDimensionSchema)
       .optional()
-      .describe('Optional facet breakdown when requested.'),
+      .describe(
+        'Optional facet breakdown when requested — one flat dimension per requested facet. Cross-tabs (a dimension nested inside another) are protein_analyze_collection territory.',
+      ),
   }),
 
   enrichment: {
@@ -170,6 +180,16 @@ export const searchStructures = tool('protein_search_structures', {
         ...ctx.recoveryFor('no_criteria'),
       });
     }
+    // RCSB collapses two identically-named facet requests into one raw facet, and
+    // the attribute-keyed lookup maps both specs back onto it — a repeated
+    // dimension would return the same breakdown twice and double-count on any sum.
+    const duplicate = input.facets?.find((d, i, all) => all.indexOf(d) !== i);
+    if (duplicate)
+      throw ctx.fail(
+        'duplicate_dimension',
+        `facets lists "${duplicate}" more than once; each dimension is summarized once.`,
+        { ...ctx.recoveryFor('duplicate_dimension') },
+      );
     const cfg = getServerConfig();
     const rcsb = getRcsbService();
     const facetSpecs = input.facets?.map((d) => buildFacetSpec(d));

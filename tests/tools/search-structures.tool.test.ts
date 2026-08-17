@@ -2,7 +2,9 @@
  * @fileoverview Tests for protein_search_structures: the no-criteria guard,
  * content_type → content-universe scoping (including the "all" union),
  * computed-model (AlphaFold) ID parsing into a UniProt accession, experimental
- * metadata enrichment, the total/echo/empty-notice enrichment, and the
+ * metadata enrichment, the total/echo/empty-notice enrichment, the flat facet
+ * contract (no cross-tab child requested or advertised), the repeated-facet-
+ * dimension rejection, and the
  * empty-facet-dimension rendering across both consumption surfaces. RCSB mocked.
  * @module tests/tools/search-structures.tool.test
  */
@@ -35,12 +37,66 @@ describe('protein_search_structures', () => {
     });
   });
 
-  it('marks nested cross-tab child dimensions as truncated in the shared facet projection (#13)', async () => {
-    // Simulate a nested facet from upstream whose child list exceeds the bucket cap.
-    const childBuckets = Array.from({ length: FACET_CAP + 3 }, (_, i) => ({
-      label: String(2000 + i),
-      count: FACET_CAP + 3 - i,
-    }));
+  it('rejects a repeated facets dimension before any upstream call (#35)', async () => {
+    await expect(
+      searchStructures.handler(
+        searchStructures.input.parse({ query: 'hemoglobin', facets: ['method', 'method'] }),
+        ctx(),
+      ),
+    ).rejects.toMatchObject({
+      data: {
+        reason: 'duplicate_dimension',
+        recovery: { hint: expect.stringContaining('at most once') },
+      },
+    });
+    expect(search).not.toHaveBeenCalled();
+  });
+
+  it('rejects a repeat anywhere in a longer facets list, naming the dimension (#35)', async () => {
+    const err = await Promise.resolve(
+      searchStructures.handler(
+        searchStructures.input.parse({
+          query: 'hemoglobin',
+          facets: ['method', 'organism', 'release_year', 'organism'],
+        }),
+        ctx(),
+      ),
+    ).catch((e: Error) => e);
+    expect(err).toMatchObject({ data: { reason: 'duplicate_dimension' } });
+    expect((err as Error).message).toContain('organism');
+    expect(search).not.toHaveBeenCalled();
+  });
+
+  it('leaves distinct facet dimensions and a single dimension unaffected (#35)', async () => {
+    for (const facets of [['method', 'organism'], ['method']] as const) {
+      search.mockClear();
+      search.mockResolvedValue({ total: 0, hits: [] });
+      getEntries.mockResolvedValue([]);
+      await searchStructures.handler(
+        searchStructures.input.parse({ query: 'hemoglobin', facets: [...facets] }),
+        ctx(),
+      );
+      const specs = search.mock.calls[0]?.[2] as Array<{ dimension: string }>;
+      expect(specs.map((s) => s.dimension)).toEqual([...facets]);
+    }
+  });
+
+  it('requests one flat facet spec per dimension, never a cross-tab child (#34)', async () => {
+    search.mockResolvedValue({ total: 0, hits: [] });
+    getEntries.mockResolvedValue([]);
+    await searchStructures.handler(
+      searchStructures.input.parse({ query: 'hemoglobin', facets: ['method', 'release_year'] }),
+      ctx(),
+    );
+    // rcsb.search(params, ctx, facetSpecs) — the third argument carries the specs.
+    const specs = search.mock.calls[0]?.[2] as Array<{ dimension: string; child?: unknown }>;
+    expect(specs.map((s) => s.dimension)).toEqual(['method', 'release_year']);
+    for (const spec of specs) expect(spec).not.toHaveProperty('child');
+  });
+
+  it('advertises no nested cross-tab position on its facet buckets (#34)', async () => {
+    // No child spec is ever requested, so the service cannot produce a nested
+    // child here — one arriving anyway must not survive into the contract.
     search.mockResolvedValue({
       total: 500,
       hits: [],
@@ -52,30 +108,34 @@ describe('protein_search_structures', () => {
             {
               label: 'X-RAY DIFFRACTION',
               count: 400,
-              children: [
-                {
-                  dimension: 'release_year',
-                  attribute: 'rcsb_accession_info.initial_release_date',
-                  buckets: childBuckets,
-                },
-              ],
+              child: {
+                dimension: 'release_year',
+                attribute: 'rcsb_accession_info.initial_release_date',
+                buckets: Array.from({ length: FACET_CAP + 3 }, (_, i) => ({
+                  label: String(2000 + i),
+                  count: FACET_CAP + 3 - i,
+                })),
+              },
             },
           ],
         },
       ],
     });
     getEntries.mockResolvedValue([]);
-    const out = await searchStructures.handler(
-      searchStructures.input.parse({ query: 'hemoglobin', facets: ['method', 'release_year'] }),
-      ctx(),
-    );
-    const child = out.facets?.[0]?.buckets[0]?.children?.[0];
-    expect(child?.buckets).toHaveLength(FACET_CAP);
-    expect(child?.truncated).toBe(true);
-    // format() marks the nested truncation in the text surface too.
-    const text = (searchStructures.format!(out)[0] as { text: string }).text;
-    expect(text).toContain('release_year →');
-    expect(text).toContain('(truncated)');
+    const result = (await runToolContract(searchStructures, {
+      query: 'hemoglobin',
+      facets: ['method'],
+      limit: 1,
+    })) as {
+      structuredContent: { facets: Array<{ buckets: Array<Record<string, unknown>> }> };
+      content: Array<{ type: string; text: string }>;
+    };
+
+    const bucket = result.structuredContent.facets[0]?.buckets[0];
+    expect(bucket).toEqual({ label: 'X-RAY DIFFRACTION', count: 400 });
+    expect(bucket).not.toHaveProperty('children');
+    // The flat breakdown itself still reaches both surfaces.
+    expect(result.content[0]?.text).toContain('- X-RAY DIFFRACTION: 400');
   });
 
   it('sends both content universes for the default "all" scope (#29)', async () => {
