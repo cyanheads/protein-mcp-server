@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.4.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.29.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^6.0.3-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.2-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.4.1-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^1.30.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.3.14-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -46,9 +46,9 @@ Seven tools spanning the structure-research arc — discover, fetch, find homolo
 Federated search across experimental (PDB) and predicted (computed-model) structures via RCSB Search v2.
 
 - Free-text, protein-sequence (triggers an mmseqs2 similarity search), and organism / method / resolution filters
-- `content_type` scopes the search to `experimental`, `predicted`, or `all`
-- Experimental hits are enriched with title, method, resolution, and organism
-- Optional `facets` return a method / organism / release-year breakdown alongside the hits at no extra call
+- `content_type` scopes the search to `experimental`, `predicted`, or `all` — the default `all` is a genuine union of both universes, so computed models appear alongside PDB entries
+- Every hit names its `source`; experimental hits are enriched with title, method, resolution, and organism, while computed models carry the UniProt accession parsed from their ID
+- Optional `facets` return a method / organism / release-year breakdown alongside the hits at no extra call, each reporting how many matches carry no value for that dimension
 - Chain hit IDs straight into `protein_get_structure`
 
 ---
@@ -57,7 +57,7 @@ Federated search across experimental (PDB) and predicted (computed-model) struct
 
 Fetch structures with metadata and coordinate-file URLs, resolving across providers by `source`.
 
-- `source: experimental` takes PDB entry IDs, batched in one RCSB GraphQL call
+- `source: experimental` takes PDB entry IDs, batched in one RCSB GraphQL call; it also resolves the computed-model IDs search returns (`AF_*` / `MA_*`), which come back as `source: predicted` credited to their modelling provider
 - `source: predicted` takes UniProt accessions and returns the AlphaFold model with pLDDT/PAE confidence
 - `source: best_available` takes UniProt accessions and returns the top federated model (experimental if one exists, else the best prediction)
 - Per-ID partial success — unresolved IDs are listed in `failed[]`, not a batch-level error
@@ -111,6 +111,7 @@ Profile the PDB into distributions and trends over an optional scoping query —
 - `interval` sets the bin width for value histograms or the period for date histograms (`year` / `month` / `quarter`)
 - Scope with a free-text `query`, `organism`, `method`, or `max_resolution`; `content_type` selects the structure universe
 - `bucket_limit` caps buckets per dimension; truncation is flagged in the response
+- Every dimension reports `missingValueCount` — matches in scope carrying no value for that attribute, which therefore fall in no bucket (a `resolution` breakdown does not cover NMR entries, and neither `method` nor `resolution` covers computed models)
 
 ---
 
@@ -351,6 +352,7 @@ Structure and annotation data comes from public upstream databases, each under i
 |:---|:---|:---|
 | [RCSB PDB](https://www.rcsb.org/) | `protein_get_structure` — experimental records | CC0 1.0 Universal |
 | [AlphaFold DB](https://alphafold.ebi.ac.uk/) | `protein_get_structure` — predicted models | CC BY 4.0 |
+| [ModelArchive](https://www.modelarchive.org/) | `protein_get_structure` — `MA_*` computed models | CC BY 4.0 |
 | [SWISS-MODEL](https://swissmodel.expasy.org/) | `protein_get_structure` — `best_available` models | CC BY-SA 4.0 |
 | [BFVD](https://bfvd.steineggerlab.workers.dev/) | `protein_get_structure` — `best_available` models | CC BY 4.0 |
 | [UniProt](https://www.uniprot.org/) | `protein_get_annotations` | CC BY 4.0 |

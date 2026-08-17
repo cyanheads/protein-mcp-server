@@ -11,15 +11,28 @@ import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { buildFacetSpec, FACET_DIMENSION_NAMES } from '@/services/rcsb/facets.js';
 import { getRcsbService } from '@/services/rcsb/rcsb-service.js';
-import type { ContentType, EntryMeta, SearchHit } from '@/services/rcsb/types.js';
+import type { EntryMeta, SearchHit } from '@/services/rcsb/types.js';
 import { entryIdOf } from '@/services/shared/identifiers.js';
-import { facetDimensionSchema, renderFacets, toFacetOutput } from './_schemas.js';
+import {
+  CONTENT_TYPE_SCOPES,
+  coverageNotices,
+  facetDimensionSchema,
+  renderFacets,
+  toFacetOutput,
+} from './_schemas.js';
 
-const CONTENT_TYPE_MAP = {
-  experimental: ['experimental'],
-  predicted: ['computational'],
-  all: ['experimental', 'computational'],
-} satisfies Record<'experimental' | 'predicted' | 'all', ContentType[]>;
+/**
+ * Zero-hit advice, per scope. Only the two single-universe scopes have a wider
+ * one to switch to; under `all` both universes were already searched, so telling
+ * the caller to change content_type would send them nowhere.
+ */
+const ZERO_HIT_NOTICE = {
+  experimental:
+    'No experimental structures matched. Broaden the query, drop filters, or widen content_type to "all" to include computed models.',
+  predicted:
+    'No predicted models matched. Predicted search covers computed models indexed by RCSB; widen content_type to "all" to include experimental structures.',
+  all: 'No structures matched in either the experimental or computed-model universe — content_type "all" is already the widest scope. Broaden the query or drop filters.',
+} satisfies Record<'experimental' | 'predicted' | 'all', string>;
 
 /** A computed-model identifier (AlphaFold / ModelArchive) vs an experimental PDB entry. */
 function isPredictedId(id: string): boolean {
@@ -146,7 +159,9 @@ export const searchStructures = tool('protein_search_structures', {
     notice: z
       .string()
       .optional()
-      .describe('Advisory note (empty results, predicted-search caveats, truncation).'),
+      .describe(
+        'Advisory note (empty results, predicted-search caveats, truncation, facet dimensions whose buckets cover materially less than totalCount). Carries every applicable advisory in one string.',
+      ),
   },
 
   async handler(input, ctx) {
@@ -157,7 +172,6 @@ export const searchStructures = tool('protein_search_structures', {
     }
     const cfg = getServerConfig();
     const rcsb = getRcsbService();
-    const contentTypes = CONTENT_TYPE_MAP[input.content_type];
     const facetSpecs = input.facets?.map((d) => buildFacetSpec(d));
 
     const result = await rcsb.search(
@@ -171,8 +185,7 @@ export const searchStructures = tool('protein_search_structures', {
           : {}),
         ...(typeof input.min_identity === 'number' ? { minIdentity: input.min_identity } : {}),
         ...(typeof input.max_evalue === 'number' ? { maxEvalue: input.max_evalue } : {}),
-        // RCSB scopes by content type; multi-content searches just union both halves.
-        ...(contentTypes.length === 1 ? { contentType: contentTypes[0] } : {}),
+        contentType: CONTENT_TYPE_SCOPES[input.content_type],
         limit: input.limit,
       },
       ctx,
@@ -188,17 +201,17 @@ export const searchStructures = tool('protein_search_structures', {
     }
 
     const hits = result.hits.map((h) => toHit(h, metaById));
-    const facets = result.facets?.map((f) => toFacetOutput(f, cfg.facetBucketCap));
+    const facets = result.facets?.map((f) => toFacetOutput(f, cfg.facetBucketCap, result.total));
 
     ctx.enrich.total(result.total);
     if (input.query) ctx.enrich.echo(input.query);
-    if (hits.length === 0) {
-      ctx.enrich.notice(
-        input.content_type === 'predicted'
-          ? 'No predicted models matched. Predicted search covers computed models indexed by RCSB; try content_type "all".'
-          : 'No structures matched. Broaden the query, drop filters, or switch content_type.',
-      );
-    }
+
+    // `notice` is a single last-wins field, so the zero-hit advice and one
+    // fragment per under-covered facet dimension compose into ONE string.
+    const notices: string[] = [];
+    if (hits.length === 0) notices.push(ZERO_HIT_NOTICE[input.content_type]);
+    if (facets) notices.push(...coverageNotices(facets, result.total));
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     return { hits, ...(facets ? { facets } : {}) };
   },
