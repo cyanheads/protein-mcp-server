@@ -39,7 +39,7 @@ export const analyzeCollection = tool('protein_analyze_collection', {
     'organism, or polymer composition; resolution and molecular-weight histograms; release-year timelines; ' +
     'and multidimensional cross-tabs (e.g. method × release_year). Aggregation runs server-side at RCSB — ' +
     'one call returns compact buckets, no row pull. Pass one group_by dimension for a single breakdown, or ' +
-    'two for a cross-tab (the first nests the second).',
+    'two distinct dimensions for a cross-tab (the first nests the second).',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   errors: [
@@ -50,6 +50,13 @@ export const analyzeCollection = tool('protein_analyze_collection', {
       recovery:
         'Use a supported dimension: method, organism, polymer_type, resolution, release_year, or molecular_weight.',
     },
+    {
+      reason: 'duplicate_dimension',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'group_by lists the same dimension twice, which would cross a dimension with itself.',
+      recovery:
+        'List each dimension at most once: one dimension for a breakdown, or two distinct dimensions for a cross-tab.',
+    },
   ],
 
   input: z.object({
@@ -57,7 +64,9 @@ export const analyzeCollection = tool('protein_analyze_collection', {
       .array(z.enum(FACET_DIMENSION_NAMES))
       .min(1)
       .max(2)
-      .describe('1 dimension for a breakdown, or 2 for a cross-tab (the first nests the second).'),
+      .describe(
+        '1 dimension for a breakdown, or 2 distinct dimensions for a cross-tab (the first nests the second). Repeating a dimension is rejected.',
+      ),
     query: z
       .string()
       .optional()
@@ -130,6 +139,16 @@ export const analyzeCollection = tool('protein_analyze_collection', {
       throw ctx.fail('unknown_dimension', 'group_by requires at least one dimension.', {
         ...ctx.recoveryFor('unknown_dimension'),
       });
+    // A repeated dimension would nest a facet inside itself upstream. RCSB answers
+    // that with same-attribute overlap, not a cross-tab between two dimensions —
+    // an undocumented shape no caller can read, so reject before the call.
+    const duplicate = input.group_by.find((d, i, all) => all.indexOf(d) !== i);
+    if (duplicate)
+      throw ctx.fail(
+        'duplicate_dimension',
+        `group_by lists "${duplicate}" twice; a cross-tab needs two distinct dimensions.`,
+        { ...ctx.recoveryFor('duplicate_dimension') },
+      );
     const spec = buildFacetSpec(primary, input.interval, secondary);
 
     const { total, facets } = await rcsb.analyzeFacets(
@@ -160,9 +179,7 @@ export const analyzeCollection = tool('protein_analyze_collection', {
       );
     }
     if (input.content_type === 'predicted') {
-      // Deduped: group_by permits the same dimension twice, and "method and
-      // method" would read as two findings.
-      const blind = [...new Set(input.group_by.filter((d) => EXPERIMENTAL_ONLY_DIMENSIONS.has(d)))];
+      const blind = input.group_by.filter((d) => EXPERIMENTAL_ONLY_DIMENSIONS.has(d));
       if (blind.length > 0) {
         notices.push(
           `${blind.join(' and ')} ${blind.length > 1 ? 'are' : 'is'} empty under content_type "predicted": computed models carry no experimental method or resolution metadata. Use content_type "experimental" or "all", or group by organism, polymer_type, release_year, or molecular_weight.`,

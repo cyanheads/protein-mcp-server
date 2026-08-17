@@ -3,13 +3,15 @@
  * cross-tab facet projection through the tool, content_type → content-universe
  * mapping (including the "all" union), the bucket-cap truncation notice, the
  * experimental-only-dimension notice under predicted content and its composition
- * with the cap notice, the scope enrichment, scope-param forwarding to the facet
- * engine, and format() rendering. RCSB service mocked.
+ * with the cap notice, the repeated-dimension rejection, the scope enrichment,
+ * scope-param forwarding to the facet engine, and format() rendering. RCSB
+ * service mocked.
  * @module tests/tools/analyze-collection.tool.test
  */
 
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { FACET_DIMENSION_NAMES } from '@/services/rcsb/facets.js';
 import type { FacetDimension } from '@/services/rcsb/types.js';
 
 const analyzeFacets = vi.fn();
@@ -142,17 +144,15 @@ describe('protein_analyze_collection', () => {
             {
               label: 'X-RAY DIFFRACTION',
               count: 6,
-              children: [
-                {
-                  dimension: 'release_year',
-                  attribute: 'rcsb_accession_info.initial_release_date',
-                  buckets: [
-                    { label: '1976', count: 4 },
-                    { label: '1977', count: 1 },
-                    { label: '1978', count: 1 },
-                  ],
-                },
-              ],
+              child: {
+                dimension: 'release_year',
+                attribute: 'rcsb_accession_info.initial_release_date',
+                buckets: [
+                  { label: '1976', count: 4 },
+                  { label: '1977', count: 1 },
+                  { label: '1978', count: 1 },
+                ],
+              },
             },
           ],
         },
@@ -166,7 +166,7 @@ describe('protein_analyze_collection', () => {
       }),
       ctx(),
     );
-    const child = out.facets[0]?.buckets[0]?.children?.[0];
+    const child = out.facets[0]?.buckets[0]?.child;
     expect(child?.buckets).toHaveLength(2);
     expect(child?.truncated).toBe(true);
     const text = (analyzeCollection.format!(out)[0] as { text: string }).text;
@@ -230,6 +230,42 @@ describe('protein_analyze_collection', () => {
     );
   });
 
+  it('rejects a repeated group_by dimension before any upstream call (#30)', async () => {
+    await expect(
+      analyzeCollection.handler(
+        analyzeCollection.input.parse({ group_by: ['method', 'method'] }),
+        ctx(),
+      ),
+    ).rejects.toMatchObject({
+      data: {
+        reason: 'duplicate_dimension',
+        recovery: { hint: expect.stringContaining('at most once') },
+      },
+    });
+    expect(analyzeFacets).not.toHaveBeenCalled();
+  });
+
+  it('rejects every same-value pair, naming the repeated dimension (#30)', async () => {
+    for (const dimension of FACET_DIMENSION_NAMES) {
+      analyzeFacets.mockClear();
+      const err = await Promise.resolve(
+        analyzeCollection.handler(
+          analyzeCollection.input.parse({ group_by: [dimension, dimension] }),
+          ctx(),
+        ),
+      ).catch((e: Error) => e);
+      expect(err).toMatchObject({ data: { reason: 'duplicate_dimension' } });
+      expect((err as Error).message).toContain(dimension);
+      expect(analyzeFacets).not.toHaveBeenCalled();
+    }
+  });
+
+  it('leaves unsupported dimension values to the enum boundary (#30)', () => {
+    // Two distinct but invalid values still fail schema validation, not the
+    // duplicate guard — the two rejections stay independent.
+    expect(() => analyzeCollection.input.parse({ group_by: ['bogus', 'alsobogus'] })).toThrow();
+  });
+
   it('explains an experimental-only dimension under predicted content (#27)', async () => {
     for (const dimension of ['method', 'resolution'] as const) {
       analyzeFacets.mockClear();
@@ -265,14 +301,23 @@ describe('protein_analyze_collection', () => {
     expect(String(getEnrichment(c).notice)).toMatch(/method and resolution are empty/i);
   });
 
-  it('names a repeated experimental-only dimension once (#27)', async () => {
-    analyzeFacets.mockResolvedValue({ total: 1081, facets: [methodFacet([])] });
+  it('rejects a repeated experimental-only dimension instead of naming it once (#27, #30)', async () => {
+    // Supersedes the notice-text dedup this case used to exercise: a repeated
+    // dimension no longer reaches the advisory, because it no longer reaches the
+    // handler body. Two *distinct* experimental-only dimensions still compose one
+    // notice — covered above.
     const c = ctx();
-    await analyzeCollection.handler(
-      analyzeCollection.input.parse({ group_by: ['method', 'method'], content_type: 'predicted' }),
-      c,
-    );
-    expect(String(getEnrichment(c).notice)).toMatch(/^method is empty/i);
+    await expect(
+      analyzeCollection.handler(
+        analyzeCollection.input.parse({
+          group_by: ['method', 'method'],
+          content_type: 'predicted',
+        }),
+        c,
+      ),
+    ).rejects.toMatchObject({ data: { reason: 'duplicate_dimension' } });
+    expect(analyzeFacets).not.toHaveBeenCalled();
+    expect(getEnrichment(c)).not.toHaveProperty('notice');
   });
 
   it('fires for an experimental-only dimension in the cross-tab child position (#27)', async () => {
@@ -282,9 +327,15 @@ describe('protein_analyze_collection', () => {
         {
           dimension: 'organism',
           attribute: 'rcsb_entity_source_organism.ncbi_scientific_name',
-          // Upstream drops the nested facet key entirely, so the parent buckets
-          // arrive with no children at all rather than an empty child dimension.
-          buckets: [{ label: 'Mus musculus', count: 36 }],
+          // Upstream drops the nested facet key entirely; the service still emits
+          // the requested child, with an empty bucket list (#31).
+          buckets: [
+            {
+              label: 'Mus musculus',
+              count: 36,
+              child: { dimension: 'method', attribute: 'exptl.method', buckets: [] },
+            },
+          ],
         },
       ],
     });
@@ -296,8 +347,80 @@ describe('protein_analyze_collection', () => {
       }),
       c,
     );
-    expect(out.facets[0]?.buckets[0]).not.toHaveProperty('children');
+    // The requested second dimension stays in the output shape rather than
+    // vanishing: buckets [] says it aggregated to nothing, and the gap equals
+    // the whole parent bucket (#31).
+    expect(out.facets[0]?.buckets[0]?.child).toEqual({
+      dimension: 'method',
+      buckets: [],
+      missingValueCount: 36,
+    });
     expect(String(getEnrichment(c).notice)).toMatch(/^method is empty under content_type/i);
+  });
+
+  it('renders an empty cross-tab child instead of dropping the dimension (#31)', async () => {
+    analyzeFacets.mockResolvedValue({
+      total: 1062058,
+      facets: [
+        {
+          dimension: 'organism',
+          attribute: 'rcsb_entity_source_organism.ncbi_scientific_name',
+          buckets: [
+            {
+              label: 'Glycine max',
+              count: 55796,
+              child: { dimension: 'method', attribute: 'exptl.method', buckets: [] },
+            },
+          ],
+        },
+      ],
+    });
+    const c = ctx();
+    const out = await analyzeCollection.handler(
+      analyzeCollection.input.parse({
+        group_by: ['organism', 'method'],
+        content_type: 'predicted',
+      }),
+      c,
+    );
+    const text = (analyzeCollection.format!(out)[0] as { text: string }).text;
+    expect(text).toContain('method → _no data in this scope_ (55796 with no value)');
+    // An empty child earns no coverage advisory of its own — the #27 scope notice
+    // is the explanation, and a 100%-gap fragment on top would be noise.
+    expect(String(getEnrichment(c).notice)).not.toMatch(/method buckets cover/);
+  });
+
+  it('keeps the empty child on both consumption surfaces (#31)', async () => {
+    analyzeFacets.mockResolvedValue({
+      total: 1081,
+      facets: [
+        {
+          dimension: 'organism',
+          attribute: 'rcsb_entity_source_organism.ncbi_scientific_name',
+          buckets: [
+            {
+              label: 'Mus musculus',
+              count: 36,
+              child: { dimension: 'method', attribute: 'exptl.method', buckets: [] },
+            },
+          ],
+        },
+      ],
+    });
+    const result = (await runToolContract(analyzeCollection, {
+      group_by: ['organism', 'method'],
+      content_type: 'predicted',
+    })) as {
+      structuredContent: { facets: Array<{ buckets: Array<{ child?: unknown }> }> };
+      content: Array<{ type: string; text: string }>;
+    };
+
+    expect(result.structuredContent.facets[0]?.buckets[0]?.child).toEqual({
+      dimension: 'method',
+      buckets: [],
+      missingValueCount: 36,
+    });
+    expect(result.content[0]?.text).toMatch(/method → _no data in this scope_/);
   });
 
   it('stays silent under experimental / all, and for unaffected dimensions (#27)', async () => {
@@ -330,8 +453,13 @@ describe('protein_analyze_collection', () => {
 
   it('composes the bucket-cap and predicted-dimension advisories in one notice (#27)', async () => {
     // The real shape of `group_by: ["organism", "method"]` under predicted content:
-    // 413 organism buckets blow the cap while the nested method facet is absent.
-    const buckets = Array.from({ length: 6 }, (_, i) => ({ label: `org${i}`, count: 6 - i }));
+    // 413 organism buckets blow the cap while the nested method facet aggregates
+    // to nothing, so every parent carries an empty child (#31).
+    const buckets = Array.from({ length: 6 }, (_, i) => ({
+      label: `org${i}`,
+      count: 6 - i,
+      child: { dimension: 'method', attribute: 'exptl.method', buckets: [] },
+    }));
     analyzeFacets.mockResolvedValue({
       total: 1081,
       facets: [
@@ -514,24 +642,20 @@ describe('protein_analyze_collection', () => {
             {
               label: 'homomeric protein',
               count: 98505,
-              children: [
-                {
-                  dimension: 'method',
-                  attribute: 'exptl.method',
-                  buckets: [{ label: 'X-RAY DIFFRACTION', count: 40903 }],
-                },
-              ],
+              child: {
+                dimension: 'method',
+                attribute: 'exptl.method',
+                buckets: [{ label: 'X-RAY DIFFRACTION', count: 40903 }],
+              },
             },
             {
               label: 'heteromeric protein',
               count: 19214,
-              children: [
-                {
-                  dimension: 'method',
-                  attribute: 'exptl.method',
-                  buckets: [{ label: 'X-RAY DIFFRACTION', count: 18527 }],
-                },
-              ],
+              child: {
+                dimension: 'method',
+                attribute: 'exptl.method',
+                buckets: [{ label: 'X-RAY DIFFRACTION', count: 18527 }],
+              },
             },
           ],
         },
@@ -546,8 +670,8 @@ describe('protein_analyze_collection', () => {
       c,
     );
     expect(out.facets[0]?.missingValueCount).toBe(12385);
-    expect(out.facets[0]?.buckets[0]?.children?.[0]?.missingValueCount).toBe(57602);
-    expect(out.facets[0]?.buckets[1]?.children?.[0]?.missingValueCount).toBe(687);
+    expect(out.facets[0]?.buckets[0]?.child?.missingValueCount).toBe(57602);
+    expect(out.facets[0]?.buckets[1]?.child?.missingValueCount).toBe(687);
     // The child dimension is aggregated into one advisory, not one per bucket.
     const notice = String(getEnrichment(c).notice);
     expect(notice.match(/method buckets/g)).toHaveLength(1);
@@ -556,7 +680,11 @@ describe('protein_analyze_collection', () => {
   });
 
   it('composes the coverage gap with the cap and predicted-scope notices (#32)', async () => {
-    const buckets = Array.from({ length: 6 }, (_, i) => ({ label: `org${i}`, count: 100 }));
+    const buckets = Array.from({ length: 6 }, (_, i) => ({
+      label: `org${i}`,
+      count: 100,
+      child: { dimension: 'method', attribute: 'exptl.method', buckets: [] },
+    }));
     analyzeFacets.mockResolvedValue({
       total: 1200,
       facets: [
