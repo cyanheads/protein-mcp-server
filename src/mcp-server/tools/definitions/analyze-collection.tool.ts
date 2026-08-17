@@ -18,6 +18,7 @@ import {
 import { getRcsbService } from '@/services/rcsb/rcsb-service.js';
 import {
   CONTENT_TYPE_SCOPES,
+  countBuckets,
   coverageNotices,
   facetDimensionSchema,
   renderFacets,
@@ -39,7 +40,9 @@ export const analyzeCollection = tool('protein_analyze_collection', {
     'organism, or polymer composition; resolution and molecular-weight histograms; release-year timelines; ' +
     'and multidimensional cross-tabs (e.g. method × release_year). Aggregation runs server-side at RCSB — ' +
     'one call returns compact buckets, no row pull. Pass one group_by dimension for a single breakdown, or ' +
-    'two distinct dimensions for a cross-tab (the first nests the second).',
+    'two distinct dimensions for a cross-tab (the first nests the second). bucket_limit caps each dimension ' +
+    'level separately rather than the response, so a cross-tab returns up to that many nested buckets under ' +
+    'each of its capped parent buckets; bucketsReturned reports the realized total.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   errors: [
@@ -106,7 +109,12 @@ export const analyzeCollection = tool('protein_analyze_collection', {
       .min(1)
       .max(500)
       .optional()
-      .describe('Max buckets per dimension. Defaults to the server PROTEIN_FACET_BUCKET_CAP.'),
+      .describe(
+        'Max buckets per dimension level, not per response. A cross-tab applies the cap separately to the ' +
+          'parent dimension and to the nested child inside each parent bucket, so up to ' +
+          'bucket_limit × (1 + bucket_limit) buckets can come back — 2550 at the default 50. The realized ' +
+          'count comes back as bucketsReturned. Defaults to the server PROTEIN_FACET_BUCKET_CAP.',
+      ),
   }),
 
   output: z.object({
@@ -128,6 +136,13 @@ export const analyzeCollection = tool('protein_analyze_collection', {
       .describe('True when a dimension had more buckets than the applied cap.'),
     shown: z.number().optional().describe('Buckets returned for the capped dimension.'),
     cap: z.number().optional().describe('Per-dimension bucket cap that was applied.'),
+    bucketsReturned: z
+      .number()
+      .describe(
+        'Buckets in this response, summed over every dimension level: the top-level buckets plus, for a ' +
+          'cross-tab, the nested child buckets under each of them. Since bucket_limit caps each level ' +
+          'separately, this is the size those caps actually produced — always present, cross-tab or not.',
+      ),
   },
 
   async handler(input, ctx) {
@@ -166,6 +181,10 @@ export const analyzeCollection = tool('protein_analyze_collection', {
     );
 
     const out = facets.map((f) => toFacetOutput(f, cap, total));
+
+    // The cap bounds each dimension level, so a cross-tab's size is the product of
+    // two capped lists rather than one. Report what the response actually holds.
+    ctx.enrich({ bucketsReturned: countBuckets(out) });
 
     // Every advisory writes the same `notice` field (ctx.enrich.truncated routes
     // through it and is last-wins), and a cross-tab under predicted content can

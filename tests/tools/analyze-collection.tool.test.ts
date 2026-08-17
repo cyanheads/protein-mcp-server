@@ -4,8 +4,8 @@
  * mapping (including the "all" union), the bucket-cap truncation notice, the
  * experimental-only-dimension notice under predicted content and its composition
  * with the cap notice, the repeated-dimension rejection, the scope enrichment,
- * scope-param forwarding to the facet engine, and format() rendering. RCSB
- * service mocked.
+ * the realized bucket total across both dimension positions, scope-param
+ * forwarding to the facet engine, and format() rendering. RCSB service mocked.
  * @module tests/tools/analyze-collection.tool.test
  */
 
@@ -732,6 +732,153 @@ describe('protein_analyze_collection', () => {
     // The notice reaches content[] as a separate trailing block, never content[0].
     expect(formatted?.text).not.toContain('buckets cover');
     expect(trailer.map((b) => b.text).join('\n')).toContain('58304');
+  });
+
+  it('reports the realized bucket total for a single-dimension breakdown (#36)', async () => {
+    analyzeFacets.mockResolvedValue({
+      total: 1000,
+      facets: [
+        methodFacet([
+          { label: 'X-RAY DIFFRACTION', count: 800 },
+          { label: 'EM', count: 200 },
+        ]),
+      ],
+    });
+    const c = ctx();
+    await analyzeCollection.handler(analyzeCollection.input.parse({ group_by: ['method'] }), c);
+    expect(getEnrichment(c)).toMatchObject({ bucketsReturned: 2 });
+  });
+
+  it('counts parent and nested child buckets together for a cross-tab (#36)', async () => {
+    analyzeFacets.mockResolvedValue({
+      total: 1000,
+      facets: [
+        methodFacet([
+          {
+            label: 'X-RAY DIFFRACTION',
+            count: 800,
+            child: {
+              dimension: 'release_year',
+              attribute: 'rcsb_accession_info.initial_release_date',
+              buckets: [
+                { label: '2020', count: 400 },
+                { label: '2021', count: 400 },
+              ],
+            },
+          },
+          {
+            label: 'EM',
+            count: 200,
+            child: {
+              dimension: 'release_year',
+              attribute: 'rcsb_accession_info.initial_release_date',
+              buckets: [{ label: '2021', count: 200 }],
+            },
+          },
+        ]),
+      ],
+    });
+    const c = ctx();
+    await analyzeCollection.handler(
+      analyzeCollection.input.parse({ group_by: ['method', 'release_year'] }),
+      c,
+    );
+    // 2 parent buckets + 3 child buckets — the size bucket_limit alone does not convey.
+    expect(getEnrichment(c)).toMatchObject({ bucketsReturned: 5 });
+  });
+
+  it('reports the cap-reached cross-tab size as cap × (1 + cap) (#36)', async () => {
+    // Both levels blow the cap: the response holds bucket_limit parents, each
+    // carrying bucket_limit children — the multiplication the parameter name hides.
+    const buckets = Array.from({ length: 8 }, (_, i) => ({
+      label: `org${i}`,
+      count: 100,
+      child: {
+        dimension: 'method',
+        attribute: 'exptl.method',
+        buckets: Array.from({ length: 8 }, (_, j) => ({ label: `m${j}`, count: 12 })),
+      },
+    }));
+    analyzeFacets.mockResolvedValue({
+      total: 800,
+      facets: [
+        {
+          dimension: 'organism',
+          attribute: 'rcsb_entity_source_organism.ncbi_scientific_name',
+          buckets,
+        },
+      ],
+    });
+    const c = ctx();
+    const out = await analyzeCollection.handler(
+      analyzeCollection.input.parse({ group_by: ['organism', 'method'], bucket_limit: 3 }),
+      c,
+    );
+    expect(out.facets[0]?.truncated).toBe(true);
+    expect(out.facets[0]?.buckets[0]?.child?.truncated).toBe(true);
+    // shown counts the capped dimension alone (3); bucketsReturned counts the response (12).
+    expect(getEnrichment(c)).toMatchObject({
+      truncated: true,
+      shown: 3,
+      cap: 3,
+      bucketsReturned: 12,
+    });
+  });
+
+  it('reports zero buckets for a zero-match scope (#36)', async () => {
+    analyzeFacets.mockResolvedValue({ total: 0, facets: [methodFacet([])] });
+    const c = ctx();
+    await analyzeCollection.handler(
+      analyzeCollection.input.parse({ group_by: ['method'], query: 'zzzznotathing' }),
+      c,
+    );
+    expect(getEnrichment(c)).toMatchObject({ bucketsReturned: 0 });
+  });
+
+  it('enriches nothing when the input is rejected before the upstream call (#36)', async () => {
+    const c = ctx();
+    await expect(
+      analyzeCollection.handler(
+        analyzeCollection.input.parse({ group_by: ['method', 'method'] }),
+        c,
+      ),
+    ).rejects.toMatchObject({ data: { reason: 'duplicate_dimension' } });
+    expect(getEnrichment(c)).not.toHaveProperty('bucketsReturned');
+  });
+
+  it('carries the realized bucket total on both consumption surfaces (#36)', async () => {
+    analyzeFacets.mockResolvedValue({
+      total: 1000,
+      facets: [
+        methodFacet([
+          {
+            label: 'X-RAY DIFFRACTION',
+            count: 1000,
+            child: {
+              dimension: 'release_year',
+              attribute: 'rcsb_accession_info.initial_release_date',
+              buckets: [
+                { label: '2020', count: 600 },
+                { label: '2021', count: 400 },
+              ],
+            },
+          },
+        ]),
+      ],
+    });
+    const result = (await runToolContract(analyzeCollection, {
+      group_by: ['method', 'release_year'],
+    })) as {
+      structuredContent: { bucketsReturned?: number };
+      content: Array<{ type: string; text: string }>;
+    };
+
+    expect(result.structuredContent.bucketsReturned).toBe(3);
+    const [formatted, ...trailer] = result.content;
+    // The realized total is agent context, not part of the rendered profile.
+    expect(formatted?.text).not.toContain('bucketsReturned');
+    expect(trailer.map((b) => b.text).join('\n')).toContain('bucketsReturned');
+    expect(trailer.map((b) => b.text).join('\n')).toContain('3');
   });
 
   it('output conforms to the declared schema', async () => {

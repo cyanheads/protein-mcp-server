@@ -82,7 +82,9 @@ const ServerConfigSchema = z.object({
     .min(1)
     .max(500)
     .default(50)
-    .describe('Default cap on buckets returned per protein_analyze_collection dimension.'),
+    .describe(
+      'Default cap on buckets returned per protein_analyze_collection dimension level — applied separately to a cross-tab parent dimension and to the nested child inside each of its buckets.',
+    ),
   fanoutConcurrency: z.coerce
     .number()
     .int()

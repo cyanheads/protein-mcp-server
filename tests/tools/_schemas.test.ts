@@ -3,13 +3,15 @@
  * (bucket cap + truncation flag + nested-child capping + the per-dimension
  * coverage gap), renderFacets (the markdown twin, including the truncation
  * marker, the coverage marker, the nested cross-tab line shape, and the
- * explanation that replaces a bare empty-dimension heading), and coverageNotices
- * (the materiality filter that decides which gaps earn prose).
+ * explanation that replaces a bare empty-dimension heading), coverageNotices
+ * (the materiality filter that decides which gaps earn prose), and countBuckets
+ * (the realized bucket total across every dimension position).
  * @module tests/tools/_schemas.test
  */
 
 import { describe, expect, it } from 'vitest';
 import {
+  countBuckets,
   coverageNotices,
   renderFacets,
   toFacetOutput,
@@ -605,5 +607,108 @@ describe('coverageNotices (#32)', () => {
     // 58289 missing across the 117719 matches the two parent buckets describe.
     expect(notices[0]).toContain('58289');
     expect(notices[0]).toContain('117719');
+  });
+});
+
+describe('countBuckets (#36)', () => {
+  it('counts a single dimension as its own bucket list', () => {
+    expect(
+      countBuckets([
+        {
+          dimension: 'method',
+          missingValueCount: 0,
+          buckets: [
+            { label: 'X-RAY', count: 800 },
+            { label: 'EM', count: 200 },
+          ],
+        },
+      ]),
+    ).toBe(2);
+  });
+
+  it('adds the nested child buckets under every parent bucket for a cross-tab', () => {
+    expect(
+      countBuckets([
+        {
+          dimension: 'method',
+          missingValueCount: 0,
+          buckets: [
+            {
+              label: 'X-RAY',
+              count: 800,
+              child: {
+                dimension: 'release_year',
+                missingValueCount: 0,
+                buckets: [
+                  { label: '2020', count: 400 },
+                  { label: '2021', count: 400 },
+                ],
+              },
+            },
+            {
+              label: 'EM',
+              count: 200,
+              child: {
+                dimension: 'release_year',
+                missingValueCount: 0,
+                buckets: [{ label: '2021', count: 200 }],
+              },
+            },
+          ],
+        },
+      ]),
+      // 2 parents + 2 children + 1 child.
+    ).toBe(5);
+  });
+
+  it('counts a child that aggregated to nothing as no buckets (#31)', () => {
+    expect(
+      countBuckets([
+        {
+          dimension: 'organism',
+          missingValueCount: 0,
+          buckets: [
+            {
+              label: 'Glycine max',
+              count: 55796,
+              child: { dimension: 'method', missingValueCount: 55796, buckets: [] },
+            },
+          ],
+        },
+      ]),
+    ).toBe(1);
+  });
+
+  it('returns 0 for a dimension that aggregated to nothing', () => {
+    expect(countBuckets([{ dimension: 'method', missingValueCount: 0, buckets: [] }])).toBe(0);
+  });
+
+  it('counts what the cap kept, at both levels', () => {
+    // 6 parent buckets each carrying 6 children, capped to 2: the response holds
+    // 2 parents and 2 children under each, never the 42 upstream aggregated.
+    const buckets = Array.from({ length: 6 }, (_, i) => ({
+      label: `m${i}`,
+      count: 100,
+      child: childDim(Array.from({ length: 6 }, (_, j) => ({ label: `y${j}`, count: 10 }))),
+    }));
+    const out = toFacetOutput(dim(buckets), 2, 600);
+    // cap × (1 + cap) — the parent list plus one capped child list per parent.
+    expect(countBuckets([out])).toBe(6);
+  });
+
+  it('sums across several dimension positions', () => {
+    expect(
+      countBuckets([
+        { dimension: 'method', missingValueCount: 0, buckets: [{ label: 'X-RAY', count: 1 }] },
+        {
+          dimension: 'organism',
+          missingValueCount: 0,
+          buckets: [
+            { label: 'Homo sapiens', count: 1 },
+            { label: 'Escherichia coli', count: 1 },
+          ],
+        },
+      ]),
+    ).toBe(3);
   });
 });

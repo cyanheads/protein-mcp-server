@@ -172,6 +172,26 @@ export function toFacetOutput(
 }
 
 /**
+ * Buckets the response actually carries, summed over every dimension position:
+ * each dimension's own bucket list plus the nested cross-tab list under each of
+ * its buckets.
+ *
+ * Counted after {@link toFacetOutput} has sliced each position to the cap, so it
+ * is the realized size rather than what upstream aggregated. The cap bounds each
+ * position independently — a cross-tab reaches `cap × (1 + cap)` buckets — and
+ * the per-position `truncated` flags do not compose into that size, so a caller
+ * cannot derive it from the levels.
+ */
+export function countBuckets(facets: FacetDimensionOutput[]): number {
+  let count = 0;
+  for (const f of facets) {
+    count += f.buckets.length;
+    for (const b of f.buckets) count += b.child?.buckets.length ?? 0;
+  }
+  return count;
+}
+
+/**
  * Render one bucket's `label: count` line, annotating numeric histogram buckets
  * with their explicit half-open `[rangeFrom, rangeTo)` bin so the bare boundary
  * label isn't ambiguous (does `1.0` count `[0.5, 1.0)` or `[1.0, 1.5)`?).
