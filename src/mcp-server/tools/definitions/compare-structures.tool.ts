@@ -29,7 +29,7 @@ const inputSchema = z.object({
     .min(2)
     .max(25)
     .describe(
-      'The structures to compare, up to the configured batch cap (excess is dropped with a notice).',
+      'The structures to compare, up to the configured batch cap (excess is dropped with a notice). A structure repeated here is compared once.',
     ),
   reference: z
     .enum(['first', 'all_pairs'])
@@ -149,6 +149,13 @@ export const compareStructures = tool('protein_compare_structures', {
       recovery:
         "Copy each resume entry's a, b, and uuid verbatim from a prior response's pairs[], and keep structures and reference unchanged between calls.",
     },
+    {
+      reason: 'no_distinct_pair',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'Every entry in structures[] denotes the same structure, leaving no pair to align.',
+      recovery:
+        'Pass at least two different structures (entry ID, or entry ID + chain); a structure repeated in the list is compared once.',
+    },
   ],
 
   input: inputSchema,
@@ -162,11 +169,25 @@ export const compareStructures = tool('protein_compare_structures', {
 
   async handler(input, ctx) {
     const cfg = getServerConfig();
-    const structures = input.structures.slice(0, cfg.maxCompareStructures);
     const notices: string[] = [];
-    if (input.structures.length > cfg.maxCompareStructures) {
+    const { unique, repeated } = dedupeStructures(input.structures);
+    if (repeated.length > 0) {
       notices.push(
-        `Capped at ${cfg.maxCompareStructures} structures; ${input.structures.length - cfg.maxCompareStructures} ignored.`,
+        `Compared ${[...new Set(repeated)].join(', ')} once: a structure repeated in structures[] adds a self-alignment and a mirrored pair, not a new comparison.`,
+      );
+    }
+    if (unique.length < 2) {
+      const [only] = unique;
+      throw ctx.fail(
+        'no_distinct_pair',
+        `Every entry in structures[] denotes ${only ? label(only) : 'one structure'}; there is no second structure to align it against.`,
+        { ...ctx.recoveryFor('no_distinct_pair') },
+      );
+    }
+    const structures = unique.slice(0, cfg.maxCompareStructures);
+    if (unique.length > cfg.maxCompareStructures) {
+      notices.push(
+        `Capped at ${cfg.maxCompareStructures} structures; ${unique.length - cfg.maxCompareStructures} ignored.`,
       );
     }
     const timeoutMs = input.timeout_s ? input.timeout_s * 1000 : cfg.asyncPollTimeoutMs;
@@ -269,6 +290,34 @@ export const compareStructures = tool('protein_compare_structures', {
   },
 });
 
+/**
+ * Collapse entries that denote the same structure to their first occurrence,
+ * keyed exactly as {@link pairKey} normalizes labels. Two entries for one
+ * structure yield pairs that are indistinguishable under that key — `(A,B)` and
+ * `(B,A)` collapse to one — so a single resume ticket would be applied to two
+ * separate alignment jobs, silently discarding one. Case-folding the whole label
+ * follows the same normalization: distinguishing chains `A` and `a` here would
+ * hand the resume lookup two pairs it cannot tell apart.
+ */
+function dedupeStructures(structures: StructInput[]): {
+  unique: StructInput[];
+  repeated: string[];
+} {
+  const seen = new Set<string>();
+  const unique: StructInput[] = [];
+  const repeated: string[] = [];
+  for (const s of structures) {
+    const key = label(s);
+    if (seen.has(key)) {
+      repeated.push(label(s));
+      continue;
+    }
+    seen.add(key);
+    unique.push(s);
+  }
+  return { unique, repeated };
+}
+
 function buildPairs(
   structures: StructInput[],
   reference: 'first' | 'all_pairs',
@@ -299,9 +348,18 @@ function label(s: StructInput): string {
 }
 
 /**
- * Canonical, order- and case-insensitive key for a pair of structure labels, so a
- * resume entry matches its pair regardless of which side the client copied first.
+ * Canonical, order-insensitive key for a pair of structure labels, so a resume
+ * entry matches its pair regardless of which side the client copied first. The
+ * entry ID is case-folded; the chain suffix is NOT — mmCIF `label_asym_id` is
+ * case-sensitive, so chains `A` and `a` are different chains and must key apart.
  */
+function normalizeLabel(value: string): string {
+  const dot = value.indexOf('.');
+  return dot === -1
+    ? value.toUpperCase()
+    : `${value.slice(0, dot).toUpperCase()}.${value.slice(dot + 1)}`;
+}
+
 function pairKey(a: string, b: string): string {
-  return [a.toUpperCase(), b.toUpperCase()].sort().join('\u0000');
+  return [normalizeLabel(a), normalizeLabel(b)].sort().join('\u0000');
 }

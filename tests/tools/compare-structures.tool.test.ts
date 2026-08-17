@@ -1,12 +1,14 @@
 /**
  * @fileoverview Tests for protein_compare_structures: pair generation
- * (reference:first vs. all_pairs), the computing/ticket outcome with enrichment,
- * and format() rendering of both failure detail and job tickets. Alignment mocked.
+ * (reference:first vs. all_pairs), repeated-structure de-duplication and the
+ * pair-key uniqueness invariant it protects, the computing/ticket outcome with
+ * enrichment, and format() rendering of both failure detail and job tickets.
+ * Alignment mocked.
  * @module tests/tools/compare-structures.tool.test
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const comparePair = vi.fn();
@@ -176,6 +178,146 @@ describe('protein_compare_structures', () => {
       data: { reason: 'resume_pair_unmatched' },
     });
     expect(resumePair).not.toHaveBeenCalled();
+  });
+});
+
+describe('protein_compare_structures repeated structures (#33)', () => {
+  it('compares a repeated structure once, naming the repeat in the notice', async () => {
+    comparePair.mockResolvedValue({ status: 'complete', uuid: 'u', scores: { tmScore: 0.9 } });
+    const c = ctx();
+    const out = await compareStructures.handler(
+      compareStructures.input.parse({
+        structures: [{ pdb_id: '4HHB' }, { pdb_id: '2HHB' }, { pdb_id: '4HHB' }],
+        reference: 'all_pairs',
+      }),
+      c,
+    );
+
+    // Was three pairs: 4HHB↔2HHB, the self-pair 4HHB↔4HHB, and 2HHB↔4HHB.
+    expect(out.pairs.map((p) => `${p.a}-${p.b}`)).toEqual(['4HHB-2HHB']);
+    expect(comparePair).toHaveBeenCalledTimes(1);
+    expect(getEnrichment(c)).toMatchObject({ pairsTotal: 1 });
+    expect(String(getEnrichment(c).notice)).toContain('4HHB');
+  });
+
+  it('keeps the pair key unique across every generated pair', async () => {
+    comparePair.mockResolvedValue({ status: 'complete', uuid: 'u', scores: {} });
+    const repeats = [
+      [{ pdb_id: '4HHB' }, { pdb_id: '2HHB' }, { pdb_id: '4HHB' }],
+      [{ pdb_id: '4hhb' }, { pdb_id: '2HHB' }, { pdb_id: '4HHB' }, { pdb_id: '1A3N' }],
+      [{ pdb_id: '4HHB', chain: 'A' }, { pdb_id: '4HHB', chain: 'a' }, { pdb_id: '2HHB' }],
+    ];
+    for (const structures of repeats) {
+      for (const reference of ['first', 'all_pairs'] as const) {
+        comparePair.mockClear();
+        const out = await compareStructures.handler(
+          compareStructures.input.parse({ structures, reference }),
+          ctx(),
+        );
+        // The canonical key the resume lookup uses — order-insensitive, and
+        // case-insensitive on the entry ID only (chain is label_asym_id, case-sensitive).
+        const norm = (v: string) => {
+          const dot = v.indexOf('.');
+          return dot === -1
+            ? v.toUpperCase()
+            : `${v.slice(0, dot).toUpperCase()}.${v.slice(dot + 1)}`;
+        };
+        const keys = out.pairs.map((p) => [norm(p.a), norm(p.b)].sort().join('|'));
+        expect(new Set(keys).size).toBe(out.pairs.length);
+        expect(out.pairs.every((p) => norm(p.a) !== norm(p.b))).toBe(true);
+      }
+    }
+  });
+
+  it('treats chains A and a as distinct structures, not a repeat (#33)', async () => {
+    // mmCIF label_asym_id is case-sensitive. De-duplicating on an upper-cased label
+    // would collapse two genuinely different chains into one and then reject the call
+    // as having no distinct pair.
+    comparePair.mockResolvedValue({ status: 'complete', uuid: 'u', scores: {} });
+    const c = ctx();
+    const out = await compareStructures.handler(
+      compareStructures.input.parse({
+        structures: [
+          { pdb_id: '4HHB', chain: 'A' },
+          { pdb_id: '4HHB', chain: 'a' },
+        ],
+      }),
+      c,
+    );
+
+    expect(out.pairs).toHaveLength(1);
+    expect(out.pairs[0]).toMatchObject({ a: '4HHB.A', b: '4HHB.a' });
+    expect(comparePair).toHaveBeenCalledTimes(1);
+    expect(getEnrichment(c).notice).toBeUndefined();
+  });
+
+  it('applies a resume ticket to exactly one job when a structure repeats', async () => {
+    resumePair.mockResolvedValue({ status: 'complete', uuid: 'known', scores: {} });
+    comparePair.mockResolvedValue({ status: 'complete', uuid: 'fresh', scores: {} });
+    const out = await compareStructures.handler(
+      compareStructures.input.parse({
+        structures: [{ pdb_id: '4HHB' }, { pdb_id: '2HHB' }, { pdb_id: '4HHB' }],
+        reference: 'all_pairs',
+        resume: [{ a: '4HHB', b: '2HHB', uuid: 'known' }],
+      }),
+      ctx(),
+    );
+
+    expect(out.pairs).toHaveLength(1);
+    expect(resumePair).toHaveBeenCalledTimes(1);
+    expect(comparePair).not.toHaveBeenCalled();
+  });
+
+  it('fails when every structure denotes the same one', async () => {
+    await expect(
+      compareStructures.handler(
+        compareStructures.input.parse({ structures: [{ pdb_id: '4HHB' }, { pdb_id: '4hhb' }] }),
+        ctx(),
+      ),
+    ).rejects.toMatchObject({
+      data: {
+        reason: 'no_distinct_pair',
+        recovery: { hint: expect.stringContaining('two different structures') },
+      },
+    });
+    expect(comparePair).not.toHaveBeenCalled();
+  });
+
+  it('drops repeats before the cap, so distinct structures are not crowded out', async () => {
+    comparePair.mockResolvedValue({ status: 'complete', uuid: 'u', scores: {} });
+    const distinct = Array.from({ length: CAP }, (_, i) => ({
+      pdb_id: `2${String(i).padStart(3, '0')}`,
+    }));
+    const c = ctx();
+    const out = await compareStructures.handler(
+      compareStructures.input.parse({
+        structures: [...distinct, ...distinct].slice(0, 25),
+        reference: 'first',
+      }),
+      c,
+    );
+
+    expect(out.pairs).toHaveLength(CAP - 1);
+    expect(String(getEnrichment(c).notice)).not.toContain('Capped at');
+  });
+
+  it('carries the de-duplicated pair set on both consumption surfaces', async () => {
+    comparePair.mockResolvedValue({ status: 'complete', uuid: 'u1', scores: { tmScore: 0.87 } });
+    const result = (await runToolContract(compareStructures, {
+      structures: [{ pdb_id: '4HHB' }, { pdb_id: '2HHB' }, { pdb_id: '4HHB' }],
+      reference: 'all_pairs',
+    })) as {
+      structuredContent: { pairs: Array<{ a: string; b: string }>; notice?: string };
+      content: Array<{ type: string; text: string }>;
+    };
+
+    expect(result.structuredContent.pairs).toEqual([
+      expect.objectContaining({ a: '4HHB', b: '2HHB' }),
+    ]);
+    const [formatted, ...trailer] = result.content;
+    expect(formatted?.text).toContain('4HHB ↔ 2HHB');
+    expect(formatted?.text).not.toContain('4HHB ↔ 4HHB');
+    expect(trailer.map((b) => b.text).join('\n')).toContain('4HHB');
   });
 });
 
