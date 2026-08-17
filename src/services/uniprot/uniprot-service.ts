@@ -128,6 +128,7 @@ export class UniProtService {
         operation: 'UniProtService.getInterPro',
         label: 'InterPro',
         baseDelayMs: 400,
+        expectedStatuses: [404],
       });
     } catch (err) {
       // InterPro returns 404 when no entries match — that's "no domains", not a failure.

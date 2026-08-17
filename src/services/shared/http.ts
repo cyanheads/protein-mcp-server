@@ -2,14 +2,13 @@
  * @fileoverview Shared HTTP layer for the protein data providers. Wraps the
  * framework's `fetchWithTimeout` + `withRetry` (retry covers the full fetch +
  * parse pipeline) and centralizes HTML-error-page / empty-body detection so each
- * service stays thin. The single `Context → RequestContext` cast the framework
- * utilities expect is isolated here.
+ * service stays thin.
  * @module services/shared/http
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import { serializationError, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
-import { fetchWithTimeout, type RequestContext, withRetry } from '@cyanheads/mcp-ts-core/utils';
+import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -26,21 +25,18 @@ function withDefaultHeaders(headers?: Record<string, string>): Record<string, st
   return { 'User-Agent': USER_AGENT, ...headers };
 }
 
-/**
- * The framework HTTP utilities type their context parameter as `RequestContext`;
- * the handler `Context` is runtime-compatible (the logger strips non-serializable
- * fields). Cast once here so callers pass `ctx` unchanged.
- */
-function asRequestContext(ctx: Context): RequestContext {
-  return ctx as unknown as RequestContext;
-}
-
 /** Options shared by the JSON/text fetch helpers. */
 export interface FetchOptions {
   /** Base retry backoff. Default 400ms. */
   baseDelayMs?: number;
   /** Request body (pre-serialized JSON string, FormData, etc.). */
   body?: RequestInit['body'];
+  /**
+   * Non-2xx statuses this caller treats as an outcome rather than a failure
+   * (e.g. 404 → "no such record"). They still throw a status-mapped `McpError`
+   * for the caller to branch on, but log at `debug` instead of `error`.
+   */
+  expectedStatuses?: number[];
   /** Request headers. */
   headers?: Record<string, string>;
   /** Human-readable provider label used in error messages. */
@@ -90,13 +86,13 @@ export function fetchJson<T>(
   ctx: Context,
   opts: FetchOptions & { onEmptyBody?: () => T },
 ): Promise<T> {
-  const rctx = asRequestContext(ctx);
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   return withRetry(
     async () => {
-      const res = await fetchWithTimeout(url, timeoutMs, rctx, {
+      const res = await fetchWithTimeout(url, timeoutMs, ctx, {
         method: opts.method ?? 'GET',
         ...(opts.body !== undefined && { body: opts.body }),
+        ...(opts.expectedStatuses && { expectedStatuses: opts.expectedStatuses }),
         headers: withDefaultHeaders(opts.headers),
         signal: ctx.signal,
       });
@@ -108,7 +104,7 @@ export function fetchJson<T>(
     },
     {
       operation: opts.operation,
-      context: rctx,
+      context: ctx,
       baseDelayMs: opts.baseDelayMs ?? 400,
       ...(opts.maxRetries !== undefined && { maxRetries: opts.maxRetries }),
       signal: ctx.signal,
@@ -118,13 +114,13 @@ export function fetchJson<T>(
 
 /** Fetch raw text (coordinate files, etc.) with retry. Throws a status-mapped `McpError` on non-2xx. */
 export function fetchText(url: string, ctx: Context, opts: FetchOptions): Promise<string> {
-  const rctx = asRequestContext(ctx);
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   return withRetry(
     async () => {
-      const res = await fetchWithTimeout(url, timeoutMs, rctx, {
+      const res = await fetchWithTimeout(url, timeoutMs, ctx, {
         method: opts.method ?? 'GET',
         ...(opts.body !== undefined && { body: opts.body }),
+        ...(opts.expectedStatuses && { expectedStatuses: opts.expectedStatuses }),
         headers: withDefaultHeaders(opts.headers),
         signal: ctx.signal,
       });
@@ -132,7 +128,7 @@ export function fetchText(url: string, ctx: Context, opts: FetchOptions): Promis
     },
     {
       operation: opts.operation,
-      context: rctx,
+      context: ctx,
       baseDelayMs: opts.baseDelayMs ?? 400,
       ...(opts.maxRetries !== undefined && { maxRetries: opts.maxRetries }),
       signal: ctx.signal,
@@ -159,7 +155,6 @@ export function fetchResponse(
     maxRetries?: number;
   },
 ): Promise<Response> {
-  const rctx = asRequestContext(ctx);
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   return withRetry(
     () => {
@@ -173,7 +168,7 @@ export function fetchResponse(
     },
     {
       operation: opts.operation,
-      context: rctx,
+      context: ctx,
       baseDelayMs: opts.baseDelayMs ?? 400,
       maxRetries: opts.maxRetries ?? 2,
       signal: ctx.signal,

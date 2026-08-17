@@ -87,6 +87,7 @@ export class AlphaFoldService {
         operation: 'AlphaFoldService.getPrediction',
         label: 'AlphaFold DB',
         baseDelayMs: 300,
+        expectedStatuses: [404],
       });
     } catch (err) {
       if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) return null;

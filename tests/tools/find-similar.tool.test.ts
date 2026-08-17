@@ -318,7 +318,7 @@ describe('protein_find_similar — by:structure', () => {
 
 describe('protein_find_similar — format', () => {
   it('renders the engine header, ticket line, and per-hit scores', () => {
-    const blocks = findSimilar.format?.({
+    const blocks = findSimilar.format!({
       by: 'structure',
       engine: 'Foldseek',
       status: 'computing',
@@ -335,7 +335,7 @@ describe('protein_find_similar — format', () => {
         },
       ],
     });
-    const text = (blocks?.[0] as { text: string }).text;
+    const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('## Foldseek (by:structure) — computing');
     expect(text).toContain('**Ticket:** tkt-1');
     expect(text).toContain('### 2HHB _(experimental)_');

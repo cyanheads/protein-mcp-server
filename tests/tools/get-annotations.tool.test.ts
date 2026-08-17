@@ -347,7 +347,7 @@ describe('protein_get_annotations attribution', () => {
 
 describe('protein_get_annotations format()', () => {
   it('renders the header, ambiguity, features, variants, domains with GO terms, and attribution', () => {
-    const blocks = getAnnotations.format?.({
+    const blocks = getAnnotations.format!({
       accession: 'P69905',
       proteinName: 'Hemoglobin subunit alpha',
       geneNames: ['HBA1'],
@@ -383,7 +383,7 @@ describe('protein_get_annotations format()', () => {
         },
       ],
     });
-    const text = (blocks?.[0] as { text: string }).text;
+    const text = (blocks[0] as { text: string }).text;
 
     expect(text).toContain('P69905 — Hemoglobin subunit alpha');
     expect(text).toContain('**Genes:** HBA1');
@@ -400,13 +400,13 @@ describe('protein_get_annotations format()', () => {
   });
 
   it('collapses a single-residue range to one position', () => {
-    const blocks = getAnnotations.format?.({
+    const blocks = getAnnotations.format!({
       accession: 'P1',
       geneNames: [],
       features: [{ type: 'Binding site', start: 87 }],
       attribution: [],
     });
-    const text = (blocks?.[0] as { text: string }).text;
+    const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('**Binding site** [87]');
     expect(text).not.toContain('[87–87]');
   });

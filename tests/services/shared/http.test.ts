@@ -34,14 +34,13 @@ describe('parseJson', () => {
     }
   });
 
-  it.each([
-    '',
-    '   ',
-    '\n\t  \n',
-  ])('rejects an empty/whitespace body as ServiceUnavailable: %j', (body) => {
-    expect(() => parseJson(body, 'AlphaFold DB')).toThrow(McpError);
-    expect(() => parseJson(body, 'AlphaFold DB')).toThrowError(/empty response/i);
-  });
+  it.each(['', '   ', '\n\t  \n'])(
+    'rejects an empty/whitespace body as ServiceUnavailable: %j',
+    (body) => {
+      expect(() => parseJson(body, 'AlphaFold DB')).toThrow(McpError);
+      expect(() => parseJson(body, 'AlphaFold DB')).toThrowError(/empty response/i);
+    },
+  );
 
   it('rejects unparseable JSON as SerializationError, truncating the snippet', () => {
     const garbage = `not json ${'x'.repeat(500)}`;

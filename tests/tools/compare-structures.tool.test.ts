@@ -141,7 +141,7 @@ describe('protein_compare_structures', () => {
   });
 
   it('renders both failure detail and a job ticket in format() output', () => {
-    const blocks = compareStructures.format?.({
+    const blocks = compareStructures.format!({
       method: 'tm-align',
       reference: 'first',
       pairs: [
@@ -157,7 +157,7 @@ describe('protein_compare_structures', () => {
         { a: '4HHB', b: '9ZZZ', status: 'failed', error: 'no structure' },
       ],
     });
-    const text = (blocks?.[0] as { text: string }).text;
+    const text = (blocks[0] as { text: string }).text;
 
     expect(text).toContain('4HHB ↔ 2HHB');
     expect(text).toContain('job u1');
@@ -172,7 +172,7 @@ describe('protein_compare_structures TM-score length-normalization caveat', () =
   });
 
   it('documents the caveat on the tmScore output field, pointing at rmsd and alignedResidues', () => {
-    const js = z.toJSONSchema(compareStructures.output) as {
+    const js = z.toJSONSchema(compareStructures.output) as unknown as {
       properties: { pairs: { items: { properties: { tmScore: { description?: string } } } } };
     };
     const desc = js.properties.pairs.items.properties.tmScore.description ?? '';

@@ -36,7 +36,7 @@ describe('pdb://{entry_id}', () => {
         ligands: [{ compId: 'HEM', name: 'PROTOPORPHYRIN IX CONTAINING FE' }],
       },
     ]);
-    const params = pdbSummaryResource.params.parse({ entry_id: '4hhb' });
+    const params = pdbSummaryResource.params!.parse({ entry_id: '4hhb' });
     const out = await pdbSummaryResource.handler(
       params,
       createMockContext({ uri: new URL('pdb://4hhb') }),
@@ -54,7 +54,7 @@ describe('pdb://{entry_id}', () => {
 
   it('throws NotFound when the entry does not resolve', async () => {
     getEntries.mockResolvedValue([]);
-    const params = pdbSummaryResource.params.parse({ entry_id: '9ZZZ' });
+    const params = pdbSummaryResource.params!.parse({ entry_id: '9ZZZ' });
     await expect(
       pdbSummaryResource.handler(params, createMockContext({ uri: new URL('pdb://9zzz') })),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.NotFound });
@@ -62,7 +62,7 @@ describe('pdb://{entry_id}', () => {
 
   it('tolerates a sparse entry — omits unknown optionals, keeps required arrays', async () => {
     getEntries.mockResolvedValue([{ id: '1ABC', organisms: [], polymerEntities: [], ligands: [] }]);
-    const params = pdbSummaryResource.params.parse({ entry_id: '1ABC' });
+    const params = pdbSummaryResource.params!.parse({ entry_id: '1ABC' });
     const out = await pdbSummaryResource.handler(
       params,
       createMockContext({ uri: new URL('pdb://1abc') }),

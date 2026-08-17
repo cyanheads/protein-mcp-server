@@ -287,7 +287,7 @@ describe('protein_track_ligands — binding_site', () => {
 
 describe('protein_track_ligands — format', () => {
   it('renders ligand identifiers (SMILES/InChIKey), structure lists, and pocket residues', () => {
-    const blocks = trackLigands.format?.({
+    const blocks = trackLigands.format!({
       mode: 'find_ligand',
       ligands: [
         {
@@ -302,7 +302,7 @@ describe('protein_track_ligands — format', () => {
         },
       ],
     });
-    const text = (blocks?.[0] as { text: string }).text;
+    const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('### STI — IMATINIB');
     expect(text).toContain('**Formula:** C29 H31 N7 O');
     expect(text).toContain('**Weight:** 493.6 Da');
@@ -312,7 +312,7 @@ describe('protein_track_ligands — format', () => {
   });
 
   it('renders binding-site residues with positions and distances', () => {
-    const blocks = trackLigands.format?.({
+    const blocks = trackLigands.format!({
       mode: 'binding_site',
       bindingSites: [
         {
@@ -325,18 +325,18 @@ describe('protein_track_ligands — format', () => {
         },
       ],
     });
-    const text = (blocks?.[0] as { text: string }).text;
+    const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('### Ligand HEM (chain A)');
     expect(text).toContain('- HIS87 (chain A) — 2.10 Å');
     expect(text).toContain('- PHE (chain A)'); // no seqId, no distance
   });
 
   it('renders a structures list with the comma-joined ids and per-entry resolution', () => {
-    const blocks = trackLigands.format?.({
+    const blocks = trackLigands.format!({
       mode: 'structures_with_ligand',
       structures: [{ id: '4HHB', resolution: 1.74 }, { id: '2HHB' }],
     });
-    const text = (blocks?.[0] as { text: string }).text;
+    const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('**2 structures:**');
     expect(text).toContain('4HHB, 2HHB');
     expect(text).toContain('- 4HHB — 1.74 Å');

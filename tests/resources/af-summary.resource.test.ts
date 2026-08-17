@@ -36,7 +36,7 @@ describe('af://{uniprot}', () => {
       bcifUrl: 'https://af/bcif',
       paeDocUrl: 'https://af/pae',
     });
-    const params = afSummaryResource.params.parse({ uniprot: 'p69905' });
+    const params = afSummaryResource.params!.parse({ uniprot: 'p69905' });
     const out = await afSummaryResource.handler(params, at('p69905'));
 
     expect(out).toMatchObject({
@@ -51,7 +51,7 @@ describe('af://{uniprot}', () => {
 
   it('throws NotFound when no AlphaFold model exists', async () => {
     getPrediction.mockResolvedValue(null);
-    const params = afSummaryResource.params.parse({ uniprot: 'P00000' });
+    const params = afSummaryResource.params!.parse({ uniprot: 'P00000' });
     await expect(afSummaryResource.handler(params, at('P00000'))).rejects.toMatchObject({
       code: JsonRpcErrorCode.NotFound,
     });
@@ -59,7 +59,7 @@ describe('af://{uniprot}', () => {
 
   it('tolerates a sparse model — only the accession survives', async () => {
     getPrediction.mockResolvedValue({ uniprotAccession: 'Q12345' });
-    const params = afSummaryResource.params.parse({ uniprot: 'Q12345' });
+    const params = afSummaryResource.params!.parse({ uniprot: 'Q12345' });
     const out = await afSummaryResource.handler(params, at('Q12345'));
 
     expect(out).toEqual({ uniprotAccession: 'Q12345' });
