@@ -26,6 +26,13 @@ export interface CompareStructure {
 /** Scores for one aligned pair. */
 export interface PairScores {
   alignedResidues?: number;
+  /**
+   * Alignment coverage as a 0–100 percentage of each structure's *own* modeled
+   * length, ordered `[a, b]` to match the submitted structures.
+   */
+  coverage?: [number, number];
+  /** Modeled residue count per structure, ordered `[a, b]` as submitted. */
+  modeledResidues?: [number, number];
   rmsd?: number;
   sequenceIdentity?: number;
   tmScore?: number;
@@ -156,9 +163,10 @@ function toQueryStructure(s: CompareStructure): Record<string, unknown> {
 }
 
 /**
- * Extract TM-score / RMSD / aligned-residue count from a result row. The summary
- * carries a heterogeneous `scores` array (`{ type, value }`); match by type name
- * so a field rename upstream degrades a single metric rather than the whole row.
+ * Extract TM-score / RMSD / aligned-residue count and the per-structure
+ * modeled-length and coverage tuples from a result row. The summary carries a
+ * heterogeneous `scores` array (`{ type, value }`); match by type name so a field
+ * rename upstream degrades a single metric rather than the whole row.
  */
 function normalizeScores(result: RawAlignmentResult): PairScores {
   const summary = result.summary ?? {};
@@ -174,11 +182,26 @@ function normalizeScores(result: RawAlignmentResult): PairScores {
     summary.aligned_residues ??
     summary.n_aligned_residues ??
     byType(/aligned/i);
+  const modeled = numberPair(summary.n_modeled_residues);
+  const coverage = numberPair(summary.aln_coverage);
   if (typeof tm === 'number') out.tmScore = tm;
   if (typeof rmsd === 'number') out.rmsd = rmsd;
   if (typeof seqId === 'number') out.sequenceIdentity = seqId;
   if (typeof aligned === 'number') out.alignedResidues = aligned;
+  if (modeled) out.modeledResidues = modeled;
+  if (coverage) out.coverage = coverage;
   return out;
+}
+
+/**
+ * Accept a summary field only as exactly two numbers — one per submitted
+ * structure. Anything else is upstream drift and degrades to an absent field.
+ */
+function numberPair(value: unknown): [number, number] | undefined {
+  if (!Array.isArray(value) || value.length !== 2) return;
+  const [a, b] = value;
+  if (typeof a !== 'number' || typeof b !== 'number') return;
+  return [a, b];
 }
 
 interface RawAlignmentResponse {
@@ -192,6 +215,10 @@ interface RawAlignmentResult {
     n_aln_residue_pairs?: number;
     aligned_residues?: number;
     n_aligned_residues?: number;
+    /** Modeled residue count per structure, in submitted order. */
+    n_modeled_residues?: unknown;
+    /** Alignment coverage (0–100%) per structure, in submitted order. */
+    aln_coverage?: unknown;
   };
 }
 

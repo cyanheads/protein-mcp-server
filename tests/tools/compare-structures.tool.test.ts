@@ -163,6 +163,109 @@ describe('protein_compare_structures', () => {
     expect(text).toContain('job u1');
     expect(text).toContain('no structure');
   });
+
+  it('keys resume entries on a delimited pair key, so labels that concatenate alike do not collide', async () => {
+    // Labels '1AB' + 'C' and '1A' + 'BC' both concatenate to '1ABC'; only a
+    // delimiter between them keeps the two pairs distinct.
+    const input = compareStructures.input.parse({
+      structures: [{ pdb_id: '1AB' }, { pdb_id: 'C' }],
+      reference: 'first',
+      resume: [{ a: '1A', b: 'BC', uuid: 'u' }],
+    });
+    await expect(compareStructures.handler(input, ctx())).rejects.toMatchObject({
+      data: { reason: 'resume_pair_unmatched' },
+    });
+    expect(resumePair).not.toHaveBeenCalled();
+  });
+});
+
+describe('protein_compare_structures per-structure length and coverage', () => {
+  it('carries modeledResidues and coverage from the alignment scores into the pair row', async () => {
+    comparePair.mockResolvedValue({
+      status: 'complete',
+      uuid: 'u',
+      scores: {
+        tmScore: 0.71,
+        rmsd: 2.4,
+        alignedResidues: 141,
+        modeledResidues: [141, 153],
+        coverage: [100, 92],
+      },
+    });
+    const input = compareStructures.input.parse({
+      structures: [
+        { pdb_id: '2HHB', chain: 'A' },
+        { pdb_id: '1MBN', chain: 'A' },
+      ],
+    });
+    const out = await compareStructures.handler(input, ctx());
+
+    expect(out.pairs[0]).toMatchObject({
+      a: '2HHB.A',
+      b: '1MBN.A',
+      status: 'complete',
+      modeledResidues: [141, 153],
+      coverage: [100, 92],
+    });
+    expect(out).toEqual(expect.schemaMatching(compareStructures.output));
+  });
+
+  it('omits both fields when the alignment result carries neither', async () => {
+    comparePair.mockResolvedValue({ status: 'complete', uuid: 'u', scores: { tmScore: 0.9 } });
+    const input = compareStructures.input.parse({
+      structures: [{ pdb_id: '4HHB' }, { pdb_id: '2HHB' }],
+    });
+    const out = await compareStructures.handler(input, ctx());
+
+    expect(out.pairs[0]).not.toHaveProperty('modeledResidues');
+    expect(out.pairs[0]).not.toHaveProperty('coverage');
+  });
+
+  it('renders modeled residues and coverage in format() output', () => {
+    const blocks = compareStructures.format!({
+      method: 'tm-align',
+      reference: 'first',
+      pairs: [
+        {
+          a: '2HHB.A',
+          b: '1MBN.A',
+          status: 'complete',
+          tmScore: 0.71,
+          rmsd: 2.4,
+          alignedResidues: 141,
+          modeledResidues: [141, 153],
+          coverage: [100, 92],
+          uuid: 'u1',
+        },
+      ],
+    });
+    const text = (blocks[0] as { text: string }).text;
+
+    expect(text).toContain('141 / 153');
+    expect(text).toContain('100 / 92');
+  });
+
+  it('documents the own-length coverage denominator on the coverage output field', () => {
+    const js = z.toJSONSchema(compareStructures.output) as unknown as {
+      properties: {
+        pairs: {
+          items: {
+            properties: {
+              coverage: { description?: string };
+              modeledResidues: { description?: string };
+            };
+          };
+        };
+      };
+    };
+    const props = js.properties.pairs.items.properties;
+    // The denominator is each structure's OWN modeled length, not the shorter of
+    // the pair — the whole point of surfacing the two side by side.
+    expect(props.coverage.description ?? '').toMatch(/own/i);
+    expect(props.coverage.description ?? '').toMatch(/0–100|0-100/);
+    expect(props.coverage.description ?? '').toMatch(/\[a, b\]/);
+    expect(props.modeledResidues.description ?? '').toMatch(/\[a, b\]/);
+  });
 });
 
 describe('protein_compare_structures TM-score length-normalization caveat', () => {

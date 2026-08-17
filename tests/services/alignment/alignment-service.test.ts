@@ -1,7 +1,8 @@
 /**
  * @fileoverview Tests for the RCSB alignment service: submit-UUID unwrapping, the
- * heterogeneous result `scores` normalization (against the real API shape), and
- * the complete / computing / failed outcome branches — with the HTTP layer mocked.
+ * heterogeneous result `scores` normalization (against the real API shape), the
+ * per-structure modeled-residue / coverage tuples and their arity guard, and the
+ * complete / computing / failed outcome branches — with the HTTP layer mocked.
  * @module tests/services/alignment/alignment-service.test
  */
 
@@ -69,6 +70,11 @@ describe('AlignmentService.comparePair', () => {
       uuid: 'abc-123',
       scores: { tmScore: 0.98, rmsd: 0.42, sequenceIdentity: 1, alignedResidues: 141 },
     });
+    // READY_PAYLOAD carries no n_modeled_residues / aln_coverage — the parser
+    // omits them rather than throwing or fabricating a tuple.
+    if (out.status !== 'complete') throw new Error('expected complete');
+    expect(out.scores).not.toHaveProperty('modeledResidues');
+    expect(out.scores).not.toHaveProperty('coverage');
   });
 
   it('returns computing while the result poll keeps 404-ing within the budget', async () => {
@@ -138,6 +144,79 @@ describe('AlignmentService.comparePair', () => {
       status: 'complete',
       scores: { tmScore: 0.77, rmsd: 1.23, sequenceIdentity: 0.4, alignedResidues: 88 },
     });
+  });
+
+  it('parses per-structure modeled-residue counts and alignment coverage, ordered [a, b]', async () => {
+    // Live tm-align shape for 2HHB.A (141 modeled) ↔ 1MBN.A (153 modeled) with 141
+    // aligned pairs: coverage is a percentage of each structure's OWN modeled
+    // length — 141/141 = 100 and 141/153 ≈ 92 — not of the shorter of the pair.
+    fetchTextMock.mockResolvedValue('"u"');
+    fetchResponseMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          results: [
+            {
+              summary: {
+                scores: [{ type: 'TM-score', value: 0.71 }],
+                n_aln_residue_pairs: 141,
+                n_modeled_residues: [141, 153],
+                aln_coverage: [100, 92],
+              },
+            },
+          ],
+        }),
+    } as Response);
+
+    const out = await service().comparePair(
+      { entryId: '2HHB', asymId: 'A' },
+      { entryId: '1MBN', asymId: 'A' },
+      'tm-align',
+      1000,
+      createMockContext(),
+    );
+
+    expect(out).toMatchObject({
+      status: 'complete',
+      scores: {
+        tmScore: 0.71,
+        alignedResidues: 141,
+        modeledResidues: [141, 153],
+        coverage: [100, 92],
+      },
+    });
+  });
+
+  it('ignores a modeled-residue or coverage field that is not a two-number tuple', async () => {
+    fetchTextMock.mockResolvedValue('"u"');
+    fetchResponseMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          results: [
+            {
+              summary: {
+                scores: [{ type: 'TM-score', value: 0.9 }],
+                n_modeled_residues: [141], // wrong arity
+                aln_coverage: ['100', '92'], // wrong element type
+              },
+            },
+          ],
+        }),
+    } as Response);
+
+    const out = await service().comparePair(
+      { entryId: '4HHB' },
+      { entryId: '2HHB' },
+      'tm-align',
+      1000,
+      createMockContext(),
+    );
+
+    // A malformed summary field degrades itself, never the row.
+    expect(out).toEqual({ status: 'complete', uuid: 'u', scores: { tmScore: 0.9 } });
   });
 
   it('emits only the metrics present — a missing score degrades its field, not the row', async () => {

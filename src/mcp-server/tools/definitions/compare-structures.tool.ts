@@ -98,6 +98,20 @@ const outputSchema = z.object({
             ),
           rmsd: z.number().optional().describe('RMSD in Å over aligned residues.'),
           alignedResidues: z.number().optional().describe('Number of aligned residue pairs.'),
+          modeledResidues: z
+            .array(z.number())
+            .length(2)
+            .optional()
+            .describe(
+              'Modeled residue count per structure, ordered [a, b] to match this pair. A large gap between the two is the terminal-length asymmetry that can depress tmScore.',
+            ),
+          coverage: z
+            .array(z.number())
+            .length(2)
+            .optional()
+            .describe(
+              "Alignment coverage per structure as a 0–100 percentage of that structure's own modeled-residue count — not of the full sequence and not of the shorter structure — ordered [a, b] to match this pair. Read alongside modeledResidues: equal aligned counts give the shorter structure the higher coverage.",
+            ),
           uuid: z
             .string()
             .optional()
@@ -120,10 +134,11 @@ export const compareStructures = tool('protein_compare_structures', {
     'job, fanned out with a concurrency cap and per-pair partial success — a pair still computing when the ' +
     'budget elapses returns status "computing" with its job UUID, and a failed pair degrades its row without ' +
     "sinking the others. Re-call with a matching entry in resume[] to poll a computing pair's UUID instead " +
-    'of resubmitting. Returns TM-score, RMSD, and aligned-residue count per pair. TM-score is ' +
+    "of resubmitting. Returns TM-score, RMSD, and aligned-residue count per pair, plus each structure's " +
+    'modeled-residue count and alignment coverage. TM-score is ' +
     'length-normalized and can shift sharply between structures that differ only by a terminal residue or ' +
-    'two — the greedy superposition can settle into a worse local optimum — so read tmScore alongside rmsd ' +
-    'and alignedResidues, the columns that make such cases diagnosable.',
+    'two — the greedy superposition can settle into a worse local optimum — so read tmScore alongside rmsd, ' +
+    'alignedResidues, modeledResidues and coverage, the columns that make such cases diagnosable.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   errors: [
@@ -197,6 +212,10 @@ export const compareStructures = tool('protein_compare_structures', {
           ...(typeof outcome.scores.alignedResidues === 'number'
             ? { alignedResidues: outcome.scores.alignedResidues }
             : {}),
+          ...(outcome.scores.modeledResidues
+            ? { modeledResidues: outcome.scores.modeledResidues }
+            : {}),
+          ...(outcome.scores.coverage ? { coverage: outcome.scores.coverage } : {}),
         };
       }
       if (outcome.status === 'computing') {
@@ -221,13 +240,19 @@ export const compareStructures = tool('protein_compare_structures', {
 
   format: (result) => {
     const lines: string[] = [`## Structure comparison (${result.method}, ${result.reference})`];
-    lines.push('\n| Pair | Status | TM-score | RMSD (Å) | Aligned |');
-    lines.push('|---|---|---|---|---|');
+    lines.push(
+      '\n| Pair | Status | TM-score | RMSD (Å) | Aligned | Modeled a / b | Coverage % a / b |',
+    );
+    lines.push('|---|---|---|---|---|---|---|');
     for (const p of result.pairs) {
       const tm = typeof p.tmScore === 'number' ? p.tmScore.toFixed(3) : '—';
       const rmsd = typeof p.rmsd === 'number' ? p.rmsd.toFixed(2) : '—';
       const aligned = typeof p.alignedResidues === 'number' ? String(p.alignedResidues) : '—';
-      lines.push(`| ${p.a} ↔ ${p.b} | ${p.status} | ${tm} | ${rmsd} | ${aligned} |`);
+      const modeled = p.modeledResidues ? p.modeledResidues.join(' / ') : '—';
+      const coverage = p.coverage ? p.coverage.join(' / ') : '—';
+      lines.push(
+        `| ${p.a} ↔ ${p.b} | ${p.status} | ${tm} | ${rmsd} | ${aligned} | ${modeled} | ${coverage} |`,
+      );
     }
     const notes = result.pairs.filter((p) => p.error || p.uuid);
     if (notes.length > 0) {
@@ -278,5 +303,5 @@ function label(s: StructInput): string {
  * resume entry matches its pair regardless of which side the client copied first.
  */
 function pairKey(a: string, b: string): string {
-  return [a.toUpperCase(), b.toUpperCase()].sort().join(' ');
+  return [a.toUpperCase(), b.toUpperCase()].sort().join('\u0000');
 }
