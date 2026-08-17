@@ -1,8 +1,10 @@
 /**
  * @fileoverview Tests for the Foldseek service: ticket submit → poll → result
  * flow, target-header parsing (AF-/PDB-/other), hit normalization across the real
- * nested results shape, the limit cap mid-database, the COMPLETE/ERROR/pending
- * status branches, and the never-throws degrade-to-failed contract. HTTP mocked.
+ * nested results shape (including the percentage-scale `seqId` → 0–1
+ * `sequenceIdentity` conversion), the limit cap mid-database, the
+ * COMPLETE/ERROR/pending status branches, and the never-throws
+ * degrade-to-failed contract. HTTP mocked.
  * @module tests/services/foldseek/foldseek-service.test
  */
 
@@ -39,15 +41,19 @@ const params = (over: Partial<Parameters<FoldseekService['search']>[0]> = {}) =>
   ...over,
 });
 
-/** A real Foldseek result payload: per-DB groups, each an array of alignment arrays. */
+/**
+ * A real Foldseek result payload: per-DB groups, each an array of alignment
+ * arrays. `seqId` is percentage-scale upstream (MMseqs2-App emits 0–100 for
+ * structure search), so these fixtures carry the values the live API returns.
+ */
 const RESULT = {
   results: [
     {
       db: 'pdb100',
       alignments: [
         [
-          { target: '2HHB-A', seqId: 0.99, alnLength: 141, prob: 1, eval: 1e-30, score: 800 },
-          { target: '1A3N_B', seqId: 0.95, score: 750 },
+          { target: '2HHB-A', seqId: 99, alnLength: 141, prob: 1, eval: 1e-30, score: 800 },
+          { target: '1A3N_B', seqId: 95, score: 750 },
         ],
       ],
     },
@@ -87,7 +93,12 @@ describe('FoldseekService.search — complete flow', () => {
       score: 800,
     });
     // PDB target with underscore separator, sparse scores (omitted, not zeroed)
-    expect(out.hits[1]).toMatchObject({ pdbId: '1A3N', chain: 'B', targetType: 'pdb' });
+    expect(out.hits[1]).toMatchObject({
+      pdbId: '1A3N',
+      chain: 'B',
+      targetType: 'pdb',
+      sequenceIdentity: 0.95,
+    });
     expect(out.hits[1]).not.toHaveProperty('evalue');
     // AlphaFold target → uniprot accession
     expect(out.hits[2]).toMatchObject({
@@ -96,6 +107,46 @@ describe('FoldseekService.search — complete flow', () => {
       targetType: 'alphafold',
       uniprotAccession: 'P69905',
     });
+  });
+
+  it('normalizes percentage-scale seqId to a 0–1 sequenceIdentity at the boundaries', async () => {
+    fetchJsonMock
+      .mockResolvedValueOnce({ id: 't' })
+      .mockResolvedValueOnce({ status: 'COMPLETE' })
+      .mockResolvedValueOnce({
+        results: [
+          {
+            db: 'pdb100',
+            alignments: [
+              [
+                { target: '1AAA_A', seqId: 100 },
+                { target: '1BBB_A', seqId: 0 },
+                { target: '1CCC_A', seqId: 81.4 },
+              ],
+            ],
+          },
+        ],
+      });
+
+    const out = await service().search(params(), createMockContext());
+    if (out.status !== 'complete') throw new Error('expected complete');
+    expect(out.hits[0]?.sequenceIdentity).toBe(1);
+    expect(out.hits[1]?.sequenceIdentity).toBe(0);
+    expect(out.hits[2]?.sequenceIdentity).toBeCloseTo(0.814, 10);
+  });
+
+  it('leaves sequenceIdentity absent when the alignment carries no seqId', async () => {
+    fetchJsonMock
+      .mockResolvedValueOnce({ id: 't' })
+      .mockResolvedValueOnce({ status: 'COMPLETE' })
+      .mockResolvedValueOnce({
+        results: [{ db: 'pdb100', alignments: [[{ target: '1DDD_A', score: 100 }]] }],
+      });
+
+    const out = await service().search(params(), createMockContext());
+    if (out.status !== 'complete') throw new Error('expected complete');
+    // Sparse upstream field stays undefined — never 0, never NaN.
+    expect(out.hits[0]).not.toHaveProperty('sequenceIdentity');
   });
 
   it('caps hits at the limit, even mid-database', async () => {

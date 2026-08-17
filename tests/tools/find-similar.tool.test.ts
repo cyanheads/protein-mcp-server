@@ -76,6 +76,9 @@ describe('protein_find_similar — by:sequence', () => {
       title: 'Deoxyhaemoglobin',
       organism: 'Homo sapiens',
     });
+    // The RCSB mmseqs2 path emits no identity field at all — min_identity is an
+    // input filter there, not a per-hit score.
+    expect(out.hits[0]).not.toHaveProperty('identity');
     // Whitespace is stripped before the sequence search.
     expect(searchSequence.mock.calls[0]?.[0]).toBe('MVLSPADK');
     expect(getEnrichment(c)).toMatchObject({ totalCount: 42 });
@@ -181,6 +184,7 @@ describe('protein_find_similar — by:structure', () => {
           chain: 'A',
           score: 800,
           evalue: 1e-30,
+          sequenceIdentity: 0.87,
         },
         {
           target: 'AF-P69905-F1',
@@ -197,17 +201,48 @@ describe('protein_find_similar — by:structure', () => {
     );
 
     expect(out).toMatchObject({ by: 'structure', engine: 'Foldseek', status: 'complete' });
+    // identity passes the service's already-normalized 0–1 value straight through.
     expect(out.hits[0]).toMatchObject({
       id: '2HHB',
       source: 'experimental',
       score: 800,
       evalue: 1e-30,
+      identity: 0.87,
     });
     expect(out.hits[1]).toMatchObject({
       id: 'P69905',
       source: 'predicted',
       uniprotAccession: 'P69905',
     });
+    // A hit whose alignment carried no seqId reports no identity at all.
+    expect(out.hits[1]).not.toHaveProperty('identity');
+  });
+
+  it('reports identity in 0–1 for a self-identical structural match, never 100', async () => {
+    // The live Foldseek path returns seqId: 100 for a near-identical fold; the
+    // service normalizes it, so the tool's declared 0–1 identity contract holds.
+    fetchTextMock.mockResolvedValue('ATOM ...');
+    foldseekSearch.mockResolvedValue({
+      status: 'complete',
+      ticketId: 't1',
+      hits: [
+        {
+          target: '1Y45-A',
+          database: 'pdb100',
+          targetType: 'pdb',
+          pdbId: '1Y45',
+          chain: 'A',
+          score: 920,
+          sequenceIdentity: 1,
+        },
+      ],
+    });
+    const out = await findSimilar.handler(
+      findSimilar.input.parse({ by: 'structure', pdb_id: '4HHB' }),
+      ctx(),
+    );
+    expect(out.hits[0]?.identity).toBe(1);
+    expect(out.hits[0]?.identity).toBeLessThanOrEqual(1);
   });
 
   it('returns status:computing with the ticket when the job is still running', async () => {

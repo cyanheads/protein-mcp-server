@@ -31,7 +31,7 @@ export interface FoldseekHit {
   probability?: number;
   /** Alignment bit score. */
   score?: number;
-  /** Sequence identity (0–1) over the alignment. */
+  /** Sequence identity (0–1) over the alignment, normalized from upstream's 0–100 `seqId`. */
   sequenceIdentity?: number;
   /** Raw target identifier as returned by Foldseek. */
   target: string;
@@ -211,7 +211,11 @@ export class FoldseekService {
 function normalizeHit(aln: RawAlignment, database: string): FoldseekHit {
   const target = aln.target as string;
   const hit: FoldseekHit = { target, database, ...parseTarget(target) };
-  if (typeof aln.seqId === 'number') hit.sequenceIdentity = aln.seqId;
+  // Upstream (MMseqs2-App, which serves search.foldseek.com) emits `seqId` on a
+  // 0–100 percentage scale for structure search, while this server declares
+  // sequence identity as a 0–1 fraction (matching the `min_identity` inputs on
+  // the RCSB paths), so convert once at the service boundary.
+  if (typeof aln.seqId === 'number') hit.sequenceIdentity = aln.seqId / 100;
   if (typeof aln.alnLength === 'number') hit.alignmentLength = aln.alnLength;
   if (typeof aln.prob === 'number') hit.probability = aln.prob;
   if (typeof aln.eval === 'number') hit.evalue = aln.eval;
@@ -240,6 +244,7 @@ interface RawAlignment {
   eval?: number;
   prob?: number;
   score?: number;
+  /** Sequence identity as a 0–100 percentage — normalized to 0–1 in `normalizeHit`. */
   seqId?: number;
   target?: string;
 }
