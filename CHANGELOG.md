@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-08-16 · ⚠️ Breaking
+
+protein_analyze_collection's nested facet child is now a single optional field instead of an array, and all three collection/comparison tools reject duplicate or ambiguous inputs with typed errors.
+
 ## [0.4.2](changelog/0.4.x/0.4.2.md) — 2026-08-16
 
 protein_find_similar's Foldseek identity score now returns a 0–1 fraction as declared, protein_get_structure and af:// no longer lose a whole predicted-source batch to one malformed ID, and protein_compare_structures reports per-structure modeled-residue count and coverage.
