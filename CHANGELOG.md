@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.1](changelog/0.5.x/0.5.1.md) — 2026-08-16
+
+protein_analyze_collection reports the realized bucket total, and bucket_limit's per-dimension-level semantics are now stated explicitly everywhere it's described.
+
 ## [0.5.0](changelog/0.5.x/0.5.0.md) — 2026-08-16 · ⚠️ Breaking
 
 protein_analyze_collection's nested facet child is now a single optional field instead of an array, and all three collection/comparison tools reject duplicate or ambiguous inputs with typed errors.
