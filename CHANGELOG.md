@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.2](changelog/0.5.x/0.5.2.md) — 2026-08-25 · ⚠️ Breaking
+
+Tool inputs are strict now — an unrecognized argument key is rejected instead of stripped — and cache hints let 2026-07-28 clients hold listings and resource reads for up to an hour; HTTP session mode is pinned to stateless.
+
 ## [0.5.1](changelog/0.5.x/0.5.1.md) — 2026-08-16
 
 protein_analyze_collection reports the realized bucket total, and bucket_limit's per-dimension-level semantics are now stated explicitly everywhere it's described.
