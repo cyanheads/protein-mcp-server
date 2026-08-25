@@ -41,6 +41,21 @@ await createApp({
   prompts: [],
   // Public, keyless data server — serve the full inventory to unauthenticated callers.
   landing: { requireAuth: false },
+  /**
+   * Cache hints for protocol revision 2026-07-28. Every listing is static per
+   * build and identical for every caller — no auth-gated definitions, no
+   * per-tenant filtering — so a shared cache may hold them. `resources/read`
+   * serves PDB and AlphaFold summaries, whose upstreams publish on a weekly
+   * (PDB) and per-release (AlphaFold) cadence; an hour of staleness sits well
+   * inside both. 2025-era responses are unaffected either way.
+   */
+  cacheHints: {
+    'tools/list': { ttlMs: 3_600_000, cacheScope: 'public' },
+    'resources/list': { ttlMs: 3_600_000, cacheScope: 'public' },
+    'resources/templates/list': { ttlMs: 3_600_000, cacheScope: 'public' },
+    'server/discover': { ttlMs: 3_600_000, cacheScope: 'public' },
+    'resources/read': { ttlMs: 3_600_000, cacheScope: 'public' },
+  },
   instructions:
     'protein-mcp-server federates experimental (PDB) and predicted (AlphaFold) protein structures: search structures by text, sequence, or organism/method/resolution (protein_search_structures); fetch metadata and coordinate URLs for PDB IDs or UniProt accessions (protein_get_structure); find sequence or fold homologs via mmseqs2 or Foldseek (protein_find_similar); resolve ligands and map binding-site residues (protein_track_ligands); align 2–10 structures with TM-align or jFATCAT (protein_compare_structures); profile the PDB with server-side facet distributions and trends (protein_analyze_collection); and pull UniProt features plus InterPro domains and GO terms (protein_get_annotations).',
   setup(core) {
