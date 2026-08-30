@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.5.3](changelog/0.5.x/0.5.3.md) — 2026-08-30
+
+RCSB-backed tools support offset pagination; structure searches accept method or resolution criteria alone, retain chainable sequence-hit IDs, and enrich every entry on a returned sequence page.
+
 ## [0.5.2](changelog/0.5.x/0.5.2.md) — 2026-08-25 · ⚠️ Breaking
 
 Tool inputs are strict now — an unrecognized argument key is rejected instead of stripped — and cache hints let 2026-07-28 clients hold listings and resource reads for up to an hour; HTTP session mode is pinned to stateless.
