@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.5.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.5.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -47,7 +47,8 @@ Federated search across experimental (PDB) and predicted (computed-model) struct
 
 - Free-text, protein-sequence (triggers an mmseqs2 similarity search), and organism / method / resolution filters
 - `content_type` scopes the search to `experimental`, `predicted`, or `all` — the default `all` is a genuine union of both universes, so computed models appear alongside PDB entries
-- Every hit names its `source`; experimental hits are enriched with title, method, resolution, and organism, while computed models carry the UniProt accession parsed from their ID
+- Every hit names its `source`; experimental sequence hits expose a chainable PDB entry `id` plus the matched polymer `entityId`, with title, method, resolution, and organism enrichment, while computed models retain their complete model ID and parsed UniProt accession
+- `start` and `limit` page through ranked results; `nextStart` is returned while another page remains
 - Optional `facets` return a method / organism / release-year breakdown alongside the hits at no extra call, each reporting how many matches carry no value for that dimension; each dimension may be listed once
 - Chain hit IDs straight into `protein_get_structure`
 
@@ -72,6 +73,7 @@ Find structurally or evolutionarily related proteins, by sequence or by fold.
 
 - `by: sequence` runs a synchronous RCSB mmseqs2 search; `by: structure` runs an asynchronous Foldseek search against experimental and predicted databases
 - Query from a raw one-letter sequence, a PDB ID, or a UniProt accession
+- Sequence searches accept `start` with `limit` and return `nextStart` while another page remains
 - Foldseek targets default to `pdb100` + `afdb50`; override via `databases` (e.g. `afdb-swissprot`, `BFVD`)
 - Async jobs that exceed the poll budget return `status: computing` with a `ticketId` — re-call with `ticket_id` set to that value to poll the same job instead of resubmitting
 - Each hit names the engine and source database it came from
@@ -84,8 +86,11 @@ Ligand discovery and binding-site analysis across the PDB.
 
 - `mode: find_ligand` resolves a name or formula to chemical component IDs with formula, weight, SMILES, and InChIKey
 - `mode: structures_with_ligand` returns PDB entries containing a ligand by exact component ID
+- `mode: structures_with_ligand` accepts `start` with `limit` and returns `nextStart` while another page remains
 - `mode: binding_site` returns the protein residues lining a ligand's pocket in a structure, with contact distances
 - Binding sites are experimental-only — computed from deposited coordinates (predicted models carry no bound ligands)
+
+Paged RCSB results preserve the upstream order within each response. Resolution ties and changes in the live corpus mean traversal is best-effort across calls, not a stable export snapshot.
 
 ---
 
