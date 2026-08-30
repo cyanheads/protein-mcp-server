@@ -54,6 +54,12 @@ const inputSchema = z.object({
     .optional()
     .describe('Minimum sequence identity 0–1 (by:sequence). Default 0.'),
   limit: z.number().int().min(1).max(100).default(25).describe('Maximum hits to return (1–100).'),
+  start: z
+    .number()
+    .int()
+    .min(0)
+    .default(0)
+    .describe('Zero-based result offset (by:sequence only).'),
 });
 
 const outputSchema = z.object({
@@ -111,6 +117,11 @@ const enrichmentShape = {
     .number()
     .optional()
     .describe('Total upstream matches before pagination (by:sequence).'),
+  start: z.number().optional().describe('Zero-based offset of the sequence-result page.'),
+  nextStart: z
+    .number()
+    .optional()
+    .describe('Offset for the next sequence-result page; absent on the final or past-end page.'),
   notice: z.string().optional().describe('Advisory note (still computing, empty results).'),
 };
 
@@ -169,7 +180,7 @@ export const findSimilar = tool('protein_find_similar', {
 
   handler(input, ctx): Promise<FindSimilarOutput> {
     const cfg = getServerConfig();
-    if (input.by === 'sequence') return runSequence(input, cfg.facetBucketCap, ctx);
+    if (input.by === 'sequence') return runSequence(input, ctx);
     return runStructure(input, cfg.asyncPollTimeoutMs, ctx);
   },
 
@@ -195,11 +206,7 @@ export const findSimilar = tool('protein_find_similar', {
   },
 });
 
-async function runSequence(
-  input: FindSimilarInput,
-  enrichLimit: number,
-  ctx: Ctx,
-): Promise<FindSimilarOutput> {
+async function runSequence(input: FindSimilarInput, ctx: Ctx): Promise<FindSimilarOutput> {
   const rcsb = getRcsbService();
   const sequence = await resolveSequence(input, ctx);
 
@@ -209,17 +216,23 @@ async function runSequence(
       ...(typeof input.max_evalue === 'number' ? { maxEvalue: input.max_evalue } : {}),
       ...(typeof input.min_identity === 'number' ? { minIdentity: input.min_identity } : {}),
       limit: input.limit,
+      start: input.start,
     },
     ctx,
   );
 
-  const entryIds = [...new Set(result.hits.map((h) => entryIdOf(h.id)))].slice(0, enrichLimit);
+  const entryIds = [...new Set(result.hits.map((h) => entryIdOf(h.id)))];
   const metaById = new Map<string, EntryMeta>();
   if (entryIds.length > 0) {
     for (const meta of await rcsb.getEntries(entryIds, ctx)) metaById.set(meta.id, meta);
   }
 
   ctx.enrich.total(result.total);
+  const nextStart = input.start + result.hits.length;
+  ctx.enrich({
+    start: input.start,
+    ...(nextStart < result.total ? { nextStart } : {}),
+  });
   if (result.hits.length === 0)
     ctx.enrich.notice('No sequence-similar entries found. Lower min_identity or raise max_evalue.');
 

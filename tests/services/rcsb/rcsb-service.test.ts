@@ -67,6 +67,32 @@ describe('buildQuery', () => {
       }),
     );
   });
+
+  it('builds standalone method and resolution terminals', () => {
+    expect(buildQuery({ method: 'ELECTRON MICROSCOPY' })).toMatchObject({
+      type: 'terminal',
+      service: 'text',
+      parameters: { attribute: 'exptl.method', operator: 'exact_match' },
+    });
+    expect(buildQuery({ maxResolution: 2.5 })).toMatchObject({
+      type: 'terminal',
+      service: 'text',
+      parameters: {
+        attribute: 'rcsb_entry_info.resolution_combined',
+        operator: 'less_or_equal',
+        value: 2.5,
+      },
+    });
+  });
+
+  it('combines method and resolution terminals with logical AND', () => {
+    const query = buildQuery({ method: 'ELECTRON MICROSCOPY', maxResolution: 3 }) as {
+      logical_operator: string;
+      nodes: unknown[];
+    };
+    expect(query.logical_operator).toBe('and');
+    expect(query.nodes).toHaveLength(2);
+  });
 });
 
 describe('toRcsbFacet', () => {

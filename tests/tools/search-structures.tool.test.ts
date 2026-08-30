@@ -37,6 +37,53 @@ describe('protein_search_structures', () => {
     });
   });
 
+  it('accepts method and maximum resolution as independent or combined criteria', async () => {
+    search.mockResolvedValue({ total: 0, hits: [] });
+    getEntries.mockResolvedValue([]);
+
+    for (const input of [
+      { method: 'ELECTRON MICROSCOPY' },
+      { max_resolution: 2.5 },
+      { method: 'ELECTRON MICROSCOPY', max_resolution: 3 },
+    ]) {
+      search.mockClear();
+      await searchStructures.handler(searchStructures.input.parse(input), ctx());
+      expect(search).toHaveBeenCalledOnce();
+    }
+  });
+
+  it('keeps filter-only zero-result searches on the normal empty-result path', async () => {
+    const c = ctx();
+    search.mockResolvedValue({ total: 0, hits: [] });
+    getEntries.mockResolvedValue([]);
+
+    const out = await searchStructures.handler(
+      searchStructures.input.parse({ method: 'X-RAY DIFFRACTION', max_resolution: 1.5 }),
+      c,
+    );
+
+    expect(out.hits).toEqual([]);
+    expect(getEnrichment(c)).toMatchObject({
+      totalCount: 0,
+      start: 0,
+      notice: expect.stringMatching(/No structures matched/),
+    });
+  });
+
+  it.each([
+    ['sequence modifiers', { min_identity: 0.5 }],
+    ['sequence modifiers', { max_evalue: 0.01 }],
+    ['content type', { content_type: 'experimental' as const }],
+    ['facets', { facets: ['method' as const] }],
+    ['limit', { limit: 10 }],
+    ['offset', { start: 10 }],
+  ] as const)('rejects non-node search modifiers without criteria: %s', async (_label, input) => {
+    await expect(
+      searchStructures.handler(searchStructures.input.parse(input), ctx()),
+    ).rejects.toMatchObject({ data: { reason: 'no_criteria' } });
+    expect(search).not.toHaveBeenCalled();
+  });
+
   it('rejects a repeated facets dimension before any upstream call (#35)', async () => {
     await expect(
       searchStructures.handler(
@@ -208,6 +255,74 @@ describe('protein_search_structures', () => {
       organism: 'Homo sapiens',
     });
     expect(getEnrichment(c)).toMatchObject({ totalCount: 9064, effectiveQuery: 'hemoglobin' });
+  });
+
+  it('uses bare entry IDs for sequence-hit metadata lookup', async () => {
+    search.mockResolvedValue({ total: 1, hits: [{ id: '1A00_1', score: 1 }] });
+    getEntries.mockResolvedValue([]);
+
+    await searchStructures.handler(searchStructures.input.parse({ sequence: 'MVLSPADK' }), ctx());
+
+    expect(getEntries).toHaveBeenCalledWith(['1A00'], expect.anything());
+  });
+
+  it('returns a chainable bare ID plus raw entityId for experimental sequence hits', async () => {
+    search.mockResolvedValue({ total: 1, hits: [{ id: '1A00_1', score: 1 }] });
+    getEntries.mockResolvedValue([]);
+
+    const result = (await runToolContract(searchStructures, {
+      sequence: 'MVLSPADK',
+      limit: 1,
+    })) as {
+      structuredContent: { hits: Array<{ id: string; entityId?: string }> };
+      content: Array<{ text: string }>;
+    };
+
+    expect(result.structuredContent.hits[0]).toMatchObject({ id: '1A00', entityId: '1A00_1' });
+    expect(result.content[0]?.text).toContain('**Entity:** 1A00_1');
+  });
+
+  it('exposes offset paging through enrichment on both consumption surfaces', async () => {
+    search.mockResolvedValue({ total: 30, hits: [{ id: '4HHB', score: 1 }] });
+    getEntries.mockResolvedValue([]);
+
+    const result = (await runToolContract(searchStructures, {
+      query: 'hemoglobin',
+      start: 25,
+      limit: 1,
+    })) as {
+      structuredContent: { start: number; nextStart?: number; totalCount: number };
+      content: Array<{ text: string }>;
+    };
+
+    expect(search.mock.calls[0]?.[0]).toMatchObject({ start: 25, limit: 1 });
+    expect(result.structuredContent).toMatchObject({ totalCount: 30, start: 25, nextStart: 26 });
+    const rendered = result.content.map((block) => block.text).join('\n');
+    expect(rendered).toContain('**start:** 25');
+    expect(rendered).toContain('**nextStart:** 26');
+  });
+
+  it('omits nextStart on a final or past-end page while preserving totalCount', async () => {
+    for (const [start, total, hits] of [
+      [29, 30, [{ id: '4HHB', score: 1 }]],
+      [40, 30, []],
+      [0, 0, []],
+    ] as const) {
+      search.mockResolvedValue({ total, hits });
+      getEntries.mockResolvedValue([]);
+      const c = ctx();
+      await searchStructures.handler(
+        searchStructures.input.parse({ query: 'hemoglobin', start, limit: 5 }),
+        c,
+      );
+      expect(getEnrichment(c)).toMatchObject({ totalCount: total, start });
+      expect(getEnrichment(c)).not.toHaveProperty('nextStart');
+    }
+  });
+
+  it('rejects negative or fractional offsets', () => {
+    expect(searchStructures.input.safeParse({ query: 'x', start: -1 }).success).toBe(false);
+    expect(searchStructures.input.safeParse({ query: 'x', start: 1.5 }).success).toBe(false);
   });
 
   it('notes an empty result set', async () => {

@@ -118,7 +118,13 @@ export class RcsbService {
   /** mmseqs2 sequence-similarity search. Returns polymer-entity hits. */
   async searchSequence(
     sequence: string,
-    opts: { maxEvalue?: number; minIdentity?: number; limit?: number; contentType?: ContentType[] },
+    opts: {
+      maxEvalue?: number;
+      minIdentity?: number;
+      limit?: number;
+      start?: number;
+      contentType?: ContentType[];
+    },
     ctx: Context,
   ): Promise<SearchResult> {
     const body = {
@@ -135,7 +141,7 @@ export class RcsbService {
       return_type: 'polymer_entity' as const,
       request_options: {
         ...contentTypeOption(opts.contentType),
-        paginate: { start: 0, rows: opts.limit ?? 25 },
+        paginate: { start: opts.start ?? 0, rows: opts.limit ?? 25 },
         scoring_strategy: 'sequence',
       },
     };
@@ -152,11 +158,11 @@ export class RcsbService {
    */
   async searchByLigand(
     compId: string,
-    opts: { limit?: number; contentType?: ContentType[] },
+    opts: { limit?: number; start?: number; contentType?: ContentType[] },
     ctx: Context,
   ): Promise<SearchResult> {
     const raw = await this.postSearch(
-      ligandContainmentQuery(compId, opts.contentType, opts.limit ?? 25, true),
+      ligandContainmentQuery(compId, opts.contentType, opts.start ?? 0, opts.limit ?? 25, true),
       ctx,
       'RcsbService.searchByLigand',
     );
@@ -170,7 +176,7 @@ export class RcsbService {
    */
   async countEntriesWithLigand(compId: string, ctx: Context): Promise<number> {
     const raw = await this.postSearch(
-      ligandContainmentQuery(compId, undefined, 0, false),
+      ligandContainmentQuery(compId, undefined, 0, 0, false),
       ctx,
       'RcsbService.countEntriesWithLigand',
     );
@@ -462,6 +468,7 @@ function contentTypeOption(contentTypes?: ContentType[]): { results_content_type
 function ligandContainmentQuery(
   compId: string,
   contentType: ContentType[] | undefined,
+  start: number,
   rows: number,
   sortByResolution: boolean,
 ): unknown {
@@ -478,7 +485,7 @@ function ligandContainmentQuery(
     return_type: 'entry',
     request_options: {
       ...contentTypeOption(contentType ?? ['experimental']),
-      paginate: { start: 0, rows },
+      paginate: { start, rows },
       ...(sortByResolution
         ? { sort: [{ sort_by: 'rcsb_entry_info.resolution_combined', direction: 'asc' }] }
         : {}),

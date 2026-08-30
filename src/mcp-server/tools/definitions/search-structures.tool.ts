@@ -62,9 +62,9 @@ export const searchStructures = tool('protein_search_structures', {
     {
       reason: 'no_criteria',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'No query, sequence, or organism was provided — nothing to search on.',
+      when: 'No query, sequence, organism, method, or maximum resolution was provided — nothing to search on.',
       recovery:
-        'Provide a free-text query, a protein sequence, or an organism name (filters alone are not enough).',
+        'Provide a free-text query, protein sequence, organism name, experimental method, or maximum resolution.',
     },
     {
       reason: 'duplicate_dimension',
@@ -122,6 +122,12 @@ export const searchStructures = tool('protein_search_structures', {
         'Optional dimensions to summarize as a facet breakdown alongside the hits. Each dimension at most once; repeating one is rejected.',
       ),
     limit: z.number().int().min(1).max(100).default(25).describe('Maximum hits to return (1–100).'),
+    start: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe('Zero-based result offset. Combine with limit to retrieve later pages.'),
   }),
 
   output: z.object({
@@ -130,6 +136,12 @@ export const searchStructures = tool('protein_search_structures', {
         z
           .object({
             id: z.string().describe('Structure identifier (PDB entry ID or computed-model ID).'),
+            entityId: z
+              .string()
+              .optional()
+              .describe(
+                'Matched polymer-entity ID for experimental sequence hits; id remains the chainable PDB entry ID.',
+              ),
             source: z
               .enum(['experimental', 'predicted'])
               .describe('Which universe the hit came from.'),
@@ -165,6 +177,11 @@ export const searchStructures = tool('protein_search_structures', {
 
   enrichment: {
     totalCount: z.number().describe('Total matches upstream before pagination.'),
+    start: z.number().describe('Zero-based offset of the returned page.'),
+    nextStart: z
+      .number()
+      .optional()
+      .describe('Offset for the next page; absent on the final or past-end page.'),
     effectiveQuery: z.string().optional().describe('Echoed text query for follow-up calls.'),
     notice: z
       .string()
@@ -175,10 +192,20 @@ export const searchStructures = tool('protein_search_structures', {
   },
 
   async handler(input, ctx) {
-    if (!input.query && !input.sequence && !input.organism) {
-      throw ctx.fail('no_criteria', 'Provide a query, sequence, or organism to search on.', {
-        ...ctx.recoveryFor('no_criteria'),
-      });
+    if (
+      !input.query &&
+      !input.sequence &&
+      !input.organism &&
+      !input.method &&
+      typeof input.max_resolution !== 'number'
+    ) {
+      throw ctx.fail(
+        'no_criteria',
+        'Provide a query, sequence, organism, method, or maximum resolution to search on.',
+        {
+          ...ctx.recoveryFor('no_criteria'),
+        },
+      );
     }
     // RCSB collapses two identically-named facet requests into one raw facet, and
     // the attribute-keyed lookup maps both specs back onto it — a repeated
@@ -207,6 +234,7 @@ export const searchStructures = tool('protein_search_structures', {
         ...(typeof input.max_evalue === 'number' ? { maxEvalue: input.max_evalue } : {}),
         contentType: CONTENT_TYPE_SCOPES[input.content_type],
         limit: input.limit,
+        start: input.start,
       },
       ctx,
       facetSpecs,
@@ -220,10 +248,15 @@ export const searchStructures = tool('protein_search_structures', {
       for (const meta of await rcsb.getEntries(experimentalIds, ctx)) metaById.set(meta.id, meta);
     }
 
-    const hits = result.hits.map((h) => toHit(h, metaById));
+    const hits = result.hits.map((h) => toHit(h, metaById, Boolean(input.sequence)));
     const facets = result.facets?.map((f) => toFacetOutput(f, cfg.facetBucketCap, result.total));
 
     ctx.enrich.total(result.total);
+    const nextStart = input.start + hits.length;
+    ctx.enrich({
+      start: input.start,
+      ...(nextStart < result.total ? { nextStart } : {}),
+    });
     if (input.query) ctx.enrich.echo(input.query);
 
     // `notice` is a single last-wins field, so the zero-hit advice and one
@@ -242,6 +275,7 @@ export const searchStructures = tool('protein_search_structures', {
       lines.push(`\n### ${h.id} _(${h.source})_`);
       if (h.title) lines.push(h.title);
       const meta = [
+        h.entityId ? `**Entity:** ${h.entityId}` : null,
         h.method ? `**Method:** ${h.method}` : null,
         typeof h.resolution === 'number' ? `**Resolution:** ${h.resolution} Å` : null,
         h.organism ? `**Organism:** ${h.organism}` : null,
@@ -259,7 +293,7 @@ export const searchStructures = tool('protein_search_structures', {
 });
 
 /** Build one output hit, folding in enrichment metadata when available. */
-function toHit(hit: SearchHit, metaById: Map<string, EntryMeta>) {
+function toHit(hit: SearchHit, metaById: Map<string, EntryMeta>, sequenceSearch: boolean) {
   if (isPredictedId(hit.id)) {
     const accession = accessionFromCsm(hit.id);
     return {
@@ -269,9 +303,11 @@ function toHit(hit: SearchHit, metaById: Map<string, EntryMeta>) {
       ...(accession ? { uniprotAccession: accession } : {}),
     };
   }
-  const meta = metaById.get(entryIdOf(hit.id));
+  const entryId = entryIdOf(hit.id);
+  const meta = metaById.get(entryId);
   return {
-    id: hit.id,
+    id: sequenceSearch ? entryId : hit.id,
+    ...(sequenceSearch ? { entityId: hit.id } : {}),
     source: 'experimental' as const,
     score: hit.score,
     ...(meta?.title ? { title: meta.title } : {}),

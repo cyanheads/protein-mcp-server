@@ -406,6 +406,28 @@ describe('RcsbService search helpers', () => {
     ]);
   });
 
+  it('forwards explicit and default offsets through every paged search helper', async () => {
+    fetchJsonMock.mockResolvedValue({ total_count: 0, result_set: [] });
+
+    await service().search({ text: 'kinase', start: 7, limit: 3 }, createMockContext());
+    await service().searchSequence('MVLS', { start: 8, limit: 4 }, createMockContext());
+    await service().searchByLigand('HEM', { start: 9, limit: 5 }, createMockContext());
+    await service().searchSequence('MVLS', {}, createMockContext());
+    await service().searchByLigand('HEM', {}, createMockContext());
+
+    const pages = fetchJsonMock.mock.calls.map((call) => {
+      const opts = call[2] as unknown as { body: string };
+      return JSON.parse(opts.body).request_options.paginate;
+    });
+    expect(pages).toEqual([
+      { start: 7, rows: 3 },
+      { start: 8, rows: 4 },
+      { start: 9, rows: 5 },
+      { start: 0, rows: 25 },
+      { start: 0, rows: 25 },
+    ]);
+  });
+
   it('searchByLigand upper-cases the component id and sorts by resolution (best first)', async () => {
     fetchJsonMock.mockResolvedValue({
       total_count: 3,

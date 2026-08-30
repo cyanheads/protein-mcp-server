@@ -7,7 +7,7 @@
  * @module tests/tools/find-similar.tool.test
  */
 
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const searchSequence = vi.fn();
@@ -103,6 +103,131 @@ describe('protein_find_similar — by:sequence', () => {
     expect(out.hits.map((h) => h.id)).toEqual(['1A00', '1A01']);
   });
 
+  it('deduplicates repeated entry IDs in the metadata batch and enriches every matching entity', async () => {
+    searchSequence.mockResolvedValue({
+      total: 2,
+      hits: [
+        { id: '1A00_1', score: 1 },
+        { id: '1A00_2', score: 0.99 },
+      ],
+    });
+    getEntries.mockResolvedValue([
+      {
+        id: '1A00',
+        title: 'Hemoglobin entry',
+        organisms: ['Homo sapiens'],
+        polymerEntities: [],
+        ligands: [],
+      },
+    ]);
+
+    const out = await findSimilar.handler(
+      findSimilar.input.parse({ by: 'sequence', sequence: 'MVLSPADK' }),
+      ctx(),
+    );
+
+    expect(getEntries).toHaveBeenCalledWith(['1A00'], expect.anything());
+    expect(out.hits.map((hit) => hit.title)).toEqual(['Hemoglobin entry', 'Hemoglobin entry']);
+  });
+
+  it.each([49, 50, 51])('enriches every distinct entry in a %i-entry page', async (count) => {
+    const hits = Array.from({ length: count }, (_, index) => ({
+      id: `${String(index).padStart(3, '0')}A_1`,
+      score: 1 - index / 100,
+    }));
+    searchSequence.mockResolvedValue({ total: count, hits });
+    getEntries.mockImplementation(async (ids: string[]) =>
+      ids.map((id) => ({
+        id,
+        title: `Title ${id}`,
+        organisms: ['Test organism'],
+        polymerEntities: [],
+        ligands: [],
+      })),
+    );
+
+    const out = await findSimilar.handler(
+      findSimilar.input.parse({ by: 'sequence', sequence: 'MVLSPADK', limit: count }),
+      ctx(),
+    );
+
+    expect(getEntries.mock.calls[0]?.[0]).toHaveLength(count);
+    expect(out.hits[count - 1]).toMatchObject({
+      title: `Title ${String(count - 1).padStart(3, '0')}A`,
+      organism: 'Test organism',
+    });
+  });
+
+  it('preserves sparse metadata and fails the whole call when metadata enrichment fails', async () => {
+    searchSequence.mockResolvedValue({ total: 1, hits: [{ id: '1A00_1', score: 1 }] });
+    getEntries.mockResolvedValue([{ id: '1A00', organisms: [], polymerEntities: [], ligands: [] }]);
+    const sparse = await findSimilar.handler(
+      findSimilar.input.parse({ by: 'sequence', sequence: 'MVLSPADK' }),
+      ctx(),
+    );
+    expect(sparse.hits[0]).not.toHaveProperty('title');
+    expect(sparse.hits[0]).not.toHaveProperty('organism');
+
+    getEntries.mockRejectedValue(new Error('metadata unavailable'));
+    await expect(
+      findSimilar.handler(findSimilar.input.parse({ by: 'sequence', sequence: 'MVLSPADK' }), ctx()),
+    ).rejects.toThrow('metadata unavailable');
+  });
+
+  it('exposes sequence offsets and nextStart on both consumption surfaces', async () => {
+    searchSequence.mockResolvedValue({
+      total: 30,
+      hits: [
+        { id: '1A00_1', score: 1 },
+        { id: '1A01_1', score: 0.9 },
+      ],
+    });
+    getEntries.mockResolvedValue([]);
+
+    const result = (await runToolContract(findSimilar, {
+      by: 'sequence',
+      sequence: 'MVLSPADK',
+      start: 25,
+      limit: 2,
+    })) as {
+      structuredContent: { totalCount: number; start: number; nextStart?: number };
+      content: Array<{ text: string }>;
+    };
+
+    expect(searchSequence.mock.calls[0]?.[1]).toMatchObject({ start: 25, limit: 2 });
+    expect(result.structuredContent).toMatchObject({ totalCount: 30, start: 25, nextStart: 27 });
+    const rendered = result.content.map((block) => block.text).join('\n');
+    expect(rendered).toContain('**start:** 25');
+    expect(rendered).toContain('**nextStart:** 27');
+  });
+
+  it('omits nextStart on final, past-end, and zero-match sequence pages', async () => {
+    for (const [start, total, hits] of [
+      [29, 30, [{ id: '1A00_1', score: 1 }]],
+      [40, 30, []],
+      [0, 0, []],
+    ] as const) {
+      searchSequence.mockResolvedValue({ total, hits });
+      getEntries.mockResolvedValue([]);
+      const c = ctx();
+      await findSimilar.handler(
+        findSimilar.input.parse({ by: 'sequence', sequence: 'MVLSPADK', start, limit: 5 }),
+        c,
+      );
+      expect(getEnrichment(c)).toMatchObject({ totalCount: total, start });
+      expect(getEnrichment(c)).not.toHaveProperty('nextStart');
+    }
+  });
+
+  it('rejects negative or fractional sequence offsets', () => {
+    expect(
+      findSimilar.input.safeParse({ by: 'sequence', sequence: 'MVLS', start: -1 }).success,
+    ).toBe(false);
+    expect(
+      findSimilar.input.safeParse({ by: 'sequence', sequence: 'MVLS', start: 1.5 }).success,
+    ).toBe(false);
+  });
+
   it('derives the query sequence from a PDB ID', async () => {
     getSequence.mockResolvedValue({ entityId: '4HHB_1', sequence: 'MVLSPADK' });
     searchSequence.mockResolvedValue({ total: 1, hits: [] });
@@ -170,6 +295,22 @@ describe('protein_find_similar — by:sequence', () => {
 });
 
 describe('protein_find_similar — by:structure', () => {
+  it('ignores start without adding paging state to a structure search', async () => {
+    fetchTextMock.mockResolvedValue('ATOM ...');
+    foldseekSearch.mockResolvedValue({ status: 'complete', ticketId: 't', hits: [] });
+    const c = ctx();
+
+    await findSimilar.handler(
+      findSimilar.input.parse({ by: 'structure', pdb_id: '4HHB', start: 50 }),
+      c,
+    );
+
+    expect(foldseekSearch.mock.calls[0]?.[0]).not.toHaveProperty('start');
+    expect(getEnrichment(c)).not.toHaveProperty('start');
+    expect(getEnrichment(c)).not.toHaveProperty('nextStart');
+    expect(getEnrichment(c)).not.toHaveProperty('totalCount');
+  });
+
   it('runs a Foldseek search from a PDB coordinate file and maps hits by source', async () => {
     fetchTextMock.mockResolvedValue('ATOM ...');
     foldseekSearch.mockResolvedValue({

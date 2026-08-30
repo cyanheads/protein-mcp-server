@@ -9,7 +9,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const findChemComps = vi.fn();
@@ -36,6 +36,23 @@ const ctx = () => createMockContext({ errors: trackLigands.errors });
 beforeEach(() => vi.clearAllMocks());
 
 describe('protein_track_ligands — find_ligand', () => {
+  it('ignores start without adding paging state to ligand-name resolution', async () => {
+    findChemComps.mockResolvedValue(['HEM']);
+    getChemComp.mockResolvedValue({ compId: 'HEM' });
+    countEntriesWithLigand.mockResolvedValue(6475);
+    const c = ctx();
+
+    await trackLigands.handler(
+      trackLigands.input.parse({ mode: 'find_ligand', query: 'heme', start: 50 }),
+      c,
+    );
+
+    expect(findChemComps).toHaveBeenCalledWith('heme', 25, expect.anything());
+    expect(getEnrichment(c)).not.toHaveProperty('start');
+    expect(getEnrichment(c)).not.toHaveProperty('nextStart');
+    expect(getEnrichment(c)).not.toHaveProperty('totalCount');
+  });
+
   it('resolves a name to chem-comp metadata with its deposition count', async () => {
     findChemComps.mockResolvedValue(['HEM']);
     getChemComp.mockResolvedValue({
@@ -161,7 +178,7 @@ describe('protein_track_ligands — structures_with_ligand', () => {
       { id: '2HHB', resolution: 1.9 },
     ]);
     // comp_id is upper-cased before the search; hit ids feed the batched metadata fetch.
-    expect(searchByLigand).toHaveBeenCalledWith('HEM', { limit: 25 }, expect.anything());
+    expect(searchByLigand).toHaveBeenCalledWith('HEM', { limit: 25, start: 0 }, expect.anything());
     expect(getEntries).toHaveBeenCalledWith(['4HHB', '2HHB'], expect.anything());
     expect(getEnrichment(c)).toMatchObject({ totalCount: 1200, resolvedCompId: 'HEM' });
   });
@@ -213,9 +230,101 @@ describe('protein_track_ligands — structures_with_ligand', () => {
     expect(getEnrichment(c)).toMatchObject({ totalCount: 0, resolvedCompId: 'ZZZ' });
     expect(String(getEnrichment(c).notice)).toMatch(/no pdb entries contain zzz/i);
   });
+
+  it('exposes ligand-search offsets and nextStart on both consumption surfaces', async () => {
+    searchByLigand.mockResolvedValue({
+      total: 30,
+      hits: [
+        { id: '4HHB', score: 1 },
+        { id: '2HHB', score: 1 },
+      ],
+    });
+    getEntries.mockResolvedValue([]);
+
+    const result = (await runToolContract(trackLigands, {
+      mode: 'structures_with_ligand',
+      comp_id: 'HEM',
+      start: 25,
+      limit: 2,
+    })) as {
+      structuredContent: { totalCount: number; start: number; nextStart?: number };
+      content: Array<{ text: string }>;
+    };
+
+    expect(searchByLigand).toHaveBeenCalledWith('HEM', { start: 25, limit: 2 }, expect.anything());
+    expect(result.structuredContent).toMatchObject({ totalCount: 30, start: 25, nextStart: 27 });
+    const rendered = result.content.map((block) => block.text).join('\n');
+    expect(rendered).toContain('**start:** 25');
+    expect(rendered).toContain('**nextStart:** 27');
+  });
+
+  it('omits nextStart on final, past-end, and zero-match ligand pages', async () => {
+    for (const [start, total, hits] of [
+      [29, 30, [{ id: '4HHB', score: 1 }]],
+      [40, 30, []],
+      [0, 0, []],
+    ] as const) {
+      searchByLigand.mockResolvedValue({ total, hits });
+      getEntries.mockResolvedValue([]);
+      const c = ctx();
+      await trackLigands.handler(
+        trackLigands.input.parse({
+          mode: 'structures_with_ligand',
+          comp_id: 'HEM',
+          start,
+          limit: 5,
+        }),
+        c,
+      );
+      expect(getEnrichment(c)).toMatchObject({ totalCount: total, start });
+      expect(getEnrichment(c)).not.toHaveProperty('nextStart');
+    }
+  });
+
+  it('rejects negative or fractional ligand-search offsets', () => {
+    expect(
+      trackLigands.input.safeParse({
+        mode: 'structures_with_ligand',
+        comp_id: 'HEM',
+        start: -1,
+      }).success,
+    ).toBe(false);
+    expect(
+      trackLigands.input.safeParse({
+        mode: 'structures_with_ligand',
+        comp_id: 'HEM',
+        start: 1.5,
+      }).success,
+    ).toBe(false);
+  });
 });
 
 describe('protein_track_ligands — binding_site', () => {
+  it('ignores start without adding paging state to binding-site analysis', async () => {
+    getBindingSites.mockResolvedValue([
+      {
+        ligandCompId: 'HEM',
+        residues: [{ residueCompId: 'HIS', asymId: 'A' }],
+      },
+    ]);
+    const c = ctx();
+
+    await trackLigands.handler(
+      trackLigands.input.parse({
+        mode: 'binding_site',
+        pdb_id: '4HHB',
+        comp_id: 'HEM',
+        start: 50,
+      }),
+      c,
+    );
+
+    expect(getBindingSites).toHaveBeenCalledWith('4HHB', 'HEM', expect.anything());
+    expect(getEnrichment(c)).not.toHaveProperty('start');
+    expect(getEnrichment(c)).not.toHaveProperty('nextStart');
+    expect(getEnrichment(c)).not.toHaveProperty('totalCount');
+  });
+
   it('returns binding-site residues for a structure', async () => {
     getBindingSites.mockResolvedValue([
       {

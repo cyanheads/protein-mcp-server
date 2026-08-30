@@ -98,6 +98,12 @@ export const trackLigands = tool('protein_track_ligands', {
       .max(100)
       .default(25)
       .describe('Maximum results to return (1–100).'),
+    start: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe('Zero-based result offset (mode structures_with_ligand only).'),
   }),
 
   output: z.object({
@@ -137,6 +143,16 @@ export const trackLigands = tool('protein_track_ligands', {
       .number()
       .optional()
       .describe('Total upstream matches before pagination (structures_with_ligand).'),
+    start: z
+      .number()
+      .optional()
+      .describe('Zero-based offset of the structures_with_ligand result page.'),
+    nextStart: z
+      .number()
+      .optional()
+      .describe(
+        'Offset for the next structures_with_ligand page; absent on the final or past-end page.',
+      ),
     resolvedCompId: z.string().optional().describe('The chemical component ID used to query.'),
     notice: z
       .string()
@@ -188,9 +204,18 @@ export const trackLigands = tool('protein_track_ligands', {
         throw ctx.fail('missing_param', 'mode structures_with_ligand requires a "comp_id".', {
           ...ctx.recoveryFor('missing_param'),
         });
-      const result = await rcsb.searchByLigand(compId, { limit: input.limit }, ctx);
+      const result = await rcsb.searchByLigand(
+        compId,
+        { limit: input.limit, start: input.start },
+        ctx,
+      );
       ctx.enrich.total(result.total);
-      ctx.enrich({ resolvedCompId: compId });
+      const nextStart = input.start + result.hits.length;
+      ctx.enrich({
+        resolvedCompId: compId,
+        start: input.start,
+        ...(nextStart < result.total ? { nextStart } : {}),
+      });
       // A valid component with zero containing structures is an empty result set,
       // not a not-found — mirrors protein_search_structures' empty-hits behavior.
       if (result.hits.length === 0) {
