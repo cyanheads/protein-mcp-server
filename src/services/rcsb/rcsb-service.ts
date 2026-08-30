@@ -389,11 +389,13 @@ export class RcsbService {
         baseDelayMs: 400,
       },
     );
-    if (body.data) return body.data;
     const message = body.errors?.[0]?.message ?? 'unknown error';
-    throw new McpError(JsonRpcErrorCode.InternalError, `RCSB GraphQL error: ${message}`, {
-      retryable: false,
-    });
+    if (body.errors?.length || !body.data) {
+      throw new McpError(JsonRpcErrorCode.InternalError, `RCSB GraphQL error: ${message}`, {
+        retryable: false,
+      });
+    }
+    return body.data;
   }
 }
 

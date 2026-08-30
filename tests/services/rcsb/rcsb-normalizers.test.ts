@@ -170,6 +170,26 @@ describe('RcsbService.getEntries', () => {
       message: expect.stringContaining('field "bogus" not found'),
     });
   });
+
+  it('throws when GraphQL returns partial data with errors', async () => {
+    fetchJsonMock.mockResolvedValue({
+      data: { entries: [{ rcsb_id: '4HHB' }] },
+      errors: [{ message: 'polymer entity field failed' }],
+    });
+
+    await expect(service().getEntries(['4HHB'], createMockContext())).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InternalError,
+      message: expect.stringContaining('polymer entity field failed'),
+    });
+  });
+
+  it('keeps valid data when GraphQL returns an empty errors array', async () => {
+    fetchJsonMock.mockResolvedValue({ data: { entries: [{ rcsb_id: '4HHB' }] }, errors: [] });
+
+    await expect(service().getEntries(['4HHB'], createMockContext())).resolves.toEqual([
+      { id: '4HHB', organisms: [], polymerEntities: [], ligands: [] },
+    ]);
+  });
 });
 
 describe('RcsbService.resolveUniprotEntities', () => {
