@@ -2,11 +2,14 @@
  * @fileoverview Tests for protein_find_similar: the by:sequence path (direct
  * sequence, PDB-derived, UniProt-derived; metadata enrichment; empty-result
  * notice; no_sequence failure), the by:structure path (Foldseek complete /
- * computing / failed, predicted-source mapping), the missing_query guard, and
- * format(). Services and the coordinate-file fetch are mocked.
+ * computing / failed, predicted-source mapping, completed-job paging via
+ * totalCount / start / nextStart and a re-usable ticketId), the missing_query
+ * guard, the per-mode field rejection, and format(). Services and the
+ * coordinate-file fetch are mocked.
  * @module tests/tools/find-similar.tool.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -45,6 +48,16 @@ import { entryIdOf } from '@/services/shared/identifiers.js';
 
 const fetchTextMock = vi.mocked(fetchText);
 const ctx = () => createMockContext({ errors: findSimilar.errors });
+
+/** One normalized Foldseek PDB hit, as the service hands it to the tool. */
+const PDB_HIT = {
+  target: '2HHB-A',
+  database: 'pdb100',
+  targetType: 'pdb' as const,
+  pdbId: '2HHB',
+  chain: 'A',
+  score: 800,
+};
 
 beforeEach(() => vi.clearAllMocks());
 
@@ -295,20 +308,115 @@ describe('protein_find_similar — by:sequence', () => {
 });
 
 describe('protein_find_similar — by:structure', () => {
-  it('ignores start without adding paging state to a structure search', async () => {
+  it('forwards start and reports paging state on a completed structure search (#53)', async () => {
     fetchTextMock.mockResolvedValue('ATOM ...');
-    foldseekSearch.mockResolvedValue({ status: 'complete', ticketId: 't', hits: [] });
-    const c = ctx();
+    foldseekSearch.mockResolvedValue({
+      status: 'complete',
+      ticketId: 'tkt-9',
+      total: 179,
+      hits: [PDB_HIT],
+    });
 
+    const result = (await runToolContract(findSimilar, {
+      by: 'structure',
+      pdb_id: '4HHB',
+      start: 25,
+      limit: 1,
+    })) as {
+      structuredContent: {
+        ticketId?: string;
+        totalCount: number;
+        start: number;
+        nextStart?: number;
+      };
+      content: Array<{ text: string }>;
+    };
+
+    expect(foldseekSearch.mock.calls[0]?.[0]).toMatchObject({ start: 25, limit: 1 });
+    // A completed job carries its ticket so the same result set can be re-paged
+    // instead of resubmitting the structure.
+    expect(result.structuredContent).toMatchObject({
+      ticketId: 'tkt-9',
+      totalCount: 179,
+      start: 25,
+      nextStart: 26,
+    });
+    const rendered = result.content.map((block) => block.text).join('\n');
+    expect(rendered).toContain('**Ticket:** tkt-9');
+    expect(rendered).toContain('**start:** 25');
+    expect(rendered).toContain('**nextStart:** 26');
+  });
+
+  it('omits nextStart on final, past-end, and zero-hit structure pages (#53)', async () => {
+    for (const [start, total, hits] of [
+      [178, 179, [PDB_HIT]],
+      [500, 179, []],
+      [0, 0, []],
+    ] as const) {
+      vi.clearAllMocks();
+      fetchTextMock.mockResolvedValue('ATOM ...');
+      foldseekSearch.mockResolvedValue({ status: 'complete', ticketId: 't', total, hits });
+      const c = ctx();
+      await findSimilar.handler(
+        findSimilar.input.parse({ by: 'structure', pdb_id: '4HHB', start, limit: 5 }),
+        c,
+      );
+      expect(getEnrichment(c)).toMatchObject({ totalCount: total, start });
+      expect(getEnrichment(c)).not.toHaveProperty('nextStart');
+    }
+  });
+
+  it('distinguishes a past-end page from a job with no hits in its notice (#53)', async () => {
+    // Paging made the empty page reachable two ways, and they need opposite next
+    // moves: lower the offset vs. widen the databases.
+    fetchTextMock.mockResolvedValue('ATOM ...');
+    foldseekSearch.mockResolvedValue({ status: 'complete', ticketId: 't', total: 179, hits: [] });
+    const pastEnd = ctx();
     await findSimilar.handler(
-      findSimilar.input.parse({ by: 'structure', pdb_id: '4HHB', start: 50 }),
+      findSimilar.input.parse({ by: 'structure', pdb_id: '4HHB', start: 500 }),
+      pastEnd,
+    );
+    expect(getEnrichment(pastEnd).notice).toMatch(/start 500 is past the end/);
+    expect(getEnrichment(pastEnd).notice).not.toMatch(/selected databases/);
+
+    vi.clearAllMocks();
+    fetchTextMock.mockResolvedValue('ATOM ...');
+    foldseekSearch.mockResolvedValue({ status: 'complete', ticketId: 't', total: 0, hits: [] });
+    const noHits = ctx();
+    await findSimilar.handler(findSimilar.input.parse({ by: 'structure', pdb_id: '4HHB' }), noHits);
+    expect(getEnrichment(noHits).notice).toMatch(/no fold-similar hits in the selected databases/);
+  });
+
+  it('re-pages a completed ticket at a new start without resubmitting (#53)', async () => {
+    foldseekResume.mockResolvedValue({
+      status: 'complete',
+      ticketId: 'resume-me',
+      total: 179,
+      hits: [
+        {
+          target: 'AF-P69905-F1',
+          database: 'afdb50',
+          targetType: 'alphafold',
+          uniprotAccession: 'P69905',
+        },
+      ],
+    });
+    const c = ctx();
+    const out = await findSimilar.handler(
+      findSimilar.input.parse({ by: 'structure', ticket_id: 'resume-me', start: 40, limit: 1 }),
       c,
     );
 
-    expect(foldseekSearch.mock.calls[0]?.[0]).not.toHaveProperty('start');
-    expect(getEnrichment(c)).not.toHaveProperty('start');
-    expect(getEnrichment(c)).not.toHaveProperty('nextStart');
-    expect(getEnrichment(c)).not.toHaveProperty('totalCount');
+    expect(foldseekResume.mock.calls[0]?.[0]).toMatchObject({
+      ticketId: 'resume-me',
+      start: 40,
+      limit: 1,
+    });
+    expect(out.hits.map((h) => h.id)).toEqual(['P69905']);
+    expect(getEnrichment(c)).toMatchObject({ totalCount: 179, start: 40, nextStart: 41 });
+    // No new job and no coordinate download — the completed ticket is re-read.
+    expect(foldseekSearch).not.toHaveBeenCalled();
+    expect(fetchTextMock).not.toHaveBeenCalled();
   });
 
   it('runs a Foldseek search from a PDB coordinate file and maps hits by source', async () => {
@@ -316,6 +424,7 @@ describe('protein_find_similar — by:structure', () => {
     foldseekSearch.mockResolvedValue({
       status: 'complete',
       ticketId: 't1',
+      total: 2,
       hits: [
         {
           target: '2HHB-A',
@@ -366,6 +475,7 @@ describe('protein_find_similar — by:structure', () => {
     foldseekSearch.mockResolvedValue({
       status: 'complete',
       ticketId: 't1',
+      total: 2,
       hits: [
         {
           target: '1Y45-A',
@@ -412,7 +522,7 @@ describe('protein_find_similar — by:structure', () => {
       pdbUrl: 'https://af/P69905.pdb',
     });
     fetchTextMock.mockResolvedValue('ATOM ...');
-    foldseekSearch.mockResolvedValue({ status: 'complete', ticketId: 't', hits: [] });
+    foldseekSearch.mockResolvedValue({ status: 'complete', ticketId: 't', total: 0, hits: [] });
     await findSimilar.handler(
       findSimilar.input.parse({ by: 'structure', uniprot: 'P69905' }),
       ctx(),
@@ -429,14 +539,40 @@ describe('protein_find_similar — by:structure', () => {
   });
 
   it('throws missing_query when by:structure has no pdb_id or uniprot', async () => {
+    // No `sequence` here: under by:"structure" it now trips the per-mode field
+    // guard (#57) before coordinate resolution, so this case is exercised alone.
     await expect(
-      findSimilar.handler(findSimilar.input.parse({ by: 'structure', sequence: 'MVLS' }), ctx()),
+      findSimilar.handler(findSimilar.input.parse({ by: 'structure' }), ctx()),
     ).rejects.toMatchObject({ data: { reason: 'missing_query' } });
+  });
+
+  it('offers only identifiers in the by:structure missing_query hint (#57)', async () => {
+    // The declared hint offers a raw sequence, which the per-mode guard rejects
+    // under by:"structure" — this branch must not send the caller into it.
+    await expect(
+      findSimilar.handler(findSimilar.input.parse({ by: 'structure' }), ctx()),
+    ).rejects.toMatchObject({
+      data: {
+        reason: 'missing_query',
+        recovery: {
+          hint: expect.stringMatching(/pdb_id[\s\S]*uniprot/) as unknown as string,
+        },
+      },
+    });
+    await expect(
+      findSimilar.handler(findSimilar.input.parse({ by: 'structure' }), ctx()),
+    ).rejects.toMatchObject({
+      data: {
+        recovery: {
+          hint: expect.not.stringContaining('Provide a raw sequence,') as unknown as string,
+        },
+      },
+    });
   });
 
   it('passes custom databases through to Foldseek', async () => {
     fetchTextMock.mockResolvedValue('ATOM ...');
-    foldseekSearch.mockResolvedValue({ status: 'complete', ticketId: 't', hits: [] });
+    foldseekSearch.mockResolvedValue({ status: 'complete', ticketId: 't', total: 0, hits: [] });
     await findSimilar.handler(
       findSimilar.input.parse({ by: 'structure', pdb_id: '4HHB', databases: ['afdb-swissprot'] }),
       ctx(),
@@ -448,6 +584,7 @@ describe('protein_find_similar — by:structure', () => {
     foldseekResume.mockResolvedValue({
       status: 'complete',
       ticketId: 'resume-me',
+      total: 1,
       hits: [
         {
           target: '2HHB-A',
@@ -489,6 +626,125 @@ describe('protein_find_similar — by:structure', () => {
       findSimilar.handler(findSimilar.input.parse({ by: 'structure', ticket_id: 'bogus' }), ctx()),
     ).rejects.toMatchObject({ data: { reason: 'ticket_not_found' } });
     expect(foldseekSearch).not.toHaveBeenCalled();
+  });
+});
+
+describe('protein_find_similar — per-mode field rejection (#57)', () => {
+  it.each([
+    ['sequence', { sequence: 'MVLS' }],
+    ['max_evalue', { max_evalue: 0.001 }],
+    ['min_identity', { min_identity: 0.9 }],
+  ])('rejects %s under by:"structure", naming the accepting mode', async (_field, extra) => {
+    await expect(
+      findSimilar.handler(
+        findSimilar.input.parse({ by: 'structure', pdb_id: '4HHB', ...extra }),
+        ctx(),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: {
+        reason: 'mode_mismatched_field',
+        recovery: { hint: expect.stringContaining('by:"sequence"') },
+      },
+    });
+    // Rejected before mode dispatch — no coordinate fetch, no Foldseek job.
+    expect(fetchTextMock).not.toHaveBeenCalled();
+    expect(foldseekSearch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['ticket_id', { ticket_id: 'tkt-1' }],
+    ['databases', { databases: ['afdb-swissprot'] }],
+  ])('rejects %s under by:"sequence", naming the accepting mode', async (_field, extra) => {
+    await expect(
+      findSimilar.handler(
+        findSimilar.input.parse({ by: 'sequence', sequence: 'MVLS', ...extra }),
+        ctx(),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: {
+        reason: 'mode_mismatched_field',
+        recovery: { hint: expect.stringContaining('by:"structure"') },
+      },
+    });
+    expect(searchSequence).not.toHaveBeenCalled();
+  });
+
+  it('names every offending field in one rejection', async () => {
+    await expect(
+      findSimilar.handler(
+        findSimilar.input.parse({
+          by: 'structure',
+          pdb_id: '4HHB',
+          sequence: 'MVLS',
+          max_evalue: 0.01,
+          min_identity: 0.5,
+        }),
+        ctx(),
+      ),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining('sequence, max_evalue, min_identity'),
+    });
+  });
+
+  it('treats an empty databases array as omitted under either mode', async () => {
+    searchSequence.mockResolvedValue({ total: 0, hits: [] });
+    getEntries.mockResolvedValue([]);
+    await findSimilar.handler(
+      findSimilar.input.parse({ by: 'sequence', sequence: 'MVLS', databases: [] }),
+      ctx(),
+    );
+    expect(searchSequence).toHaveBeenCalled();
+
+    fetchTextMock.mockResolvedValue('ATOM ...');
+    foldseekSearch.mockResolvedValue({ status: 'complete', ticketId: 't', total: 0, hits: [] });
+    await findSimilar.handler(
+      findSimilar.input.parse({ by: 'structure', pdb_id: '4HHB', databases: [] }),
+      ctx(),
+    );
+    // runStructure's own empty-array fallback still supplies the defaults.
+    expect(foldseekSearch.mock.calls[0]?.[0]).toMatchObject({
+      databases: ['pdb100', 'afdb50'],
+    });
+  });
+
+  it('never reads start — any offset passes the guard in both modes', async () => {
+    searchSequence.mockResolvedValue({ total: 0, hits: [] });
+    getEntries.mockResolvedValue([]);
+    await findSimilar.handler(
+      findSimilar.input.parse({ by: 'sequence', sequence: 'MVLS', start: 50 }),
+      ctx(),
+    );
+    expect(searchSequence.mock.calls[0]?.[1]).toMatchObject({ start: 50 });
+
+    fetchTextMock.mockResolvedValue('ATOM ...');
+    foldseekSearch.mockResolvedValue({ status: 'complete', ticketId: 't', total: 0, hits: [] });
+    await findSimilar.handler(
+      findSimilar.input.parse({ by: 'structure', pdb_id: '4HHB', start: 50 }),
+      ctx(),
+    );
+    expect(foldseekSearch.mock.calls[0]?.[0]).toMatchObject({ start: 50 });
+  });
+
+  it('leaves the shared pdb_id / uniprot / limit fields unaffected in both modes', async () => {
+    getSequence.mockResolvedValue({ entityId: '4HHB_1', sequence: 'MVLSPADK' });
+    searchSequence.mockResolvedValue({ total: 0, hits: [] });
+    getEntries.mockResolvedValue([]);
+    await findSimilar.handler(
+      findSimilar.input.parse({ by: 'sequence', pdb_id: '4HHB', limit: 7 }),
+      ctx(),
+    );
+    expect(searchSequence.mock.calls[0]?.[1]).toMatchObject({ limit: 7 });
+
+    getPrediction.mockResolvedValue({ uniprotAccession: 'P69905', pdbUrl: 'https://af/x.pdb' });
+    fetchTextMock.mockResolvedValue('ATOM ...');
+    foldseekSearch.mockResolvedValue({ status: 'complete', ticketId: 't', total: 0, hits: [] });
+    await findSimilar.handler(
+      findSimilar.input.parse({ by: 'structure', uniprot: 'P69905', limit: 7 }),
+      ctx(),
+    );
+    expect(foldseekSearch.mock.calls[0]?.[0]).toMatchObject({ limit: 7 });
   });
 });
 

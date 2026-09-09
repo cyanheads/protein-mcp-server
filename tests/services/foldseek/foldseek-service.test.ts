@@ -2,8 +2,9 @@
  * @fileoverview Tests for the Foldseek service: ticket submit → poll → result
  * flow, target-header parsing (AF-/PDB-/other), hit normalization across the real
  * nested results shape (including the percentage-scale `seqId` → 0–1
- * `sequenceIdentity` conversion), the limit cap mid-database, the
- * COMPLETE/ERROR/pending status branches, and the never-throws
+ * `sequenceIdentity` conversion), the `{ total, hits }` paging contract (limit cap
+ * mid-database, start slicing, past-end and zero-hit pages, re-paging a completed
+ * ticket), the COMPLETE/ERROR/pending status branches, and the never-throws
  * degrade-to-failed contract. HTTP mocked.
  * @module tests/services/foldseek/foldseek-service.test
  */
@@ -37,6 +38,7 @@ const params = (over: Partial<Parameters<FoldseekService['search']>[0]> = {}) =>
   databases: ['pdb100', 'afdb50'],
   mode: '3diaa',
   limit: 25,
+  start: 0,
   timeoutMs: 1000,
   ...over,
 });
@@ -149,7 +151,7 @@ describe('FoldseekService.search — complete flow', () => {
     expect(out.hits[0]).not.toHaveProperty('sequenceIdentity');
   });
 
-  it('caps hits at the limit, even mid-database', async () => {
+  it('caps hits at the limit, even mid-database, and reports the full total (#53)', async () => {
     fetchJsonMock
       .mockResolvedValueOnce({ id: 't' })
       .mockResolvedValueOnce({ status: 'COMPLETE' })
@@ -159,6 +161,44 @@ describe('FoldseekService.search — complete flow', () => {
     if (out.status !== 'complete') throw new Error('expected complete');
     expect(out.hits).toHaveLength(1);
     expect(out.hits[0]?.target).toBe('2HHB-A');
+    // The whole parsed set is counted before slicing, so a capped page still
+    // discloses how many hits the completed job actually holds.
+    expect(out.total).toBe(3);
+  });
+
+  it('slices a completed result set from start (#53)', async () => {
+    fetchJsonMock
+      .mockResolvedValueOnce({ id: 't' })
+      .mockResolvedValueOnce({ status: 'COMPLETE' })
+      .mockResolvedValueOnce(RESULT);
+
+    const out = await service().search(params({ start: 1, limit: 1 }), createMockContext());
+    if (out.status !== 'complete') throw new Error('expected complete');
+    expect(out.hits.map((h) => h.target)).toEqual(['1A3N_B']);
+    expect(out.total).toBe(3);
+  });
+
+  it('returns an empty page with the total intact for a start past the end (#53)', async () => {
+    fetchJsonMock
+      .mockResolvedValueOnce({ id: 't' })
+      .mockResolvedValueOnce({ status: 'COMPLETE' })
+      .mockResolvedValueOnce(RESULT);
+
+    const out = await service().search(params({ start: 99, limit: 5 }), createMockContext());
+    if (out.status !== 'complete') throw new Error('expected complete');
+    expect(out.hits).toEqual([]);
+    expect(out.total).toBe(3);
+  });
+
+  it('reports total 0 for a completed job with no hits (#53)', async () => {
+    fetchJsonMock
+      .mockResolvedValueOnce({ id: 't' })
+      .mockResolvedValueOnce({ status: 'COMPLETE' })
+      .mockResolvedValueOnce({ results: [] });
+
+    const out = await service().search(params(), createMockContext());
+    if (out.status !== 'complete') throw new Error('expected complete');
+    expect(out).toMatchObject({ hits: [], total: 0 });
   });
 
   it('classifies a non-AF, non-PDB target header as "other"', async () => {
@@ -223,7 +263,7 @@ describe('FoldseekService.search — async / failure branches', () => {
 });
 
 describe('FoldseekService.resume — poll an existing ticket without resubmitting', () => {
-  const resumeParams = { ticketId: 'ticket-1', limit: 25, timeoutMs: 1000 };
+  const resumeParams = { ticketId: 'ticket-1', limit: 25, start: 0, timeoutMs: 1000 };
 
   it('polls the given ticket (no submit) and returns complete hits', async () => {
     // Only the ticket-status poll + results fetch — never a submit POST.
@@ -234,8 +274,27 @@ describe('FoldseekService.resume — poll an existing ticket without resubmittin
     expect(out).toMatchObject({ status: 'complete', ticketId: 'ticket-1' });
     if (out.status !== 'complete') throw new Error('expected complete');
     expect(out.hits).toHaveLength(3);
+    expect(out.total).toBe(3);
     // First upstream call is the ticket-status poll, not a /api/ticket submit.
     expect(fetchJsonMock.mock.calls[0]?.[0]).toContain('/api/ticket/ticket-1');
+  });
+
+  it('re-pages the same completed ticket from a different start (#53)', async () => {
+    fetchJsonMock.mockResolvedValueOnce({ status: 'COMPLETE' }).mockResolvedValueOnce(RESULT);
+
+    const out = await service().resume(
+      { ...resumeParams, start: 2, limit: 1 },
+      createMockContext(),
+    );
+
+    if (out.status !== 'complete') throw new Error('expected complete');
+    expect(out.hits.map((h) => h.target)).toEqual(['AF-P69905-F1']);
+    expect(out.total).toBe(3);
+    // Still no submit — a completed ticket is re-read, never resubmitted.
+    expect(fetchJsonMock.mock.calls[0]?.[0]).toContain('/api/ticket/ticket-1');
+    expect(fetchJsonMock.mock.calls.map((call) => call[0])).not.toContain(
+      'https://foldseek.test/api/ticket',
+    );
   });
 
   it('returns computing with the same ticket when the budget elapses', async () => {

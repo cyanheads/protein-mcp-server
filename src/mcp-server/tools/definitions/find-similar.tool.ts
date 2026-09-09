@@ -3,6 +3,10 @@
  * proteins. by:sequence runs a synchronous RCSB mmseqs2 search; by:structure runs
  * an async Foldseek search against experimental + predicted databases (submit →
  * poll → bounded timeout, returning "still computing" rather than blocking).
+ * Both modes page their results the same way (totalCount / start / nextStart),
+ * and a completed structure job returns its ticket so it can be re-paged instead
+ * of resubmitted. Fields the selected mode cannot consume are rejected, not
+ * ignored.
  * @module mcp-server/tools/definitions/find-similar.tool
  */
 
@@ -59,7 +63,9 @@ const inputSchema = z.object({
     .int()
     .min(0)
     .default(0)
-    .describe('Zero-based result offset (by:sequence only).'),
+    .describe(
+      'Zero-based result offset. Pages a by:sequence search, and a completed by:structure job when re-called with its ticket_id.',
+    ),
 });
 
 const outputSchema = z.object({
@@ -71,7 +77,9 @@ const outputSchema = z.object({
   ticketId: z
     .string()
     .optional()
-    .describe('Async job ticket ID when status is computing (by:structure).'),
+    .describe(
+      'Async job ticket ID (by:structure). Present while status is computing, and also on a complete response — re-call with ticket_id plus a different start/limit to page the same finished job instead of resubmitting.',
+    ),
   hits: z
     .array(
       z
@@ -113,34 +121,25 @@ const outputSchema = z.object({
 });
 
 const enrichmentShape = {
-  totalCount: z
-    .number()
-    .optional()
-    .describe('Total upstream matches before pagination (by:sequence).'),
-  start: z.number().optional().describe('Zero-based offset of the sequence-result page.'),
+  totalCount: z.number().optional().describe('Total upstream matches before pagination.'),
+  start: z.number().optional().describe('Zero-based offset of the returned result page.'),
   nextStart: z
     .number()
     .optional()
-    .describe('Offset for the next sequence-result page; absent on the final or past-end page.'),
+    .describe('Offset for the next result page; absent on the final or past-end page.'),
   notice: z.string().optional().describe('Advisory note (still computing, empty results).'),
 };
 
 type FindSimilarInput = z.infer<typeof inputSchema>;
 type FindSimilarOutput = z.infer<typeof outputSchema>;
 type Ctx = HandlerContext<
-  'missing_query' | 'no_sequence' | 'search_failed' | 'ticket_not_found',
+  'missing_query' | 'mode_mismatched_field' | 'no_sequence' | 'search_failed' | 'ticket_not_found',
   typeof enrichmentShape
 >;
 
 export const findSimilar = tool('protein_find_similar', {
   title: 'protein-mcp-server: find similar',
-  description:
-    'Find structurally or evolutionarily related proteins. by:"sequence" runs an RCSB mmseqs2 ' +
-    'sequence-similarity search (synchronous) over a sequence — supplied directly, or pulled from a PDB ID ' +
-    'or UniProt accession. by:"structure" runs a Foldseek fold-similarity search (asynchronous) against ' +
-    'experimental and predicted databases; if the job is still computing when the poll budget elapses, the ' +
-    'response reports status "computing" with a ticket — re-call with ticket_id set to that value to resume ' +
-    'the same job instead of resubmitting. Output names the engine and database each hit came from.',
+  description: `Find structurally or evolutionarily related proteins. by:"sequence" runs an RCSB mmseqs2 sequence-similarity search (synchronous) over a sequence — supplied directly, or pulled from a PDB ID or UniProt accession. by:"structure" runs a Foldseek fold-similarity search (asynchronous) against experimental and predicted databases; if the job is still computing when the poll budget elapses, the response reports status "computing" with a ticket — re-call with ticket_id set to that value to resume the same job instead of resubmitting, and a complete response carries the same ticket so a finished job can be re-paged with a different start. Each mode reads only its own controls: sequence, max_evalue and min_identity belong to by:"sequence"; ticket_id and databases belong to by:"structure"; pdb_id, uniprot, start and limit are shared. A field the selected mode cannot consume is rejected rather than silently ignored. Output names the engine and database each hit came from.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   errors: [
@@ -149,6 +148,13 @@ export const findSimilar = tool('protein_find_similar', {
       code: JsonRpcErrorCode.InvalidParams,
       when: 'None of sequence, pdb_id, or uniprot was provided.',
       recovery: 'Provide a raw sequence, a PDB entry ID, or a UniProt accession to search from.',
+    },
+    {
+      reason: 'mode_mismatched_field',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'An input field only the other by mode consumes was supplied: sequence, max_evalue or min_identity under by:"structure"; ticket_id or a non-empty databases list under by:"sequence".',
+      recovery:
+        'Drop the field, or switch by to the mode that reads it — sequence, max_evalue and min_identity apply to by:"sequence"; ticket_id and databases apply to by:"structure".',
     },
     {
       reason: 'no_sequence',
@@ -178,16 +184,23 @@ export const findSimilar = tool('protein_find_similar', {
   output: outputSchema,
   enrichment: enrichmentShape,
 
-  handler(input, ctx): Promise<FindSimilarOutput> {
+  // `async` so the pre-dispatch guard rejects rather than throwing synchronously
+  // out of the call itself — every failure on this tool reaches the caller the
+  // same way.
+  async handler(input, ctx): Promise<FindSimilarOutput> {
     const cfg = getServerConfig();
-    if (input.by === 'sequence') return runSequence(input, ctx);
-    return runStructure(input, cfg.asyncPollTimeoutMs, ctx);
+    rejectModeMismatchedFields(input, ctx);
+    return input.by === 'sequence'
+      ? await runSequence(input, ctx)
+      : await runStructure(input, cfg.asyncPollTimeoutMs, ctx);
   },
 
   format: (result) => {
     const lines: string[] = [`## ${result.engine} (by:${result.by}) — ${result.status}`];
     if (result.ticketId)
-      lines.push(`**Ticket:** ${result.ticketId} — re-call with ticket_id to resume.`);
+      lines.push(
+        `**Ticket:** ${result.ticketId} — re-call with ticket_id to resume or re-page this job.`,
+      );
     for (const h of result.hits) {
       lines.push(`\n### ${h.id} _(${h.source})_`);
       if (h.title) lines.push(h.title);
@@ -266,9 +279,11 @@ async function runStructure(
   const foldseek = getFoldseekService();
   let outcome: FoldseekOutcome;
   if (input.ticket_id) {
-    // Resume path: poll the existing ticket, skipping coordinate resolution + submit.
+    // Resume path: poll the existing ticket, skipping coordinate resolution +
+    // submit. A completed ticket is idempotent upstream, so a re-call with a new
+    // start/limit pages the same finished job instead of running a second search.
     outcome = await foldseek.resume(
-      { ticketId: input.ticket_id, limit: input.limit, timeoutMs },
+      { ticketId: input.ticket_id, limit: input.limit, start: input.start, timeoutMs },
       ctx,
     );
   } else {
@@ -281,6 +296,7 @@ async function runStructure(
           input.databases && input.databases.length > 0 ? input.databases : DEFAULT_FOLDSEEK_DBS,
         mode: FOLDSEEK_MODE,
         limit: input.limit,
+        start: input.start,
         timeoutMs,
       },
       ctx,
@@ -314,12 +330,30 @@ async function runStructure(
     };
   }
 
-  if (outcome.hits.length === 0)
-    ctx.enrich.notice('Foldseek returned no fold-similar hits in the selected databases.');
+  // Same paging contract the sequence branch emits: the completed job's full hit
+  // count plus the offsets needed to walk it, computed from the hit array the
+  // service already parsed — no extra upstream call.
+  ctx.enrich.total(outcome.total);
+  const nextStart = input.start + outcome.hits.length;
+  ctx.enrich({
+    start: input.start,
+    ...(nextStart < outcome.total ? { nextStart } : {}),
+  });
+  // An empty page has two unrelated causes now that `start` pages a completed
+  // job, and they need opposite next moves: no hits at all means widen the
+  // databases, while a start past the end means ask for a lower offset.
+  if (outcome.hits.length === 0) {
+    ctx.enrich.notice(
+      outcome.total === 0
+        ? 'Foldseek returned no fold-similar hits in the selected databases.'
+        : `start ${input.start} is past the end of this job's ${outcome.total} hits. Re-call with a lower start to read a populated page.`,
+    );
+  }
   return {
     by: 'structure',
     engine: 'Foldseek',
     status: 'complete',
+    ticketId: outcome.ticketId,
     hits: outcome.hits.map((h) => ({
       id: h.pdbId ?? h.uniprotAccession ?? h.target,
       source: h.targetType === 'alphafold' ? ('predicted' as const) : ('experimental' as const),
@@ -330,6 +364,45 @@ async function runStructure(
       ...(h.uniprotAccession ? { uniprotAccession: h.uniprotAccession } : {}),
     })),
   };
+}
+
+/**
+ * Reject an input field the selected `by` mode cannot consume. Each branch reads
+ * only its own subset — `runSequence` alone reads sequence/max_evalue/
+ * min_identity, `runStructure` alone reads ticket_id/databases — so a field
+ * supplied for the other mode would be dropped silently, making an unfiltered
+ * search look filtered or an unscoped one look scoped. Guarded here rather than
+ * by a Zod refine so the rejection carries `data.reason` and a recovery hint
+ * naming the mode that accepts the field. `start` and `limit` are shared by both
+ * modes and are never read here; an empty `databases` array matches
+ * `runStructure`'s own fallback and is treated as omitted.
+ */
+function rejectModeMismatchedFields(input: FindSimilarInput, ctx: Ctx): void {
+  const offenders = (
+    input.by === 'structure'
+      ? [
+          input.sequence ? 'sequence' : null,
+          typeof input.max_evalue === 'number' ? 'max_evalue' : null,
+          typeof input.min_identity === 'number' ? 'min_identity' : null,
+        ]
+      : [
+          typeof input.ticket_id === 'string' ? 'ticket_id' : null,
+          input.databases && input.databases.length > 0 ? 'databases' : null,
+        ]
+  ).filter((field): field is string => field !== null);
+  if (offenders.length === 0) return;
+
+  const accepting = input.by === 'structure' ? 'sequence' : 'structure';
+  const plural = offenders.length > 1;
+  throw ctx.fail(
+    'mode_mismatched_field',
+    `by:"${input.by}" does not consume ${offenders.join(', ')}.`,
+    {
+      recovery: {
+        hint: `${offenders.join(', ')} ${plural ? 'are' : 'is'} only read under by:"${accepting}". Drop ${plural ? 'them' : 'it'}, or set by:"${accepting}" to apply ${plural ? 'them' : 'it'}.`,
+      },
+    },
+  );
 }
 
 /** Resolve a query sequence from a direct sequence, PDB ID, or UniProt accession. */
@@ -385,10 +458,17 @@ async function resolveCoordinateFile(
       fileName: `${input.uniprot.toUpperCase()}.pdb`,
     };
   }
+  // The declared recovery hint offers a raw sequence, which by:"structure"
+  // rejects outright — this branch names only the two identifiers that mode can
+  // actually derive coordinates from.
   throw ctx.fail(
     'missing_query',
     'by:structure requires a pdb_id or uniprot accession to derive coordinates.',
-    { ...ctx.recoveryFor('missing_query') },
+    {
+      recovery: {
+        hint: 'Provide pdb_id (e.g. 1CRN) or uniprot (e.g. P69905); by:"structure" derives coordinates from an identifier, never from a raw sequence.',
+      },
+    },
   );
 }
 

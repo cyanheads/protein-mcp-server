@@ -2,7 +2,9 @@
  * @fileoverview Foldseek service — wraps the public Foldseek structural-search
  * ticket API (`/api/ticket` → poll `/api/ticket/{id}` → `/api/result/{id}/{n}`).
  * Submits a query coordinate file against experimental + predicted databases and
- * returns fold-similarity hits. Backs `protein_find_similar` (`by: structure`).
+ * returns a page of fold-similarity hits alongside the full hit count, so a
+ * completed ticket can be re-paged instead of resubmitted. Backs
+ * `protein_find_similar` (`by: structure`).
  * Async: the ticket status field drives completion, not the HTTP code.
  * @module services/foldseek/foldseek-service
  */
@@ -41,9 +43,20 @@ export interface FoldseekHit {
   uniprotAccession?: string;
 }
 
+/**
+ * One page of a completed job's hits alongside the full parsed hit count. The
+ * result endpoint returns every alignment for the requested databases in one
+ * response, so the total is known without a second call and paging is a slice of
+ * what is already in memory.
+ */
+interface FoldseekPage {
+  hits: FoldseekHit[];
+  total: number;
+}
+
 /** Outcome of a structural search or ticket resume. */
 export type FoldseekOutcome =
-  | { status: 'complete'; ticketId: string; hits: FoldseekHit[] }
+  | { status: 'complete'; ticketId: string; hits: FoldseekHit[]; total: number }
   | { status: 'computing'; ticketId: string }
   | { status: 'not_found'; ticketId: string }
   | { status: 'failed'; error: string };
@@ -66,6 +79,7 @@ export class FoldseekService {
       databases: string[];
       mode: string;
       limit: number;
+      start: number;
       timeoutMs: number;
     },
     ctx: Context,
@@ -84,15 +98,15 @@ export class FoldseekService {
     }
 
     try {
-      const outcome = await withAsyncPoll<FoldseekHit[]>({
-        step: () => this.pollTicket(ticketId, params.limit, ctx),
+      const outcome = await withAsyncPoll<FoldseekPage>({
+        step: () => this.pollTicket(ticketId, params.start, params.limit, ctx),
         timeoutMs: params.timeoutMs,
         ctx,
         intervalMs: 1500,
         maxIntervalMs: 2500,
       });
       return outcome.status === 'complete'
-        ? { status: 'complete', ticketId, hits: outcome.value }
+        ? { status: 'complete', ticketId, ...outcome.value }
         : { status: 'computing', ticketId };
     } catch (err) {
       return { status: 'failed', error: err instanceof Error ? err.message : String(err) };
@@ -106,19 +120,19 @@ export class FoldseekService {
    * in-flight job (`computing`) or a processing error (`failed`). Never throws.
    */
   async resume(
-    params: { ticketId: string; limit: number; timeoutMs: number },
+    params: { ticketId: string; limit: number; start: number; timeoutMs: number },
     ctx: Context,
   ): Promise<FoldseekOutcome> {
     try {
-      const outcome = await withAsyncPoll<FoldseekHit[]>({
-        step: () => this.pollTicket(params.ticketId, params.limit, ctx),
+      const outcome = await withAsyncPoll<FoldseekPage>({
+        step: () => this.pollTicket(params.ticketId, params.start, params.limit, ctx),
         timeoutMs: params.timeoutMs,
         ctx,
         intervalMs: 1500,
         maxIntervalMs: 2500,
       });
       return outcome.status === 'complete'
-        ? { status: 'complete', ticketId: params.ticketId, hits: outcome.value }
+        ? { status: 'complete', ticketId: params.ticketId, ...outcome.value }
         : { status: 'computing', ticketId: params.ticketId };
     } catch (err) {
       // A 400 from the ticket/result endpoint is Foldseek's "invalid ID" — the
@@ -161,9 +175,10 @@ export class FoldseekService {
 
   private async pollTicket(
     ticketId: string,
+    start: number,
     limit: number,
     ctx: Context,
-  ): Promise<PollStep<FoldseekHit[]>> {
+  ): Promise<PollStep<FoldseekPage>> {
     const ticket = await fetchJson<{ status?: string }>(
       `${this.baseUrl}/api/ticket/${encodeURIComponent(ticketId)}`,
       ctx,
@@ -177,15 +192,21 @@ export class FoldseekService {
     const status = (ticket.status ?? '').toUpperCase();
     if (status === 'ERROR') throw new Error('Foldseek reported an error processing the structure');
     if (status !== 'COMPLETE') return { ready: false };
-    const hits = await this.fetchResults(ticketId, limit, ctx);
-    return { ready: true, value: hits };
+    return { ready: true, value: await this.fetchResults(ticketId, start, limit, ctx) };
   }
 
+  /**
+   * Read a completed ticket's full alignment set and return the requested page.
+   * The whole list is parsed before slicing so the caller learns the real hit
+   * count — a page with no total leaves an agent unable to tell a complete result
+   * from a truncated one, and unable to ask for the rest.
+   */
   private async fetchResults(
     ticketId: string,
+    start: number,
     limit: number,
     ctx: Context,
-  ): Promise<FoldseekHit[]> {
+  ): Promise<FoldseekPage> {
     const raw = await fetchJson<RawResultResponse>(
       `${this.baseUrl}/api/result/${encodeURIComponent(ticketId)}/0`,
       ctx,
@@ -198,11 +219,10 @@ export class FoldseekService {
         for (const aln of group ?? []) {
           if (!aln.target) continue;
           hits.push(normalizeHit(aln, db));
-          if (hits.length >= limit) return hits;
         }
       }
     }
-    return hits;
+    return { total: hits.length, hits: hits.slice(start, start + limit) };
   }
 }
 
