@@ -1,11 +1,13 @@
 /**
- * @fileoverview Tests for protein_search_structures: the no-criteria guard,
+ * @fileoverview Tests for protein_search_structures: the no-criteria guard, the
+ * rejection of a sequence-search threshold sent without a sequence,
  * content_type → content-universe scoping (including the "all" union),
  * computed-model (AlphaFold) ID parsing into a UniProt accession, experimental
- * metadata enrichment, the total/echo/empty-notice enrichment, the flat facet
- * contract (no cross-tab child requested or advertised), the repeated-facet-
- * dimension rejection, and the
- * empty-facet-dimension rendering across both consumption surfaces. RCSB mocked.
+ * metadata enrichment, the total/echo/empty-notice enrichment, the capped-facet
+ * advisory and its sequence-search variant, the flat facet contract (no
+ * cross-tab child requested or advertised), the repeated-facet-dimension
+ * rejection, and the empty-facet-dimension rendering across both consumption
+ * surfaces. RCSB mocked.
  * @module tests/tools/search-structures.tool.test
  */
 
@@ -82,6 +84,116 @@ describe('protein_search_structures', () => {
       searchStructures.handler(searchStructures.input.parse(input), ctx()),
     ).rejects.toMatchObject({ data: { reason: 'no_criteria' } });
     expect(search).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['min_identity', { query: 'hemoglobin', min_identity: 0.99 }],
+    ['max_evalue', { query: 'hemoglobin', max_evalue: 0.01 }],
+    ['both', { query: 'hemoglobin', min_identity: 0.99, max_evalue: 0.01 }],
+    ['alongside an organism filter', { organism: 'Homo sapiens', min_identity: 0.99 }],
+    ['alongside a resolution filter', { max_resolution: 2.5, max_evalue: 0.01 }],
+  ] as const)(
+    'rejects a sequence-search threshold sent without a sequence: %s (#56)',
+    async (_label, input) => {
+      await expect(
+        searchStructures.handler(searchStructures.input.parse(input), ctx()),
+      ).rejects.toMatchObject({
+        code: -32602,
+        data: {
+          reason: 'sequence_modifier_without_sequence',
+          recovery: { hint: expect.stringContaining('sequence') },
+        },
+      });
+      expect(search).not.toHaveBeenCalled();
+    },
+  );
+
+  it('names the supplied thresholds in the rejection message (#56)', async () => {
+    const err = await Promise.resolve(
+      searchStructures.handler(
+        searchStructures.input.parse({
+          query: 'hemoglobin',
+          min_identity: 0.99,
+          max_evalue: 0.01,
+        }),
+        ctx(),
+      ),
+    ).catch((e: Error) => e);
+    expect((err as Error).message).toContain(
+      'min_identity and max_evalue are sequence-search thresholds',
+    );
+  });
+
+  it('reads as one threshold when only one was supplied (#56)', async () => {
+    const err = await Promise.resolve(
+      searchStructures.handler(
+        searchStructures.input.parse({ query: 'hemoglobin', min_identity: 0.99 }),
+        ctx(),
+      ),
+    ).catch((e: Error) => e);
+    expect((err as Error).message).toContain('min_identity is a sequence-search threshold');
+  });
+
+  it('forwards both thresholds unchanged when a sequence is present (#56)', async () => {
+    search.mockResolvedValue({ total: 0, hits: [] });
+    getEntries.mockResolvedValue([]);
+    await searchStructures.handler(
+      searchStructures.input.parse({
+        sequence: 'MVLSPADK',
+        min_identity: 0.9,
+        max_evalue: 0.001,
+      }),
+      ctx(),
+    );
+    expect(search.mock.calls[0]?.[0]).toMatchObject({
+      sequence: 'MVLSPADK',
+      minIdentity: 0.9,
+      maxEvalue: 0.001,
+    });
+  });
+
+  it('leaves a sequence search with other filters and no thresholds unaffected (#56)', async () => {
+    search.mockResolvedValue({ total: 0, hits: [] });
+    getEntries.mockResolvedValue([]);
+    await searchStructures.handler(
+      searchStructures.input.parse({
+        sequence: 'MVLSPADK',
+        organism: 'Homo sapiens',
+        method: 'X-RAY DIFFRACTION',
+        max_resolution: 2.5,
+      }),
+      ctx(),
+    );
+    expect(search).toHaveBeenCalledOnce();
+  });
+
+  it('leaves the non-threshold modifiers unaffected without a sequence (#56)', async () => {
+    // content_type / facets / limit / start are not sequence-scoped, so the new
+    // guard must not touch a plain filtered search that carries them.
+    search.mockResolvedValue({ total: 0, hits: [] });
+    getEntries.mockResolvedValue([]);
+    await searchStructures.handler(
+      searchStructures.input.parse({
+        query: 'hemoglobin',
+        content_type: 'experimental',
+        facets: ['method'],
+        limit: 5,
+        start: 10,
+      }),
+      ctx(),
+    );
+    expect(search).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a threshold-only call on the no_criteria path (#56)', async () => {
+    // The new guard is additive: with nothing to search on, no_criteria still wins.
+    for (const input of [{ min_identity: 0.5 }, { max_evalue: 0.01 }] as const) {
+      search.mockClear();
+      await expect(
+        searchStructures.handler(searchStructures.input.parse(input), ctx()),
+      ).rejects.toMatchObject({ data: { reason: 'no_criteria' } });
+      expect(search).not.toHaveBeenCalled();
+    }
   });
 
   it('rejects a repeated facets dimension before any upstream call (#35)', async () => {
@@ -421,13 +533,162 @@ describe('protein_search_structures', () => {
       ],
     });
     getEntries.mockResolvedValue([]);
+    const c = ctx();
     const out = await searchStructures.handler(
       searchStructures.input.parse({ query: 'kinase', facets: ['organism'] }),
-      ctx(),
+      c,
     );
     expect(out.facets?.[0]?.truncated).toBe(true);
     expect(out.facets?.[0]?.buckets).toHaveLength(FACET_CAP);
     expect(out.facets?.[0]?.missingValueCount).toBe(500);
+    // The structural flag alone left the caller no route to the long tail (#52).
+    const notice = String(getEnrichment(c).notice);
+    expect(notice).toContain(`organism was capped at ${FACET_CAP} buckets.`);
+    expect(notice).toContain('protein_analyze_collection');
+    expect(notice).toContain('group_by');
+    expect(notice).toContain(`bucket_limit above ${FACET_CAP}`);
+  });
+
+  it('names every truncated dimension, not just the first (#52)', async () => {
+    const many = (label: string) =>
+      Array.from({ length: FACET_CAP + 1 }, (_, i) => ({ label: `${label}${i}`, count: 1 }));
+    search.mockResolvedValue({
+      total: FACET_CAP + 1,
+      hits: [{ id: '4HHB', score: 1 }],
+      facets: [
+        {
+          dimension: 'organism',
+          attribute: 'rcsb_entity_source_organism.ncbi_scientific_name',
+          buckets: many('org'),
+        },
+        { dimension: 'method', attribute: 'exptl.method', buckets: many('m') },
+      ],
+    });
+    getEntries.mockResolvedValue([]);
+    const c = ctx();
+    await searchStructures.handler(
+      searchStructures.input.parse({ query: 'kinase', facets: ['organism', 'method'] }),
+      c,
+    );
+    expect(String(getEnrichment(c).notice)).toContain(
+      `organism and method were capped at ${FACET_CAP} buckets.`,
+    );
+  });
+
+  it('does not offer protein_analyze_collection to a sequence search (#52)', async () => {
+    // That tool has no sequence input, so it cannot reproduce this result set.
+    const buckets = Array.from({ length: FACET_CAP + 1 }, (_, i) => ({
+      label: `org${i}`,
+      count: 1,
+    }));
+    search.mockResolvedValue({
+      total: FACET_CAP + 1,
+      hits: [{ id: '1A00_1', score: 1 }],
+      facets: [
+        {
+          dimension: 'organism',
+          attribute: 'rcsb_entity_source_organism.ncbi_scientific_name',
+          buckets,
+        },
+      ],
+    });
+    getEntries.mockResolvedValue([]);
+    const c = ctx();
+    await searchStructures.handler(
+      searchStructures.input.parse({ sequence: 'MVLSPADK', facets: ['organism'] }),
+      c,
+    );
+    const notice = String(getEnrichment(c).notice);
+    expect(notice).toContain(`organism was capped at ${FACET_CAP} buckets.`);
+    expect(notice).toMatch(/cannot reproduce a sequence search/);
+    expect(notice).toMatch(/drop sequence, or add organism, method, max_resolution, or query/);
+    expect(notice).not.toMatch(/bucket_limit/);
+  });
+
+  it('adds no truncation fragment when no requested facet was capped (#52)', async () => {
+    search.mockResolvedValue({
+      total: 500,
+      hits: [{ id: '4HHB', score: 1 }],
+      facets: [
+        {
+          dimension: 'method',
+          attribute: 'exptl.method',
+          buckets: [{ label: 'X-RAY DIFFRACTION', count: 500 }],
+        },
+      ],
+    });
+    getEntries.mockResolvedValue([]);
+    const c = ctx();
+    await searchStructures.handler(
+      searchStructures.input.parse({ query: 'hemoglobin', facets: ['method'] }),
+      c,
+    );
+    expect(getEnrichment(c)).not.toHaveProperty('notice');
+  });
+
+  it('composes the truncation fragment with the zero-hit and coverage notices (#52)', async () => {
+    const buckets = Array.from({ length: FACET_CAP + 1 }, (_, i) => ({
+      label: `org${i}`,
+      count: 10,
+    }));
+    search.mockResolvedValue({
+      total: (FACET_CAP + 1) * 10 + 5000,
+      hits: [],
+      facets: [
+        {
+          dimension: 'organism',
+          attribute: 'rcsb_entity_source_organism.ncbi_scientific_name',
+          buckets,
+        },
+      ],
+    });
+    getEntries.mockResolvedValue([]);
+    const c = ctx();
+    await searchStructures.handler(
+      searchStructures.input.parse({
+        query: 'kinase',
+        content_type: 'experimental',
+        facets: ['organism'],
+      }),
+      c,
+    );
+    // One joined string carries all three; none may overwrite another.
+    const notice = String(getEnrichment(c).notice);
+    expect(notice).toMatch(/^No experimental structures matched/);
+    expect(notice).toContain(`organism was capped at ${FACET_CAP} buckets.`);
+    expect(notice).toContain('organism buckets cover');
+  });
+
+  it('carries the truncation advisory on both consumption surfaces (#52)', async () => {
+    const buckets = Array.from({ length: FACET_CAP + 1 }, (_, i) => ({
+      label: `org${i}`,
+      count: 1,
+    }));
+    search.mockResolvedValue({
+      total: FACET_CAP + 1,
+      hits: [{ id: '4HHB', score: 1 }],
+      facets: [
+        {
+          dimension: 'organism',
+          attribute: 'rcsb_entity_source_organism.ncbi_scientific_name',
+          buckets,
+        },
+      ],
+    });
+    getEntries.mockResolvedValue([]);
+    const result = (await runToolContract(searchStructures, {
+      query: 'kinase',
+      facets: ['organism'],
+      limit: 1,
+    })) as {
+      structuredContent: { notice?: string };
+      content: Array<{ type: string; text: string }>;
+    };
+
+    expect(String(result.structuredContent.notice)).toContain('protein_analyze_collection');
+    const [formatted, ...trailer] = result.content;
+    expect(formatted?.text).toContain('**organism** (truncated)');
+    expect(trailer.map((b) => b.text).join('\n')).toContain('protein_analyze_collection');
   });
 
   it('composes the coverage gap with the zero-hit notice (#32)', async () => {

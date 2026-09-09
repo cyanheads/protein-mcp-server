@@ -44,6 +44,25 @@ function accessionFromCsm(id: string): string | undefined {
   return /AF_AF([A-Z0-9]+?)F\d+$/i.exec(id)?.[1]?.toUpperCase();
 }
 
+/**
+ * Advisory for the facet dimensions the bucket cap sliced, naming every one of
+ * them rather than the first. The cap here is fixed server-side with no per-call
+ * override, so the route to the long tail is another tool: every dimension this
+ * tool facets is also a `protein_analyze_collection` `group_by` value, and that
+ * tool takes a `bucket_limit` up to 500.
+ *
+ * A sequence search has no such route — `protein_analyze_collection` has no
+ * sequence input, so it cannot reproduce the result set the facet describes.
+ * Pointing there would hand back a different distribution under the same name,
+ * so that case is told to narrow the request instead.
+ */
+function truncationNotice(dimensions: string[], cap: number, sequenceSearch: boolean): string {
+  const named = `${dimensions.join(' and ')} ${dimensions.length > 1 ? 'were' : 'was'} capped at ${cap} buckets`;
+  return sequenceSearch
+    ? `${named}. protein_analyze_collection cannot reproduce a sequence search, so narrow this request instead: drop sequence, or add organism, method, max_resolution, or query filters to shrink the distribution before the cap.`
+    : `${named}. Call protein_analyze_collection with ${dimensions.length > 1 ? 'each dimension' : 'that dimension'} in group_by and a bucket_limit above ${cap} (up to 500) to reach the long tail.`;
+}
+
 export const searchStructures = tool('protein_search_structures', {
   title: 'protein-mcp-server: search structures',
   description:
@@ -65,6 +84,13 @@ export const searchStructures = tool('protein_search_structures', {
       when: 'No query, sequence, organism, method, or maximum resolution was provided — nothing to search on.',
       recovery:
         'Provide a free-text query, protein sequence, organism name, experimental method, or maximum resolution.',
+    },
+    {
+      reason: 'sequence_modifier_without_sequence',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'min_identity or max_evalue was supplied with no sequence, so the threshold would never reach a sequence search.',
+      recovery:
+        'Add a sequence to run a similarity search these thresholds can filter, or drop min_identity and max_evalue and search on the remaining criteria.',
     },
     {
       reason: 'duplicate_dimension',
@@ -103,12 +129,16 @@ export const searchStructures = tool('protein_search_structures', {
       .min(0)
       .max(1)
       .optional()
-      .describe('Minimum sequence identity (0–1) for a sequence search. Default 0.'),
+      .describe(
+        'Minimum sequence identity (0–1) for a sequence search. Requires sequence — supplying it without one is rejected, since the threshold would never reach RCSB. Default 0.',
+      ),
     max_evalue: z
       .number()
       .positive()
       .optional()
-      .describe('Maximum E-value for a sequence search. Default 1.'),
+      .describe(
+        'Maximum E-value for a sequence search. Requires sequence — supplying it without one is rejected, since the threshold would never reach RCSB. Default 1.',
+      ),
     content_type: z
       .enum(['experimental', 'predicted', 'all'])
       .default('all')
@@ -207,6 +237,22 @@ export const searchStructures = tool('protein_search_structures', {
         },
       );
     }
+    // buildQuery() reads these two only inside its sequence branch, so without a
+    // sequence they never reach RCSB and the response looks like a filtered search
+    // that was never filtered. Rejected here rather than in the schema so the
+    // caller gets a data.reason and the declared recovery hint alongside -32602.
+    const sequenceModifiers = [
+      typeof input.min_identity === 'number' ? 'min_identity' : undefined,
+      typeof input.max_evalue === 'number' ? 'max_evalue' : undefined,
+    ].filter((name) => name !== undefined);
+    if (!input.sequence && sequenceModifiers.length > 0) {
+      const many = sequenceModifiers.length > 1;
+      throw ctx.fail(
+        'sequence_modifier_without_sequence',
+        `${sequenceModifiers.join(' and ')} ${many ? 'are sequence-search thresholds' : 'is a sequence-search threshold'}, but this request has no sequence — ${many ? 'they' : 'it'} would never reach RCSB.`,
+        { ...ctx.recoveryFor('sequence_modifier_without_sequence') },
+      );
+    }
     // RCSB collapses two identically-named facet requests into one raw facet, and
     // the attribute-keyed lookup maps both specs back onto it — a repeated
     // dimension would return the same breakdown twice and double-count on any sum.
@@ -259,11 +305,16 @@ export const searchStructures = tool('protein_search_structures', {
     });
     if (input.query) ctx.enrich.echo(input.query);
 
-    // `notice` is a single last-wins field, so the zero-hit advice and one
-    // fragment per under-covered facet dimension compose into ONE string.
+    // `notice` is a single last-wins field, so the zero-hit advice, the capped-facet
+    // advice, and one fragment per under-covered facet dimension compose into ONE string.
     const notices: string[] = [];
     if (hits.length === 0) notices.push(ZERO_HIT_NOTICE[input.content_type]);
-    if (facets) notices.push(...coverageNotices(facets, result.total));
+    if (facets) {
+      const capped = facets.filter((f) => f.truncated).map((f) => f.dimension);
+      if (capped.length > 0)
+        notices.push(truncationNotice(capped, cfg.facetBucketCap, Boolean(input.sequence)));
+      notices.push(...coverageNotices(facets, result.total));
+    }
     if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     return { hits, ...(facets ? { facets } : {}) };
