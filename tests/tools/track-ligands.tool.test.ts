@@ -141,6 +141,52 @@ describe('protein_track_ligands — find_ligand', () => {
     ).rejects.toMatchObject({ data: { reason: 'not_found' } });
   });
 
+  it.each(['C29 H31 N7 O', 'C29H31N7O'])(
+    'resolves the formula %s to STI on both surfaces (#50)',
+    async (query) => {
+      // The formula reaches the service verbatim — spacing is the upstream
+      // formula terminal's concern, not this layer's.
+      findChemComps.mockResolvedValue(['STI']);
+      getChemComp.mockResolvedValue({
+        compId: 'STI',
+        name: 'IMATINIB',
+        formula: 'C29 H31 N7 O',
+      });
+      countEntriesWithLigand.mockResolvedValue(31);
+
+      const result = (await runToolContract(trackLigands, {
+        mode: 'find_ligand',
+        query,
+        limit: 3,
+      })) as {
+        structuredContent: { ligands: Array<{ compId: string; formula?: string }> };
+        content: Array<{ text: string }>;
+      };
+
+      expect(findChemComps).toHaveBeenCalledWith(query, 25, expect.anything());
+      expect(result.structuredContent.ligands.map((l) => l.compId)).toEqual(['STI']);
+      expect(result.structuredContent.ligands[0]?.formula).toBe('C29 H31 N7 O');
+      const rendered = result.content.map((block) => block.text).join('\n');
+      expect(rendered).toContain('### STI');
+      expect(rendered).toContain('**Formula:** C29 H31 N7 O');
+    },
+  );
+
+  it('routes a formula with no upstream match through the existing not_found path (#50)', async () => {
+    // A mis-guessed formula shape is an empty 204 upstream, never an error, so it
+    // arrives here as an empty candidate list — no new failure mode is needed.
+    findChemComps.mockResolvedValue([]);
+    await expect(
+      trackLigands.handler(
+        trackLigands.input.parse({ mode: 'find_ligand', query: 'C99 H99 N99 O99' }),
+        ctx(),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'not_found' },
+    });
+  });
+
   it('carries the declared recovery hint on the missing_param error (#10)', async () => {
     await expect(
       trackLigands.handler(trackLigands.input.parse({ mode: 'find_ligand' }), ctx()),

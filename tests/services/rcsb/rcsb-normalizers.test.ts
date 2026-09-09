@@ -219,7 +219,28 @@ describe('RcsbService.getEntries', () => {
     await expect(service().getEntries(['4HHB'], createMockContext())).rejects.toMatchObject({
       code: JsonRpcErrorCode.InternalError,
       message: expect.stringContaining('field "bogus" not found'),
+      data: { retryable: false },
     });
+  });
+
+  it('throws when GraphQL returns partial data alongside a non-empty errors array (#48)', async () => {
+    // A field-level upstream failure leaves `data` populated but incomplete.
+    // Returning it would be indistinguishable from a genuinely sparse record.
+    fetchJsonMock.mockResolvedValue({
+      data: { entries: [{ rcsb_id: '4HHB' }] },
+      errors: [{ message: 'upstream field failed' }],
+    });
+    await expect(service().getEntries(['4HHB'], createMockContext())).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InternalError,
+      message: expect.stringContaining('upstream field failed'),
+      data: { retryable: false },
+    });
+  });
+
+  it('resolves normally when an empty errors array accompanies data (#48)', async () => {
+    fetchJsonMock.mockResolvedValue({ data: { entries: [ENTRY_4HHB] }, errors: [] });
+    const [meta] = await service().getEntries(['4HHB'], createMockContext());
+    expect(meta).toMatchObject({ id: '4HHB', resolution: 1.74 });
   });
 });
 
@@ -293,6 +314,21 @@ describe('RcsbService.resolveUniprotEntities', () => {
   it('returns [] when the entry has no polymer entities', async () => {
     fetchJsonMock.mockResolvedValue(gql({ entry: { polymer_entities: [] } }));
     expect(await service().resolveUniprotEntities('1ABC', createMockContext())).toEqual([]);
+  });
+
+  it('fails rather than reporting a partial xref set when errors accompany data (#48)', async () => {
+    // The same precedence fix covers every consumer of the shared GraphQL helper:
+    // a dropped sub-selection must not read as "this entry has no UniProt xref".
+    fetchJsonMock.mockResolvedValue({
+      data: { entry: { polymer_entities: [] } },
+      errors: [{ message: 'reference_sequence_identifiers unavailable' }],
+    });
+    await expect(
+      service().resolveUniprotEntities('4HHB', createMockContext()),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InternalError,
+      message: expect.stringContaining('reference_sequence_identifiers unavailable'),
+    });
   });
 });
 
@@ -695,6 +731,102 @@ describe('RcsbService search helpers', () => {
     // A date interval is a period word, not a numeric bin width — no numeric range.
     expect(out.facets[0]?.buckets[0]).toEqual({ label: 'Homo sapiens', count: 81957 });
     expect(out.facets[1]?.buckets[0]).toEqual({ label: '1976', count: 13 });
+  });
+});
+
+describe('RcsbService.findChemComps — formula vs name routing (#50)', () => {
+  /** The `query` node of the single search body posted by the call under test. */
+  const postedQuery = (): {
+    type: string;
+    service?: string;
+    parameters?: Record<string, unknown>;
+    nodes?: Array<{ parameters?: Record<string, unknown>; service?: string }>;
+  } => {
+    const opts = fetchJsonMock.mock.calls[0]?.[2] as unknown as { body: string };
+    return JSON.parse(opts.body).query;
+  };
+
+  beforeEach(() =>
+    fetchJsonMock.mockResolvedValue({
+      total_count: 1,
+      result_set: [{ identifier: 'STI', score: 1 }],
+    }),
+  );
+
+  it('routes a spaced Hill-notation formula to the chemical/formula terminal', async () => {
+    const out = await service().findChemComps('C29 H31 N7 O', 25, createMockContext());
+    expect(out).toEqual(['STI']);
+    expect(postedQuery()).toEqual({
+      type: 'terminal',
+      service: 'chemical',
+      parameters: { type: 'formula', value: 'C29 H31 N7 O' },
+    });
+    // match_subset stays unset — exact composition, one canonical hit.
+    expect(postedQuery().parameters).not.toHaveProperty('match_subset');
+  });
+
+  it('routes an unspaced formula to the same terminal without client-side normalization', async () => {
+    const out = await service().findChemComps('C29H31N7O', 25, createMockContext());
+    expect(out).toEqual(['STI']);
+    expect(postedQuery()).toMatchObject({
+      service: 'chemical',
+      parameters: { type: 'formula', value: 'C29H31N7O' },
+    });
+  });
+
+  it.each(['STI', 'HEM', 'heme', 'imatinib', 'VITAMIN B12', '1PE'])(
+    'keeps %s on the name/synonym text_chem path',
+    async (query) => {
+      await service().findChemComps(query, 25, createMockContext());
+      const q = postedQuery();
+      expect(q.type).toBe('group');
+      expect(q.nodes?.map((n) => n.parameters?.attribute)).toEqual([
+        'chem_comp.name',
+        'rcsb_chem_comp_synonyms.name',
+      ]);
+      expect(q.nodes?.every((n) => n.service === 'text_chem')).toBe(true);
+    },
+  );
+
+  it('returns [] for a formula with no upstream match (204 empty body)', async () => {
+    // postSearch's onEmptyBody already turns RCSB's 204 into an empty result set;
+    // the tool's existing not_found branch takes it from there.
+    fetchJsonMock.mockResolvedValue({ total_count: 0, result_set: [], facets: [] });
+    expect(await service().findChemComps('C99 H99 N99 O99', 25, createMockContext())).toEqual([]);
+  });
+
+  it.each(['SF4', 'H4B', 'BU1'])(
+    'falls back to the name/synonym search when the formula terminal misses on %s',
+    async (query) => {
+      // A component ID built only from single-letter element symbols plus a digit
+      // satisfies every formula-shape rule, so detection claims it. An empty
+      // formula match must not end the resolution — the name path still owns it.
+      fetchJsonMock
+        .mockResolvedValueOnce({ total_count: 0, result_set: [] })
+        .mockResolvedValueOnce({ total_count: 1, result_set: [{ identifier: '6ML', score: 1 }] });
+
+      expect(await service().findChemComps(query, 25, createMockContext())).toEqual(['6ML']);
+      expect(fetchJsonMock).toHaveBeenCalledTimes(2);
+      const queries = fetchJsonMock.mock.calls.map((call) => {
+        const opts = call[2] as unknown as { body: string };
+        return JSON.parse(opts.body).query;
+      });
+      expect(queries[0]).toMatchObject({ service: 'chemical' });
+      expect(queries[1]).toMatchObject({ type: 'group' });
+    },
+  );
+
+  it('does not re-query the name path when the formula terminal matched', async () => {
+    await service().findChemComps('C29 H31 N7 O', 25, createMockContext());
+    expect(fetchJsonMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('paginates the formula path with the same row cap as the name path', async () => {
+    await service().findChemComps('C29 H31 N7 O', 7, createMockContext());
+    const opts = fetchJsonMock.mock.calls[0]?.[2] as unknown as { body: string };
+    const body = JSON.parse(opts.body);
+    expect(body.return_type).toBe('mol_definition');
+    expect(body.request_options.paginate).toEqual({ start: 0, rows: 7 });
   });
 });
 

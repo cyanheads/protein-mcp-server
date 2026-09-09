@@ -183,28 +183,37 @@ export class RcsbService {
     return raw.total_count ?? 0;
   }
 
-  /** Resolve a ligand name/synonym to candidate chemical component IDs. */
+  /**
+   * Resolve a ligand name, synonym, or molecular formula to candidate chemical
+   * component IDs. A formula-shaped query routes to RCSB's `chemical` service,
+   * which matches composition; anything else runs the name/synonym search, where
+   * a formula would only match components whose *name* contains formula-like
+   * tokens.
+   *
+   * Formula detection is a shape heuristic, so it can claim a string that is
+   * really a component ID — an all-caps ID built only from single-letter element
+   * symbols and a digit (`SF4`, `H4B`) tokenizes as a formula. An empty formula
+   * match therefore falls through to the name/synonym search rather than ending
+   * the resolution, which keeps those IDs reaching the path that can resolve
+   * them. The extra call happens only when the formula terminal matched nothing.
+   */
   async findChemComps(query: string, limit: number, ctx: Context): Promise<string[]> {
-    // Match the term against both the formal component name and its synonyms:
-    // common names ("heme", "aspirin") live in synonyms, not the formal name
-    // ("PROTOPORPHYRIN IX CONTAINING FE"). A plain full_text search over
-    // mol_definition matches far too broadly and buries the intended component.
-    const chemTerm = (attribute: string) => ({
-      type: 'terminal' as const,
-      service: 'text_chem' as const,
-      parameters: { attribute, operator: 'contains_words', value: query },
-    });
-    const body = {
-      query: {
-        type: 'group' as const,
-        logical_operator: 'or' as const,
-        nodes: [chemTerm('chem_comp.name'), chemTerm('rcsb_chem_comp_synonyms.name')],
-      },
-      return_type: 'mol_definition' as const,
-      request_options: { paginate: { start: 0, rows: limit } },
+    const search = async (query_: unknown) => {
+      const raw = await this.postSearch(
+        {
+          query: query_,
+          return_type: 'mol_definition' as const,
+          request_options: { paginate: { start: 0, rows: limit } },
+        },
+        ctx,
+        'RcsbService.findChemComps',
+      );
+      return normalizeHits(raw.result_set).map((h) => h.id);
     };
-    const raw = await this.postSearch(body, ctx, 'RcsbService.findChemComps');
-    return normalizeHits(raw.result_set).map((h) => h.id);
+
+    if (!isChemicalFormula(query)) return search(chemNameQuery(query));
+    const byFormula = await search(formulaQuery(query));
+    return byFormula.length > 0 ? byFormula : search(chemNameQuery(query));
   }
 
   /** Facet-only aggregation over an optional scoping query (no row pull). */
@@ -395,9 +404,19 @@ export class RcsbService {
         baseDelayMs: 400,
       },
     );
+    // GraphQL reports field-level failures in `errors` while still returning the
+    // sub-selections that succeeded, so `errors` is evaluated before `data`: a
+    // partial payload is indistinguishable from a genuinely sparse record, and
+    // every metadata consumer of this helper treats a metadata-request failure as
+    // a whole-call failure. An empty `errors` array is not a failure.
+    if (body.errors && body.errors.length > 0) {
+      const message = body.errors[0]?.message ?? 'unknown error';
+      throw new McpError(JsonRpcErrorCode.InternalError, `RCSB GraphQL error: ${message}`, {
+        retryable: false,
+      });
+    }
     if (body.data) return body.data;
-    const message = body.errors?.[0]?.message ?? 'unknown error';
-    throw new McpError(JsonRpcErrorCode.InternalError, `RCSB GraphQL error: ${message}`, {
+    throw new McpError(JsonRpcErrorCode.InternalError, 'RCSB GraphQL error: unknown error', {
       retryable: false,
     });
   }
@@ -447,6 +466,87 @@ export function buildQuery(params: StructureSearchParams): unknown {
 
 function textNode(attribute: string, operator: string, value: string | number): unknown {
   return { type: 'terminal', service: 'text', parameters: { attribute, operator, value } };
+}
+
+/**
+ * Name/synonym chemical-dictionary query. Matches the term against both the
+ * formal component name and its synonyms: common names ("heme", "aspirin") live
+ * in synonyms, not the formal name ("PROTOPORPHYRIN IX CONTAINING FE"). A plain
+ * full_text search over mol_definition matches far too broadly and buries the
+ * intended component.
+ */
+function chemNameQuery(query: string): unknown {
+  const chemTerm = (attribute: string) => ({
+    type: 'terminal' as const,
+    service: 'text_chem' as const,
+    parameters: { attribute, operator: 'contains_words', value: query },
+  });
+  return {
+    type: 'group' as const,
+    logical_operator: 'or' as const,
+    nodes: [chemTerm('chem_comp.name'), chemTerm('rcsb_chem_comp_synonyms.name')],
+  };
+}
+
+/**
+ * Composition query against RCSB's `chemical` service. The formula terminal
+ * accepts both CCD Hill notation (`C29 H31 N7 O`) and the unspaced form
+ * (`C29H31N7O`), so the value is passed through unnormalized. `match_subset` is
+ * left unset for an exact-composition match: the callers that consume the
+ * resolved ID (`structures_with_ligand`, `binding_site`) expect a single
+ * canonical component, which subset matching would dilute with supersets.
+ * The `text_chem` attribute `chem_comp.formula` is not an alternative — RCSB
+ * rejects it with "search is not enabled on [ chem_comp.formula ] attribute".
+ */
+function formulaQuery(query: string): unknown {
+  return {
+    type: 'terminal' as const,
+    service: 'chemical' as const,
+    parameters: { type: 'formula', value: query.trim() },
+  };
+}
+
+/**
+ * Element symbols in canonical casing — the token vocabulary formula detection
+ * accepts. Token shape alone is not enough: an all-caps chemical name can
+ * tokenize as element-shaped letters (`VITAMIN B12` → V·I·T·A·M·I·N·B12), and
+ * mis-routing a name to the formula terminal returns an empty match set rather
+ * than an error, so the miss would be silent.
+ */
+const ELEMENT_SYMBOLS = new Set(
+  `H He Li Be B C N O F Ne Na Mg Al Si P S Cl Ar K Ca Sc Ti V Cr Mn Fe Co Ni Cu Zn Ga Ge As Se
+   Br Kr Rb Sr Y Zr Nb Mo Tc Ru Rh Pd Ag Cd In Sn Sb Te I Xe Cs Ba La Ce Pr Nd Pm Sm Eu Gd Tb
+   Dy Ho Er Tm Yb Lu Hf Ta W Re Os Ir Pt Au Hg Tl Pb Bi Po At Rn Fr Ra Ac Th Pa U Np Pu Am Cm
+   Bk Cf Es Fm Md No Lr Rf Db Sg Bh Hs Mt Ds Rg Cn Nh Fl Mc Lv Ts Og`.split(/\s+/),
+);
+
+/** One formula token: an element symbol plus an optional count (`C29`, `Fe`). */
+const FORMULA_TOKEN_RE = /[A-Z][a-z]?\d*/g;
+
+/**
+ * True when `query` is a molecular formula rather than a chemical name or a
+ * component ID. Whitespace is insignificant — both the spaced CCD Hill notation
+ * and the unspaced form resolve upstream — but every remaining character must
+ * belong to an element-symbol token, and at least one element count must be
+ * present. The digit requirement carries most of the discrimination: Hill
+ * notation omits an implicit `1` only for the leading element, never for all of
+ * them, so `STI` (S·Ti) and `HEM` (H·E·M) are IDs, not formulas.
+ *
+ * It is a shape test, not a decision about what the string means, and it cannot
+ * separate every component ID from a formula: an all-caps ID built only from
+ * single-letter element symbols plus a digit (`SF4`, `H4B`, `BU1`) satisfies
+ * every rule here. `findChemComps` absorbs that by retrying the name/synonym
+ * search when the formula terminal matches nothing, so a claimed ID still
+ * resolves.
+ */
+export function isChemicalFormula(query: string): boolean {
+  const compact = query.trim().replace(/\s+/g, '');
+  if (!/\d/.test(compact)) return false;
+  const tokens = compact.match(FORMULA_TOKEN_RE) ?? [];
+  // Anything the tokenizer skipped (punctuation, a lowercase-leading word, a
+  // digit-leading component ID) leaves the rejoined tokens shorter than the input.
+  if (tokens.join('') !== compact) return false;
+  return tokens.every((token) => ELEMENT_SYMBOLS.has(token.replace(/\d+$/, '')));
 }
 
 /**
