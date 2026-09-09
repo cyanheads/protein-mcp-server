@@ -2,9 +2,12 @@
  * @fileoverview protein_get_structure — fetch experimental, predicted, or
  * best-available structures by ID. Batches up to N experimental IDs in one RCSB
  * GraphQL call with per-ID partial success (`failed[]`). Optionally inlines
- * coordinate-file content; when that overflows a byte budget it returns a
- * per-structure section outline for targeted re-call instead of truncating.
- * Carries upstream data attribution (RCSB PDB / AlphaFold DB) per response.
+ * coordinate-file content; when that overflows a byte budget the content is
+ * withheld from both surfaces and a per-structure size outline is returned
+ * instead of truncating. Every success-path advisory — batch cap, partial
+ * failure, overflow, failed inlining — accumulates into one notice, since the
+ * framework's `notice` field is last-write-wins. Carries upstream data
+ * attribution (RCSB PDB / AlphaFold DB) per response.
  * @module mcp-server/tools/definitions/get-structure.tool
  */
 
@@ -19,7 +22,12 @@ import { mapWithConcurrency } from '@/services/shared/async.js';
 import { attributionsFor } from '@/services/shared/attribution.js';
 import { fetchText } from '@/services/shared/http.js';
 import { isAlphaFoldEntryId, isPdbId, isUniProtAccession } from '@/services/shared/identifiers.js';
-import { attributionSchema, renderAttribution } from './_schemas.js';
+import {
+  attributionSchema,
+  ligandSchema,
+  polymerEntitySchema,
+  renderAttribution,
+} from './_schemas.js';
 
 const confidenceBucketsSchema = z.object({
   veryLow: z.number().describe('Fraction of residues with pLDDT < 50.'),
@@ -44,6 +52,30 @@ const structureRecordSchema = z
     method: z.string().optional().describe('Experimental method(s).'),
     resolution: z.number().optional().describe('Resolution in Å (experimental).'),
     organism: z.string().optional().describe('Source organism.'),
+    molecularWeight: z
+      .number()
+      .optional()
+      .describe(
+        'Deposited structure molecular weight in kDa, from the RCSB entry record. Omitted when the record does not report one.',
+      ),
+    releaseDate: z
+      .string()
+      .optional()
+      .describe(
+        'Initial release date (ISO 8601), from the RCSB entry record. Omitted when the record does not report one.',
+      ),
+    polymerEntities: z
+      .array(polymerEntitySchema)
+      .optional()
+      .describe(
+        'Modeled polymer entities, each with both chain namespaces — authAsymIds for protein_get_annotations.chain, labelAsymIds for protein_compare_structures.chain. Present for records served by the RCSB entry endpoint (source experimental, computed models included); omitted for predicted / best_available records and for entries with none.',
+      ),
+    ligands: z
+      .array(ligandSchema)
+      .optional()
+      .describe(
+        'Bound non-polymer components. Present for records served by the RCSB entry endpoint; omitted when the entry binds none or the record carries no ligand data.',
+      ),
     provider: z.string().optional().describe('Model provider (predicted / best_available).'),
     confidence: z
       .number()
@@ -92,17 +124,7 @@ type StructureRecord = z.infer<typeof structureRecordSchema>;
 
 export const getStructure = tool('protein_get_structure', {
   title: 'protein-mcp-server: get structure',
-  description:
-    'Fetch structures with metadata and coordinate-file URLs. source "experimental" takes PDB entry IDs ' +
-    '(batched in one call), and also resolves the computed-model IDs protein_search_structures returns ' +
-    '(AF_*/MA_*), which come back marked source "predicted" with their modelling provider; ' +
-    '"predicted" takes UniProt accessions (AlphaFold, with pLDDT/PAE confidence); ' +
-    '"best_available" takes UniProt accessions and returns the top federated model — the highest-resolution ' +
-    'experimental structure if one exists (optimizing resolution, not biological representativeness, so it can ' +
-    'return an engineered mutant over the wild-type entry), else the best prediction. Resolves up to the ' +
-    'configured batch cap per call with per-ID partial success — missed IDs are listed in failed[]. Set ' +
-    'include_coords to inline coordinate content; if that overflows, a section outline is returned — re-call ' +
-    'with sections:[ids] to inline specific structures.',
+  description: `Fetch structures with metadata and coordinate-file URLs. source "experimental" takes PDB entry IDs (batched in one call), and also resolves the computed-model IDs protein_search_structures returns (AF_*/MA_*), which come back marked source "predicted" with their modelling provider; "predicted" takes UniProt accessions (AlphaFold, with pLDDT/PAE confidence); "best_available" takes UniProt accessions and returns the top federated model — the highest-resolution experimental structure if one exists (optimizing resolution, not biological representativeness, so it can return an engineered mutant over the wild-type entry), else the best prediction. Records served by the RCSB entry endpoint also carry polymer entities with both chain namespaces (labelAsymIds for protein_compare_structures, authAsymIds for protein_get_annotations), bound ligands, molecular weight, and release date. Resolves up to the configured batch cap per call with per-ID partial success — missed IDs are listed in failed[], and IDs beyond the cap are reported in the notice. Set include_coords to inline coordinate content; if the inlined bytes exceed the response budget the content is withheld and overflow lists each structure's size — re-call with sections:[ids] for specific structures, or for a single oversized file download it from that record's coordinateUrls.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   errors: [
@@ -187,16 +209,33 @@ export const getStructure = tool('protein_get_structure', {
   }),
 
   enrichment: {
-    requested: z.number().describe('Number of IDs requested.'),
-    resolved: z.number().describe('Number of IDs resolved.'),
-    notice: z.string().optional().describe('Advisory note (partial failures, overflow guidance).'),
+    requested: z
+      .number()
+      .describe(
+        'Number of IDs in the original request (input.ids.length), before the batch cap was applied.',
+      ),
+    processed: z
+      .number()
+      .describe(
+        'Number of IDs actually processed after the batch cap. Lower than requested means the excess IDs were ignored and never looked up — re-submit them in a follow-up call.',
+      ),
+    resolved: z.number().describe('Number of processed IDs that resolved to a structure.'),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Every applicable advisory joined into one string: batch cap, partial failures, coordinate-budget overflow, and failed coordinate inlining.',
+      ),
   },
 
   async handler(input, ctx) {
     const cfg = getServerConfig();
     const ids = input.ids.slice(0, cfg.maxBatchIds).map((s) => s.trim());
+    // `ctx.enrich.notice` is last-write-wins, so a second call erases the first.
+    // Every advisory this handler can raise accumulates here and is written once.
+    const notices: string[] = [];
     if (input.ids.length > cfg.maxBatchIds) {
-      ctx.enrich.notice(
+      notices.push(
         `Batch capped at ${cfg.maxBatchIds} IDs; ${input.ids.length - cfg.maxBatchIds} ignored.`,
       );
     }
@@ -230,6 +269,12 @@ export const getStructure = tool('protein_get_structure', {
       );
     }
 
+    if (failed.length > 0) {
+      notices.push(
+        `${failed.length} of ${ids.length} IDs did not resolve: ${failed.map((f) => f.id).join(', ')}.`,
+      );
+    }
+
     // Inline coordinates when requested (all, or only the re-called sections).
     const inlineSet = input.sections?.length
       ? new Set(input.sections.map((s) => s.toUpperCase()))
@@ -237,41 +282,53 @@ export const getStructure = tool('protein_get_structure', {
         ? 'all'
         : null;
     if (inlineSet) {
-      await inlineCoordinates(structures, inlineSet, cfg.fanoutConcurrency, ctx);
+      const inlineFailures = await inlineCoordinates(
+        structures,
+        inlineSet,
+        cfg.fanoutConcurrency,
+        ctx,
+      );
+      if (inlineFailures.length > 0) {
+        notices.push(
+          `Coordinate inlining failed for ${inlineFailures.join(', ')}; the metadata is complete but the coordinate content is missing — retry, or download the file from that structure's coordinateUrls.`,
+        );
+      }
     }
 
-    // Overflow guard: inlining several coordinate files at once can blow the
-    // response budget. A single structure always inlines (re-calling for the lone
-    // section would return the same bytes); 2+ over budget collapse to a size index.
+    // Overflow guard: one coordinate file can blow the response budget on its own
+    // (4HHB.cif is ~30× it), so the budget applies to the inlined total however few
+    // files it spans. Over budget the payload is withheld from both surfaces and
+    // `overflow` carries the per-structure size index. A lone withheld file is
+    // pointed at its own coordinateUrls — a `sections` re-call would return the
+    // identical bytes — while a batch keeps the targeted re-call. A `sections`
+    // re-call is not itself re-gated: the caller has already named the exact bytes.
     let overflow: { sections: Array<{ id: string; bytes: number }>; notice: string } | undefined;
     if (inlineSet === 'all') {
       const withCoords = structures.filter((s) => s.coordinates);
       const total = withCoords.reduce((n, s) => n + (s.coordinates?.length ?? 0), 0);
-      if (withCoords.length > 1 && total > DEFAULT_OUTLINE_BUDGET_BYTES) {
+      if (total > DEFAULT_OUTLINE_BUDGET_BYTES) {
         const sections = withCoords.map((s) => ({ id: s.id, bytes: s.coordinates?.length ?? 0 }));
         for (const s of structures) {
           delete s.coordinates;
           delete s.coordinateFormat;
         }
-        overflow = {
-          sections,
-          notice:
-            `Inlined coordinates (${total} bytes across ${sections.length} structures) exceeded the ` +
-            `${DEFAULT_OUTLINE_BUDGET_BYTES}-byte budget. Re-call with sections:["${sections[0]?.id}"] ` +
-            `(add more IDs as needed) to inline specific structures.`,
-        };
-        ctx.enrich.notice(
-          'Coordinates exceeded the inline budget; re-call with sections for specific structures.',
-        );
+        // One string for `overflow.notice` and the enrichment accumulator, so the
+        // structured and text surfaces cannot describe the withheld state differently.
+        const overflowNotice =
+          sections.length === 1
+            ? `Inlined coordinates for ${sections[0]?.id} (${total} bytes) exceeded the ${DEFAULT_OUTLINE_BUDGET_BYTES}-byte budget and were withheld. Download the file from that structure's coordinateUrls — re-calling for the lone section would return the same bytes.`
+            : `Inlined coordinates (${total} bytes across ${sections.length} structures) exceeded the ${DEFAULT_OUTLINE_BUDGET_BYTES}-byte budget. Re-call with sections:["${sections[0]?.id}"] (add more IDs as needed) to inline specific structures.`;
+        overflow = { sections, notice: overflowNotice };
+        notices.push(overflowNotice);
       }
     }
 
-    ctx.enrich({ requested: ids.length, resolved: structures.length });
-    if (failed.length > 0) {
-      ctx.enrich.notice(
-        `${failed.length} of ${ids.length} IDs did not resolve: ${failed.map((f) => f.id).join(', ')}.`,
-      );
-    }
+    ctx.enrich({
+      requested: input.ids.length,
+      processed: ids.length,
+      resolved: structures.length,
+    });
+    if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
     // Attribution is a per-response union of the sources actually present, keyed
     // off each record's real provider. Experimental data is fetched from RCSB
@@ -298,6 +355,9 @@ export const getStructure = tool('protein_get_structure', {
   },
 
   format: (result) => {
+    // A structure named in the overflow index had its payload withheld from the
+    // structured surface; the text surface must not render a prefix of it either.
+    const withheld = new Set(result.overflow?.sections.map((s) => s.id) ?? []);
     const lines: string[] = [`## Structures (${result.structures.length})`];
     for (const s of result.structures) {
       lines.push(`\n### ${s.id} _(${s.source})_`);
@@ -307,6 +367,8 @@ export const getStructure = tool('protein_get_structure', {
         s.method ? `**Method:** ${s.method}` : null,
         typeof s.resolution === 'number' ? `**Resolution:** ${s.resolution} Å` : null,
         s.organism ? `**Organism:** ${s.organism}` : null,
+        typeof s.molecularWeight === 'number' ? `**MW:** ${s.molecularWeight} kDa` : null,
+        s.releaseDate ? `**Released:** ${s.releaseDate}` : null,
         s.provider ? `**Provider:** ${s.provider}` : null,
         typeof s.confidence === 'number'
           ? `**Confidence:** ${s.confidence}${s.confidenceType ? ` (${s.confidenceType})` : ''}`
@@ -320,6 +382,27 @@ export const getStructure = tool('protein_get_structure', {
           `**Confidence:** veryHigh ${pct(b.veryHigh)} · confident ${pct(b.confident)} · low ${pct(b.low)} · veryLow ${pct(b.veryLow)}`,
         );
       }
+      if (s.polymerEntities && s.polymerEntities.length > 0) {
+        lines.push('**Polymer entities:**');
+        for (const e of s.polymerEntities) {
+          const parts = [
+            e.description,
+            e.organism,
+            // Both namespaces are labelled, never merged — they are not interchangeable.
+            e.authAsymIds ? `auth_asym_id: ${e.authAsymIds.join(', ')}` : null,
+            e.labelAsymIds ? `label_asym_id: ${e.labelAsymIds.join(', ')}` : null,
+            typeof e.sequenceLength === 'number' ? `${e.sequenceLength} residues` : null,
+          ].filter(Boolean);
+          lines.push(`- **${e.entityId}** — ${parts.join(' · ')}`);
+        }
+      }
+      if (s.ligands && s.ligands.length > 0) {
+        lines.push('**Ligands:**');
+        for (const l of s.ligands) {
+          const parts = [l.name, l.formula].filter(Boolean);
+          lines.push(`- **${l.compId}**${parts.length > 0 ? ` — ${parts.join(' · ')}` : ''}`);
+        }
+      }
       const urls = [
         s.coordinateUrls.cif ? `[cif](${s.coordinateUrls.cif})` : null,
         s.coordinateUrls.pdb ? `[pdb](${s.coordinateUrls.pdb})` : null,
@@ -327,7 +410,9 @@ export const getStructure = tool('protein_get_structure', {
       ].filter(Boolean);
       if (urls.length > 0) lines.push(`**Coordinates:** ${urls.join(' · ')}`);
       if (s.paeDocUrl) lines.push(`**PAE:** ${s.paeDocUrl}`);
-      if (s.coordinates) {
+      if (withheld.has(s.id)) {
+        lines.push('**Coordinates withheld** — over the inline budget; see the URLs above.');
+      } else if (s.coordinates) {
         lines.push(
           `**Inlined ${s.coordinateFormat ?? 'coordinates'} (${s.coordinates.length} bytes):**`,
         );
@@ -389,7 +474,15 @@ async function fetchExperimental(ids: string[], ctx: Context): Promise<Resolutio
       ...(meta.title ? { title: meta.title } : {}),
       ...(meta.methods && meta.methods.length > 0 ? { method: meta.methods.join(', ') } : {}),
       ...(typeof meta.resolution === 'number' ? { resolution: meta.resolution } : {}),
+      ...(typeof meta.molecularWeight === 'number'
+        ? { molecularWeight: meta.molecularWeight }
+        : {}),
+      ...(meta.releaseDate ? { releaseDate: meta.releaseDate } : {}),
       ...(meta.organisms.length > 0 ? { organism: meta.organisms[0] } : {}),
+      // Already on EntryMeta from the same getEntries() call — omitted rather than
+      // emitted empty, so a sparse entry does not read as "this entry has none".
+      ...(meta.polymerEntities.length > 0 ? { polymerEntities: meta.polymerEntities } : {}),
+      ...(meta.ligands.length > 0 ? { ligands: meta.ligands } : {}),
       coordinateUrls: {
         cif: rcsb.coordinateFileUrl(meta.id, 'cif'),
         pdb: rcsb.coordinateFileUrl(meta.id, 'pdb'),
@@ -521,14 +614,20 @@ function coordinateUrlFor(url: string): { cif?: string; pdb?: string; bcif?: str
   return { cif: url };
 }
 
-/** Fetch and inline coordinate content for the requested structures. */
+/**
+ * Fetch and inline coordinate content for the requested structures. Returns the
+ * IDs whose fetch failed — a record that silently lacks `coordinates` is
+ * indistinguishable from one that was never asked to inline, so the caller needs
+ * the failure named in the response rather than only in the log.
+ */
 async function inlineCoordinates(
   structures: StructureRecord[],
   inline: Set<string> | 'all',
   concurrency: number,
   ctx: Context,
-): Promise<void> {
+): Promise<string[]> {
   const targets = structures.filter((s) => inline === 'all' || inline.has(s.id.toUpperCase()));
+  const failures: string[] = [];
   await mapWithConcurrency(targets, concurrency, async (s) => {
     const pick = s.coordinateUrls.cif
       ? (['cif', s.coordinateUrls.cif] as const)
@@ -549,6 +648,8 @@ async function inlineCoordinates(
         id: s.id,
         error: err instanceof Error ? err.message : err,
       });
+      failures.push(s.id);
     }
   });
+  return failures;
 }
