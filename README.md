@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.7.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.8.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -64,7 +64,7 @@ Fetch structures with metadata and coordinate-file URLs, resolving across provid
 - Per-ID partial success — unresolved IDs are listed in `failed[]`, not a batch-level error
 - Batch cap disclosure — `requested` is the original request length and `processed` the count after the cap, so IDs dropped beyond the cap are visible rather than silently discarded; every advisory (cap, partial failure, coordinate overflow, failed inlining) is joined into one `notice`
 - Records served by the RCSB entry endpoint also carry `polymerEntities` (with both `authAsymIds` and `labelAsymIds`), `ligands`, `molecularWeight`, and `releaseDate`
-- `include_coords` inlines coordinate content, subject to the response budget: a batch over budget returns a per-structure size outline you can re-call with `sections: [ids]`, and a single file over budget is withheld with a pointer to its `coordinateUrls` (a `sections` re-call would return the same bytes). Withheld content never appears on either surface
+- `include_coords` inlines coordinate content, subject to the response budget: a batch over budget returns a per-structure size outline you can re-call with `sections: [ids]`, and a single file over budget is withheld with a pointer to its `coordinateUrls` (a `sections` re-call would return the same bytes). A `sections` re-call is not re-gated — `structuredContent` carries the named payload whole at any size, while the token-bounded text surface withholds anything over the budget and points at `coordinateUrls` instead of truncating it
 - Every response carries an `attribution` block naming the upstream data licenses and citations (see [Upstream data licensing](#upstream-data-licensing))
 
 ---
@@ -75,9 +75,10 @@ Find structurally or evolutionarily related proteins, by sequence or by fold.
 
 - `by: sequence` runs a synchronous RCSB mmseqs2 search; `by: structure` runs an asynchronous Foldseek search against experimental and predicted databases
 - Query from a raw one-letter sequence, a PDB ID, or a UniProt accession
-- Sequence searches accept `start` with `limit` and return `nextStart` while another page remains
+- Both modes accept `start` with `limit` and report `totalCount`, echoing `start` and returning `nextStart` while another page remains
 - Foldseek targets default to `pdb100` + `afdb50`; override via `databases` (e.g. `afdb-swissprot`, `BFVD`)
-- Async jobs that exceed the poll budget return `status: computing` with a `ticketId` — re-call with `ticket_id` set to that value to poll the same job instead of resubmitting
+- Async jobs that exceed the poll budget return `status: computing` with a `ticketId` — re-call with `ticket_id` set to that value to poll the same job instead of resubmitting. A completed structure search returns the same ticket, so a new `start` pages the finished job without resubmitting the structure
+- Each mode reads only its own controls — `sequence`, `max_evalue` and `min_identity` under `by: sequence`; `ticket_id` and `databases` under `by: structure`; `pdb_id`, `uniprot`, `start` and `limit` shared — and a field the selected mode cannot consume is rejected rather than ignored
 - Each hit names the engine and source database it came from
 
 ---
@@ -87,6 +88,7 @@ Find structurally or evolutionarily related proteins, by sequence or by fold.
 Ligand discovery and binding-site analysis across the PDB.
 
 - `mode: find_ligand` resolves a name or formula to chemical component IDs with formula, weight, SMILES, and InChIKey
+- A formula-shaped `query` matches on exact composition — spaced (`C29 H31 N7 O`) or unspaced (`C29H31N7O`), either resolves the same component; anything else, a component ID included, matches on name and synonyms and is ranked by deposition frequency
 - `mode: structures_with_ligand` returns PDB entries containing a ligand by exact component ID
 - `mode: structures_with_ligand` accepts `start` with `limit` and returns `nextStart` while another page remains
 - `mode: binding_site` returns the protein residues lining a ligand's pocket in a structure, with contact distances

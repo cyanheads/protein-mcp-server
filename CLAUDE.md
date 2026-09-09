@@ -1,7 +1,7 @@
 # Developer Protocol
 
 **Server:** protein-mcp-server
-**Version:** 0.7.0
+**Version:** 0.8.0
 **Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.12.7`
 **Engines:** Bun ≥1.3.0, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.0.0
@@ -63,7 +63,7 @@ export const getAnnotations = tool('protein_get_annotations', {
     {
       reason: 'no_uniprot_mapping',
       code: JsonRpcErrorCode.NotFound,
-      when: 'A PDB ID has no UniProt cross-reference, or neither uniprot nor pdb_id was provided.',
+      when: 'A supplied PDB ID resolved to no usable UniProt cross-reference.',
       recovery: 'Pass a UniProt accession directly, or use protein_search_structures to find a modeled protein chain.',
     },
   ],

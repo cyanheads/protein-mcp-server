@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.0](changelog/0.8.x/0.8.0.md) — 2026-09-09 · ⚠️ Breaking
+
+protein_find_similar rejects fields the selected by mode can't consume and paginates completed structure searches with a re-usable ticket; protein_get_annotations reclassifies a missing or malformed identifier as InvalidParams; plus RCSB GraphQL, ligand-formula, and get_structure text-surface fixes.
+
 ## [0.7.0](changelog/0.7.x/0.7.0.md) — 2026-09-08 · ⚠️ Breaking
 
 protein_get_structure exposes per-entity authAsymIds/labelAsymIds chain namespaces plus entry detail (ligands, molecular weight, release date), accumulates every advisory instead of overwriting, and gates the coordinate overflow budget on a single oversized file too; pdb://{entry_id}'s polymerEntities[].chains is renamed to authAsymIds.
