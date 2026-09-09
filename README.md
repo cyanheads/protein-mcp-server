@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.6.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.7.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -62,7 +62,9 @@ Fetch structures with metadata and coordinate-file URLs, resolving across provid
 - `source: predicted` takes UniProt accessions and returns the AlphaFold model with pLDDT/PAE confidence
 - `source: best_available` takes UniProt accessions and returns the top federated model (experimental if one exists, else the best prediction)
 - Per-ID partial success — unresolved IDs are listed in `failed[]`, not a batch-level error
-- `include_coords` inlines coordinate content; when a batch overflows the response budget it returns a per-structure size outline, so you can re-call with `sections: [ids]` for specific structures
+- Batch cap disclosure — `requested` is the original request length and `processed` the count after the cap, so IDs dropped beyond the cap are visible rather than silently discarded; every advisory (cap, partial failure, coordinate overflow, failed inlining) is joined into one `notice`
+- Records served by the RCSB entry endpoint also carry `polymerEntities` (with both `authAsymIds` and `labelAsymIds`), `ligands`, `molecularWeight`, and `releaseDate`
+- `include_coords` inlines coordinate content, subject to the response budget: a batch over budget returns a per-structure size outline you can re-call with `sections: [ids]`, and a single file over budget is withheld with a pointer to its `coordinateUrls` (a `sections` re-call would return the same bytes). Withheld content never appears on either surface
 - Every response carries an `attribution` block naming the upstream data licenses and citations (see [Upstream data licensing](#upstream-data-licensing))
 
 ---
@@ -136,7 +138,7 @@ Sequence and functional annotation for a protein.
 
 | Type | Name | Description |
 |:---|:---|:---|
-| Resource | `pdb://{entry_id}` | Experimental structure summary for a PDB entry — title, method, resolution, organism, chains, and bound ligands. |
+| Resource | `pdb://{entry_id}` | Experimental structure summary for a PDB entry — title, method, resolution, organism, bound ligands, and per-entity chain IDs in both the author (`authAsymIds`) and mmCIF label (`labelAsymIds`) namespaces. |
 | Resource | `af://{uniprot}` | Predicted-structure summary for a UniProt accession from AlphaFold DB — mean pLDDT, confidence-band fractions, model URLs, and version. |
 
 All resource data is also reachable via tools — `pdb://{entry_id}` mirrors `protein_get_structure` for `source: experimental`, and `af://{uniprot}` mirrors it for `source: predicted`. Many MCP clients are tool-only and don't surface resources; the summaries remain reachable through the tools.

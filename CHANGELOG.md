@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.7.0](changelog/0.7.x/0.7.0.md) — 2026-09-08 · ⚠️ Breaking
+
+protein_get_structure exposes per-entity authAsymIds/labelAsymIds chain namespaces plus entry detail (ligands, molecular weight, release date), accumulates every advisory instead of overwriting, and gates the coordinate overflow budget on a single oversized file too; pdb://{entry_id}'s polymerEntities[].chains is renamed to authAsymIds.
+
 ## [0.6.0](changelog/0.6.x/0.6.0.md) — 2026-09-08 · ⚠️ Breaking
 
 protein_analyze_collection's truncation notice covers nested cross-tab children and empty scopes, interval routes to whichever group_by dimension can consume it and is narrowed to RCSB's supported values, and protein_search_structures rejects sequence-only thresholds and surfaces capped-facet recovery guidance.
