@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.5.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.6.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -49,7 +49,7 @@ Federated search across experimental (PDB) and predicted (computed-model) struct
 - `content_type` scopes the search to `experimental`, `predicted`, or `all` — the default `all` is a genuine union of both universes, so computed models appear alongside PDB entries
 - Every hit names its `source`; experimental sequence hits expose a chainable PDB entry `id` plus the matched polymer `entityId`, with title, method, resolution, and organism enrichment, while computed models retain their complete model ID and parsed UniProt accession
 - `start` and `limit` page through ranked results; `nextStart` is returned while another page remains
-- Optional `facets` return a method / organism / release-year breakdown alongside the hits at no extra call, each reporting how many matches carry no value for that dimension; each dimension may be listed once
+- Optional `facets` return a method / organism / release-year breakdown alongside the hits at no extra call, each reporting how many matches carry no value for that dimension; each dimension may be listed once. A dimension whose buckets hit the server-side cap is named in `notice`, with `protein_analyze_collection` and a larger `bucket_limit` as the route to the long tail (a sequence search gets a narrowing step instead, since that tool has no sequence input)
 - Chain hit IDs straight into `protein_get_structure`
 
 ---
@@ -114,9 +114,9 @@ Profile the PDB into distributions and trends over an optional scoping query —
 
 - Group by `method`, `organism`, `polymer_type`, `resolution`, `release_year`, or `molecular_weight`
 - One `group_by` dimension for a breakdown, or two distinct dimensions for a cross-tab (the first nests the second); a repeated dimension is rejected
-- `interval` sets the bin width for value histograms or the period for date histograms (`year` / `month` / `quarter`)
+- `interval` sets the bin width for a value histogram (a number, for `resolution` or `molecular_weight`) or the period for a date histogram (`year` — the only period RCSB accepts). It applies to whichever requested `group_by` dimension can consume that value type, primary or nested child, so `["method", "resolution"]` bins its nested `resolution` child; when both dimensions can consume it the primary takes it and the child keeps its default, and when neither can the call is rejected rather than silently ignoring the override
 - Scope with a free-text `query`, `organism`, `method`, or `max_resolution`; `content_type` selects the structure universe
-- `bucket_limit` caps buckets per dimension level, not per response — a cross-tab applies it separately to the parent dimension and to the nested child inside each parent bucket, so up to `bucket_limit × (1 + bucket_limit)` buckets come back. Each level flags its own truncation, and `bucketsReturned` gives the realized total
+- `bucket_limit` caps buckets per dimension level, not per response — a cross-tab applies it separately to the parent dimension and to the nested child inside each parent bucket, so up to `bucket_limit × (1 + bucket_limit)` buckets come back. Each level flags its own truncation, `notice` names every capped position (the top-level dimension and each nested child, with how many parent buckets it was capped under), and `bucketsReturned` gives the realized total
 - Every dimension reports `missingValueCount` — matches in scope carrying no value for that attribute, which therefore fall in no bucket (a `resolution` breakdown does not cover NMR entries, and neither `method` nor `resolution` covers computed models)
 
 ---

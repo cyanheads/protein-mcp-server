@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.6.0](changelog/0.6.x/0.6.0.md) — 2026-09-08 · ⚠️ Breaking
+
+protein_analyze_collection's truncation notice covers nested cross-tab children and empty scopes, interval routes to whichever group_by dimension can consume it and is narrowed to RCSB's supported values, and protein_search_structures rejects sequence-only thresholds and surfaces capped-facet recovery guidance.
+
 ## [0.5.3](changelog/0.5.x/0.5.3.md) — 2026-08-30
 
 RCSB-backed tools support offset pagination; structure searches accept method or resolution criteria alone, retain chainable sequence-hit IDs, and enrich every entry on a returned sequence page.
