@@ -355,8 +355,10 @@ export const getStructure = tool('protein_get_structure', {
   },
 
   format: (result) => {
-    // A structure named in the overflow index had its payload withheld from the
-    // structured surface; the text surface must not render a prefix of it either.
+    // Structures whose payload the batch-overflow gate already purged from the
+    // structured surface. Their `coordinates` is gone, so the per-structure
+    // length check below reads 0 and cannot recognize them — this set is what
+    // still earns them the withheld marker instead of silent omission.
     const withheld = new Set(result.overflow?.sections.map((s) => s.id) ?? []);
     const lines: string[] = [`## Structures (${result.structures.length})`];
     for (const s of result.structures) {
@@ -410,18 +412,21 @@ export const getStructure = tool('protein_get_structure', {
       ].filter(Boolean);
       if (urls.length > 0) lines.push(`**Coordinates:** ${urls.join(' · ')}`);
       if (s.paeDocUrl) lines.push(`**PAE:** ${s.paeDocUrl}`);
-      if (withheld.has(s.id)) {
+      // One length rule for every structure carrying coordinates, whether or not
+      // the overflow index names it: whole under the budget, otherwise the
+      // withheld marker plus the URL pointer above — never a truncated prefix.
+      // A `sections` re-call is deliberately not re-gated on the structured
+      // surface (the caller named the exact bytes), so this is the one path where
+      // the two surfaces carry different payloads; they still agree on *state*,
+      // because the token-bounded text surface discloses the omission and points
+      // at a working retrieval route instead of silently cutting the content off.
+      if (withheld.has(s.id) || (s.coordinates?.length ?? 0) > DEFAULT_OUTLINE_BUDGET_BYTES) {
         lines.push('**Coordinates withheld** — over the inline budget; see the URLs above.');
       } else if (s.coordinates) {
         lines.push(
           `**Inlined ${s.coordinateFormat ?? 'coordinates'} (${s.coordinates.length} bytes):**`,
         );
-        lines.push(
-          '```',
-          s.coordinates.slice(0, 2000),
-          s.coordinates.length > 2000 ? '… (truncated in text view)' : '',
-          '```',
-        );
+        lines.push('```', s.coordinates, '```');
       }
     }
     if (result.failed.length > 0) {

@@ -901,6 +901,99 @@ describe('protein_get_structure coordinate inlining budget', () => {
   });
 });
 
+describe('protein_get_structure format() coordinate state parity (#59)', () => {
+  /** Between the old 2,000-character slice point and DEFAULT_OUTLINE_BUDGET_BYTES. */
+  const MID_RANGE = 'C'.repeat(5_000);
+  /** Over DEFAULT_OUTLINE_BUDGET_BYTES (24,000) — no public .cif is under it. */
+  const OVER_BUDGET = 'A'.repeat(30_000);
+
+  it('renders an under-budget include_coords payload whole, never a 2,000-character prefix', async () => {
+    getEntries.mockResolvedValue([experimentalMeta('4HHB')]);
+    fetchTextMock.mockResolvedValue(MID_RANGE);
+    const result = (await runToolContract(getStructure, {
+      ids: ['4HHB'],
+      source: 'experimental',
+      include_coords: true,
+    })) as {
+      structuredContent: { structures: Array<{ coordinates?: string }> };
+      content: Array<{ text: string }>;
+    };
+
+    // Under the total budget, so the structured surface keeps it — and the text
+    // surface must carry the same bytes rather than the first 2,000 of them.
+    expect(result.structuredContent.structures[0]?.coordinates).toHaveLength(5_000);
+    const text = result.content.map((b) => b.text).join('\n');
+    expect(text).toContain('**Inlined cif (5000 bytes):**');
+    expect(text).toContain(MID_RANGE);
+    expect(text).not.toContain('truncated in text view');
+  });
+
+  it('withholds an over-budget sections re-call from content[] while structuredContent keeps it whole', async () => {
+    // `sections` bypasses the batch byte budget by design — the caller named the
+    // exact structure. The token-bounded text surface still discloses the
+    // omission with the coordinateUrls pointer instead of truncating.
+    getEntries.mockResolvedValue([experimentalMeta('4HHB'), experimentalMeta('2HHB')]);
+    fetchTextMock.mockResolvedValue(OVER_BUDGET);
+    const result = (await runToolContract(getStructure, {
+      ids: ['4HHB', '2HHB'],
+      source: 'experimental',
+      sections: ['4HHB'],
+    })) as {
+      structuredContent: {
+        structures: Array<{ id: string; coordinates?: string }>;
+        overflow?: unknown;
+      };
+      content: Array<{ text: string }>;
+    };
+
+    const four = result.structuredContent.structures.find((s) => s.id === '4HHB');
+    expect(four?.coordinates).toHaveLength(30_000);
+    // A sections re-call is never re-gated, so no overflow index is produced.
+    expect(result.structuredContent.overflow).toBeUndefined();
+    const text = result.content.map((b) => b.text).join('\n');
+    expect(text).toContain('Coordinates withheld');
+    expect(text).toContain('https://files/4HHB.cif');
+    expect(text).not.toContain('A'.repeat(500));
+    expect(text).not.toContain('truncated in text view');
+  });
+
+  it('renders an under-budget sections re-call whole on both surfaces', async () => {
+    getEntries.mockResolvedValue([experimentalMeta('4HHB')]);
+    fetchTextMock.mockResolvedValue(MID_RANGE);
+    const out = await getStructure.handler(
+      getStructure.input.parse({ ids: ['4HHB'], source: 'experimental', sections: ['4HHB'] }),
+      ctx(),
+    );
+
+    expect(out.structures[0]?.coordinates).toHaveLength(5_000);
+    const text = (getStructure.format!(out)[0] as { text: string }).text;
+    expect(text).toContain(MID_RANGE);
+    expect(text).toContain('**Inlined cif (5000 bytes):**');
+  });
+
+  it('applies the one length rule to a structure absent from any overflow index', () => {
+    // The render decision reads s.coordinates.length directly, so it covers a
+    // sections-retrieved payload the same way it covers a batch-purged one.
+    const oversized = {
+      structures: [
+        {
+          id: '4HHB',
+          source: 'experimental' as const,
+          coordinateUrls: { cif: 'https://files/4HHB.cif' },
+          coordinateFormat: 'cif' as const,
+          coordinates: OVER_BUDGET,
+        },
+      ],
+      failed: [],
+      attribution: [],
+    };
+    const text = (getStructure.format!(oversized)[0] as { text: string }).text;
+    expect(text).toContain('Coordinates withheld');
+    expect(text).not.toContain('A'.repeat(500));
+    expect(text).not.toContain('truncated in text view');
+  });
+});
+
 describe('protein_get_structure experimental entry detail', () => {
   /** The full 4HHB entry shape `RcsbService.getEntries()` already returns. */
   const fullMeta = {
