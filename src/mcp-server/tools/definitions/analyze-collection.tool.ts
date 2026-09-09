@@ -14,6 +14,8 @@ import {
   buildFacetSpec,
   FACET_DIMENSION_NAMES,
   type FacetDimensionName,
+  INTERVAL_DIMENSION_NAMES,
+  intervalTarget,
 } from '@/services/rcsb/facets.js';
 import { getRcsbService } from '@/services/rcsb/rcsb-service.js';
 import {
@@ -23,6 +25,7 @@ import {
   facetDimensionSchema,
   renderFacets,
   toFacetOutput,
+  truncationNotices,
 } from './_schemas.js';
 
 /**
@@ -32,6 +35,17 @@ import {
  * The other four dimensions aggregate normally under predicted content.
  */
 const EXPERIMENTAL_ONLY_DIMENSIONS = new Set<FacetDimensionName>(['method', 'resolution']);
+
+/**
+ * Zero-match advice, per scope. Mirrors `protein_search_structures`: only the two
+ * single-universe scopes have a wider one to switch to, so under `all` the advice
+ * is to loosen the filters rather than to widen a scope already at its widest.
+ */
+const ZERO_MATCH_NOTICE = {
+  experimental: `No experimental structures matched this scope, so every requested dimension aggregated to nothing. Broaden or drop the query, organism, method, and max_resolution filters, or widen content_type to "all" to include computed models.`,
+  predicted: `No predicted models matched this scope, so every requested dimension aggregated to nothing. Broaden or drop the query, organism, method, and max_resolution filters, or widen content_type to "all" to include experimental structures.`,
+  all: `No structures matched this scope in either the experimental or computed-model universe — content_type "all" is already the widest scope. Broaden or drop the query, organism, method, and max_resolution filters.`,
+} satisfies Record<'experimental' | 'predicted' | 'all', string>;
 
 export const analyzeCollection = tool('protein_analyze_collection', {
   title: 'protein-mcp-server: analyze collection',
@@ -47,11 +61,10 @@ export const analyzeCollection = tool('protein_analyze_collection', {
 
   errors: [
     {
-      reason: 'unknown_dimension',
+      reason: 'interval_not_applicable',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'A group_by value is outside the supported dimension set.',
-      recovery:
-        'Use a supported dimension: method, organism, polymer_type, resolution, release_year, or molecular_weight.',
+      when: 'interval was supplied but neither requested group_by dimension aggregates by a histogram that accepts a value of that type.',
+      recovery: `Group by resolution or molecular_weight for a numeric interval, or release_year for the "year" period; otherwise drop interval and let each dimension use its own default.`,
     },
     {
       reason: 'duplicate_dimension',
@@ -89,19 +102,26 @@ export const analyzeCollection = tool('protein_analyze_collection', {
           'experimental metadata, so method and resolution return nothing under "predicted".',
       ),
     interval: z
-      .union([
-        // Coerce the numeric arm: many clients stringify tool args, and "0.5" must
-        // still reach the histogram path. z.coerce.number() on "year" yields NaN,
-        // which .positive() rejects, so period strings still fall through to the enum.
-        z.coerce
-          .number()
-          .positive()
-          .describe('Numeric bin width for a value histogram (e.g. resolution Å).'),
-        z.enum(['year', 'month', 'quarter']).describe('Period granularity for a date histogram.'),
-      ])
+      .union(
+        [
+          // Coerce the numeric arm: many clients stringify tool args, and "0.5" must
+          // still reach the histogram path. z.coerce.number() on "year" yields NaN,
+          // which .positive() rejects, so period strings still fall through to the enum.
+          z.coerce
+            .number()
+            .positive()
+            .describe('Numeric bin width for a value histogram (e.g. resolution Å).'),
+          // RCSB's date_histogram schema accepts only "year"; month and quarter fail
+          // upstream JSON-schema validation, so they are not advertised here.
+          z.enum(['year']).describe('Period granularity for a date histogram. Only "year".'),
+        ],
+        // A union reports a bare "Invalid input" by default, so the rejection would
+        // name neither arm; spell the accepted set out instead.
+        { error: `Expected a positive number (histogram bin width) or "year" (date period).` },
+      )
       .optional()
       .describe(
-        'Bin width for a histogram dimension (number) or period for a date histogram (year/month/quarter).',
+        `Bin width for a histogram dimension (a number, for resolution or molecular_weight) or period for a date histogram ("year", for release_year). Applies to whichever requested group_by dimension can consume that value type — primary or nested child — so a cross-tab like ["method","resolution"] bins its nested resolution child. When both requested dimensions can consume it the primary takes it and the child keeps its default. When neither can, the call is rejected rather than silently ignoring the override.`,
       ),
     bucket_limit: z.coerce
       .number()
@@ -128,14 +148,14 @@ export const analyzeCollection = tool('protein_analyze_collection', {
       .string()
       .optional()
       .describe(
-        'Advisory note (bucket truncation, empty scope, dimensions with no data under the requested content_type, dimensions whose buckets cover materially less than the total). Carries every applicable advisory in one string.',
+        'Advisory note (per-position bucket truncation, a scope that matched nothing, dimensions with no data under the requested content_type, dimensions whose buckets cover materially less than the total). Carries every applicable advisory in one string.',
       ),
     truncated: z
       .boolean()
       .optional()
-      .describe('True when a dimension had more buckets than the applied cap.'),
-    shown: z.number().optional().describe('Buckets returned for the capped dimension.'),
-    cap: z.number().optional().describe('Per-dimension bucket cap that was applied.'),
+      .describe(
+        'True when at least one dimension position — the top-level dimension or a nested cross-tab child — had more buckets than the applied cap. Which positions, and by how much, is named in notice.',
+      ),
     bucketsReturned: z
       .number()
       .describe(
@@ -149,11 +169,9 @@ export const analyzeCollection = tool('protein_analyze_collection', {
     const cfg = getServerConfig();
     const rcsb = getRcsbService();
     const cap = input.bucket_limit ?? cfg.facetBucketCap;
-    const [primary, secondary] = input.group_by;
-    if (!primary)
-      throw ctx.fail('unknown_dimension', 'group_by requires at least one dimension.', {
-        ...ctx.recoveryFor('unknown_dimension'),
-      });
+    // `.min(1)` on the schema guarantees a primary; the array type does not carry
+    // that, and an out-of-enum or empty group_by is rejected before the handler runs.
+    const [primary, secondary] = input.group_by as [FacetDimensionName, FacetDimensionName?];
     // A repeated dimension would nest a facet inside itself upstream. RCSB answers
     // that with same-attribute overlap, not a cross-tab between two dimensions —
     // an undocumented shape no caller can read, so reject before the call.
@@ -163,6 +181,14 @@ export const analyzeCollection = tool('protein_analyze_collection', {
         'duplicate_dimension',
         `group_by lists "${duplicate}" twice; a cross-tab needs two distinct dimensions.`,
         { ...ctx.recoveryFor('duplicate_dimension') },
+      );
+    // An override no requested position can consume would reach RCSB as nothing at
+    // all — the call would succeed with default bins, looking like a filtered result.
+    if (input.interval !== undefined && !intervalTarget(input.interval, primary, secondary))
+      throw ctx.fail(
+        'interval_not_applicable',
+        `interval ${input.interval} does not apply to ${input.group_by.join(' or ')}; only ${INTERVAL_DIMENSION_NAMES.join(', ')} bin by an interval, and a numeric width needs resolution or molecular_weight while "year" needs release_year.`,
+        { ...ctx.recoveryFor('interval_not_applicable') },
       );
     const spec = buildFacetSpec(primary, input.interval, secondary);
 
@@ -190,14 +216,18 @@ export const analyzeCollection = tool('protein_analyze_collection', {
     // through it and is last-wins), and a cross-tab under predicted content can
     // trip several at once — collect the fragments and emit them as ONE notice.
     const notices: string[] = [];
-    const capped = out.find((f) => f.truncated);
-    if (capped) {
-      ctx.enrich({ truncated: true, shown: capped.buckets.length, cap });
-      notices.push(
-        `One or more dimensions exceeded ${cap} buckets and were capped; scope the query tighter for the long tail.`,
-      );
+    // Every position the cap sliced is named, not just the first one `.find()` would
+    // reach: a cross-tab caps the parent and each nested child independently.
+    const truncations = truncationNotices(out, cap);
+    if (truncations.length > 0) {
+      ctx.enrich({ truncated: true });
+      notices.push(...truncations);
     }
-    if (input.content_type === 'predicted') {
+    if (total === 0) {
+      // A scope that matched nothing explains every empty dimension by itself.
+      // Stacking the predicted-content caveat on top would misattribute the cause.
+      notices.push(ZERO_MATCH_NOTICE[input.content_type]);
+    } else if (input.content_type === 'predicted') {
       const blind = input.group_by.filter((d) => EXPERIMENTAL_ONLY_DIMENSIONS.has(d));
       if (blind.length > 0) {
         notices.push(

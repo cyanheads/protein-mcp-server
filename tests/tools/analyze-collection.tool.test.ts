@@ -1,11 +1,15 @@
 /**
  * @fileoverview Tests for protein_analyze_collection: single-dimension and
  * cross-tab facet projection through the tool, content_type → content-universe
- * mapping (including the "all" union), the bucket-cap truncation notice, the
- * experimental-only-dimension notice under predicted content and its composition
- * with the cap notice, the repeated-dimension rejection, the scope enrichment,
- * the realized bucket total across both dimension positions, scope-param
- * forwarding to the facet engine, and format() rendering. RCSB service mocked.
+ * mapping (including the "all" union), the per-position bucket-cap truncation
+ * notice, the zero-match scope notice and its precedence over the
+ * experimental-only-dimension notice under predicted content, the composition of
+ * every advisory into one notice, the repeated-dimension rejection, the
+ * schema-boundary rejection of an empty or out-of-enum group_by, interval
+ * routing across the two group_by positions and its rejection when neither can
+ * consume the value, the scope enrichment, the realized bucket total across both
+ * dimension positions, scope-param forwarding to the facet engine, and format()
+ * rendering. RCSB service mocked.
  * @module tests/tools/analyze-collection.tool.test
  */
 
@@ -52,12 +56,15 @@ describe('protein_analyze_collection', () => {
 
   it('returns total 0 with empty buckets for a zero-match scope (no throw)', async () => {
     analyzeFacets.mockResolvedValue({ total: 0, facets: [methodFacet([])] });
+    const c = ctx();
     const out = await analyzeCollection.handler(
       analyzeCollection.input.parse({ group_by: ['method'], query: 'zzzznotathing' }),
-      ctx(),
+      c,
     );
     expect(out.total).toBe(0);
     expect(out.facets[0]?.buckets).toEqual([]);
+    // A bare success said nothing about why every dimension was empty (#54).
+    expect(String(getEnrichment(c).notice)).toMatch(/matched this scope/);
   });
 
   it('maps each content_type to its content universes, unioning "all" (#29)', async () => {
@@ -101,7 +108,7 @@ describe('protein_analyze_collection', () => {
     expect(getEnrichment(c)).toMatchObject({ scope: 'kinase · Homo sapiens · X-RAY DIFFRACTION' });
   });
 
-  it('caps buckets at bucket_limit and discloses the truncation', async () => {
+  it('caps buckets at bucket_limit and names the capped position (#37)', async () => {
     const buckets = Array.from({ length: 5 }, (_, i) => ({ label: `org${i}`, count: 5 - i }));
     analyzeFacets.mockResolvedValue({
       total: 50,
@@ -114,8 +121,161 @@ describe('protein_analyze_collection', () => {
     );
     expect(out.facets[0]?.buckets).toHaveLength(2);
     expect(out.facets[0]?.truncated).toBe(true);
-    expect(getEnrichment(c)).toMatchObject({ truncated: true, shown: 2, cap: 2 });
-    expect(String(getEnrichment(c).notice)).toMatch(/capped/i);
+    // A coarse "at least one position was capped" flag; the per-position detail
+    // lives in the notice, and the ambiguous scalars are gone from the contract.
+    expect(getEnrichment(c)).toMatchObject({ truncated: true });
+    expect(getEnrichment(c)).not.toHaveProperty('shown');
+    expect(getEnrichment(c)).not.toHaveProperty('cap');
+    const notice = String(getEnrichment(c).notice);
+    expect(notice).toContain('organism was capped to the 2 highest-count buckets.');
+    expect(notice).toMatch(/capped at 2 buckets independently/);
+  });
+
+  it('discloses a capped nested child when the parent fits under the cap (#37)', async () => {
+    // The parent (1 bucket) is inside the cap, so the old `.find((f) => f.truncated)`
+    // saw nothing and emitted no truncation disclosure at all.
+    analyzeFacets.mockResolvedValue({
+      total: 6,
+      facets: [
+        {
+          dimension: 'organism',
+          attribute: 'rcsb_entity_source_organism.ncbi_scientific_name',
+          buckets: [
+            {
+              label: 'Homo sapiens',
+              count: 6,
+              child: {
+                dimension: 'method',
+                attribute: 'exptl.method',
+                buckets: [
+                  { label: 'X-RAY DIFFRACTION', count: 3 },
+                  { label: 'ELECTRON MICROSCOPY', count: 2 },
+                  { label: 'SOLUTION NMR', count: 1 },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    });
+    const c = ctx();
+    const out = await analyzeCollection.handler(
+      analyzeCollection.input.parse({ group_by: ['organism', 'method'], bucket_limit: 2 }),
+      c,
+    );
+    expect(out.facets[0]?.truncated).toBeUndefined();
+    expect(out.facets[0]?.buckets[0]?.child?.truncated).toBe(true);
+    expect(getEnrichment(c)).toMatchObject({ truncated: true });
+    const notice = String(getEnrichment(c).notice);
+    expect(notice).toContain(
+      'method (nested under organism) was capped to 2 buckets in 1 of the 1 organism buckets shown.',
+    );
+    expect(notice).not.toMatch(/^organism was capped/);
+  });
+
+  it('counts only the parent buckets whose child was capped (#37)', async () => {
+    // Mirrors the live shape: two organism buckets carry more method values than
+    // the cap, the third carries exactly the cap and is left alone.
+    const childBuckets = (n: number) => ({
+      dimension: 'method',
+      attribute: 'exptl.method',
+      buckets: Array.from({ length: n }, (_, i) => ({ label: `m${i}`, count: 1 })),
+    });
+    analyzeFacets.mockResolvedValue({
+      total: 71008,
+      facets: [
+        {
+          dimension: 'organism',
+          attribute: 'rcsb_entity_source_organism.ncbi_scientific_name',
+          buckets: [
+            { label: 'Homo sapiens', count: 9, child: childBuckets(9) },
+            { label: 'Mus musculus', count: 6, child: childBuckets(6) },
+            { label: 'synthetic construct', count: 3, child: childBuckets(3) },
+            { label: 'Escherichia coli', count: 3, child: childBuckets(3) },
+          ],
+        },
+      ],
+    });
+    const c = ctx();
+    const out = await analyzeCollection.handler(
+      analyzeCollection.input.parse({
+        group_by: ['organism', 'method'],
+        query: 'kinase',
+        bucket_limit: 3,
+      }),
+      c,
+    );
+    // The parent is capped too (4 buckets → 3), so both positions are disclosed.
+    expect(out.facets[0]?.truncated).toBe(true);
+    expect(out.facets[0]?.buckets[2]?.child?.truncated).toBeUndefined();
+    const notice = String(getEnrichment(c).notice);
+    expect(notice).toContain('organism was capped to the 3 highest-count buckets.');
+    expect(notice).toContain(
+      'method (nested under organism) was capped to 3 buckets in 2 of the 3 organism buckets shown.',
+    );
+  });
+
+  it('adds no truncation disclosure when every position fits under the cap (#37)', async () => {
+    analyzeFacets.mockResolvedValue({
+      total: 6,
+      facets: [
+        methodFacet([
+          {
+            label: 'X-RAY DIFFRACTION',
+            count: 6,
+            child: {
+              dimension: 'release_year',
+              attribute: 'rcsb_accession_info.initial_release_date',
+              buckets: [{ label: '2020', count: 6 }],
+            },
+          },
+        ]),
+      ],
+    });
+    const c = ctx();
+    await analyzeCollection.handler(
+      analyzeCollection.input.parse({ group_by: ['method', 'release_year'], bucket_limit: 5 }),
+      c,
+    );
+    expect(getEnrichment(c)).not.toHaveProperty('truncated');
+    expect(getEnrichment(c)).not.toHaveProperty('notice');
+  });
+
+  it('carries the per-position truncation notice on both consumption surfaces (#37)', async () => {
+    analyzeFacets.mockResolvedValue({
+      total: 12,
+      facets: [
+        {
+          dimension: 'organism',
+          attribute: 'rcsb_entity_source_organism.ncbi_scientific_name',
+          buckets: Array.from({ length: 4 }, (_, i) => ({
+            label: `org${i}`,
+            count: 3,
+            child: {
+              dimension: 'method',
+              attribute: 'exptl.method',
+              buckets: Array.from({ length: 3 }, (_, j) => ({ label: `m${j}`, count: 1 })),
+            },
+          })),
+        },
+      ],
+    });
+    const result = (await runToolContract(analyzeCollection, {
+      group_by: ['organism', 'method'],
+      bucket_limit: 2,
+    })) as {
+      structuredContent: { notice?: string; truncated?: boolean; shown?: number; cap?: number };
+      content: Array<{ type: string; text: string }>;
+    };
+
+    expect(result.structuredContent.truncated).toBe(true);
+    expect(result.structuredContent).not.toHaveProperty('shown');
+    expect(result.structuredContent).not.toHaveProperty('cap');
+    expect(String(result.structuredContent.notice)).toContain('organism was capped');
+    expect(String(result.structuredContent.notice)).toContain('method (nested under organism)');
+    const [, ...trailer] = result.content;
+    const rendered = trailer.map((b) => b.text).join('\n');
+    expect(rendered).toContain('method (nested under organism)');
   });
 
   it('builds a nested facet spec for a two-dimension cross-tab', async () => {
@@ -218,15 +378,21 @@ describe('protein_analyze_collection', () => {
     expect(out.facets[0]?.buckets).toHaveLength(2); // bucket_limit "2" applied as 2
   });
 
-  it('carries the declared recovery hint on the unknown_dimension guard (#10)', async () => {
-    const base = analyzeCollection.input.parse({ group_by: ['method'] });
-    await expect(analyzeCollection.handler({ ...base, group_by: [] }, ctx())).rejects.toMatchObject(
-      {
-        data: {
-          reason: 'unknown_dimension',
-          recovery: { hint: expect.stringContaining('supported dimension') },
-        },
-      },
+  it('rejects an empty group_by at the schema boundary, before the handler (#47)', async () => {
+    // `.min(1)` is the only guard this condition ever reaches — a handler-side
+    // throw for it was unreachable, so the contract no longer advertises one.
+    const parsed = analyzeCollection.input.safeParse({ group_by: [] });
+    expect(parsed.success).toBe(false);
+    expect(() => analyzeCollection.input.parse({ group_by: [] })).toThrow();
+    expect(analyzeFacets).not.toHaveBeenCalled();
+  });
+
+  it('declares no unknown_dimension reason a caller could never observe (#47)', () => {
+    // An out-of-enum value is a schema rejection with no data.reason, so a
+    // declared reason for it would be a promise the wire never keeps.
+    expect(analyzeCollection.errors?.map((e) => e.reason)).not.toContain('unknown_dimension');
+    expect(analyzeCollection.input.safeParse({ group_by: ['nonsense_dimension'] }).success).toBe(
+      false,
     );
   });
 
@@ -481,10 +647,10 @@ describe('protein_analyze_collection', () => {
     );
     const enrichment = getEnrichment(c);
     // Neither advisory may overwrite the other on the shared `notice` field.
-    expect(String(enrichment.notice)).toMatch(/exceeded 2 buckets and were capped/i);
+    expect(String(enrichment.notice)).toContain('organism was capped to the 2 highest-count');
     expect(String(enrichment.notice)).toMatch(/method is empty under content_type "predicted"/i);
     // The structured truncation disclosure survives the composition.
-    expect(enrichment).toMatchObject({ truncated: true, shown: 2, cap: 2 });
+    expect(enrichment).toMatchObject({ truncated: true });
   });
 
   it('carries the predicted-dimension notice on both consumption surfaces (#27)', async () => {
@@ -625,10 +791,10 @@ describe('protein_analyze_collection', () => {
     expect(out.facets[0]?.truncated).toBe(true);
     expect(out.facets[0]?.missingValueCount).toBe(200);
     const notice = String(getEnrichment(c).notice);
-    expect(notice).toMatch(/capped/i);
+    expect(notice).toContain('method was capped to the 2 highest-count buckets.');
     expect(notice).toContain('200');
     // The cap disclosure stays structurally separate from the coverage gap.
-    expect(getEnrichment(c)).toMatchObject({ truncated: true, shown: 2, cap: 2 });
+    expect(getEnrichment(c)).toMatchObject({ truncated: true });
   });
 
   it('measures a cross-tab child gap against its parent bucket (#32)', async () => {
@@ -705,7 +871,7 @@ describe('protein_analyze_collection', () => {
       c,
     );
     const notice = String(getEnrichment(c).notice);
-    expect(notice).toMatch(/exceeded 2 buckets and were capped/i);
+    expect(notice).toContain('organism was capped to the 2 highest-count buckets.');
     expect(notice).toMatch(/method is empty under content_type "predicted"/i);
     expect(notice).toMatch(/organism buckets cover 600 of 1200/i);
   });
@@ -816,13 +982,13 @@ describe('protein_analyze_collection', () => {
     );
     expect(out.facets[0]?.truncated).toBe(true);
     expect(out.facets[0]?.buckets[0]?.child?.truncated).toBe(true);
-    // shown counts the capped dimension alone (3); bucketsReturned counts the response (12).
-    expect(getEnrichment(c)).toMatchObject({
-      truncated: true,
-      shown: 3,
-      cap: 3,
-      bucketsReturned: 12,
-    });
+    expect(getEnrichment(c)).toMatchObject({ truncated: true, bucketsReturned: 12 });
+    // Both capped positions are named; bucketsReturned counts the response (12).
+    const notice = String(getEnrichment(c).notice);
+    expect(notice).toContain('organism was capped to the 3 highest-count buckets.');
+    expect(notice).toContain(
+      'method (nested under organism) was capped to 3 buckets in 3 of the 3 organism buckets shown.',
+    );
   });
 
   it('reports zero buckets for a zero-match scope (#36)', async () => {
@@ -833,6 +999,8 @@ describe('protein_analyze_collection', () => {
       c,
     );
     expect(getEnrichment(c)).toMatchObject({ bucketsReturned: 0 });
+    // The realized-size field and the zero-match advisory coexist (#54).
+    expect(String(getEnrichment(c).notice)).toMatch(/matched this scope/);
   });
 
   it('enriches nothing when the input is rejected before the upstream call (#36)', async () => {
@@ -879,6 +1047,219 @@ describe('protein_analyze_collection', () => {
     expect(formatted?.text).not.toContain('bucketsReturned');
     expect(trailer.map((b) => b.text).join('\n')).toContain('bucketsReturned');
     expect(trailer.map((b) => b.text).join('\n')).toContain('3');
+  });
+
+  it('rejects the periods RCSB never accepted on a date histogram (#58)', () => {
+    // Both fail upstream JSON-schema validation as an opaque HTTP 400; the enum
+    // now names the accepted set at the boundary instead.
+    for (const interval of ['month', 'quarter'] as const) {
+      const parsed = analyzeCollection.input.safeParse({
+        group_by: ['release_year'],
+        interval,
+      });
+      expect(parsed.success).toBe(false);
+      expect(JSON.stringify(parsed.error?.issues)).toContain('year');
+      // The wire-visible text is the top-level issue message, which a union
+      // reports as a bare "Invalid input" unless it names the accepted set.
+      expect(parsed.error?.issues[0]?.message).toContain('"year"');
+      expect(parsed.error?.issues[0]?.message).toContain('positive number');
+    }
+    expect(
+      analyzeCollection.input.safeParse({ group_by: ['release_year'], interval: 'year' }).success,
+    ).toBe(true);
+  });
+
+  it('bins a single histogram dimension at the requested interval (#51)', async () => {
+    analyzeFacets.mockResolvedValue({ total: 1, facets: [methodFacet([])] });
+    await analyzeCollection.handler(
+      analyzeCollection.input.parse({ group_by: ['resolution'], interval: 1 }),
+      ctx(),
+    );
+    const [spec] = analyzeFacets.mock.calls[0]![1] as Array<{ interval?: unknown }>;
+    expect(spec?.interval).toBe(1);
+  });
+
+  it('routes the interval to a compatible nested child position (#51)', async () => {
+    analyzeFacets.mockResolvedValue({ total: 1, facets: [methodFacet([])] });
+    await analyzeCollection.handler(
+      analyzeCollection.input.parse({
+        group_by: ['method', 'resolution'],
+        query: 'kinase',
+        interval: 1,
+      }),
+      ctx(),
+    );
+    const [spec] = analyzeFacets.mock.calls[0]![1] as Array<{
+      interval?: unknown;
+      child?: { dimension: string; interval?: unknown };
+    }>;
+    expect(spec).not.toHaveProperty('interval'); // terms parent takes none
+    expect(spec?.child).toMatchObject({ dimension: 'resolution', interval: 1 });
+  });
+
+  it('routes the "year" period to a date-histogram child position (#51)', async () => {
+    analyzeFacets.mockResolvedValue({ total: 1, facets: [methodFacet([])] });
+    await analyzeCollection.handler(
+      analyzeCollection.input.parse({ group_by: ['method', 'release_year'], interval: 'year' }),
+      ctx(),
+    );
+    const [spec] = analyzeFacets.mock.calls[0]![1] as Array<{
+      child?: { dimension: string; interval?: unknown };
+    }>;
+    expect(spec?.child).toMatchObject({ dimension: 'release_year', interval: 'year' });
+  });
+
+  it('gives the primary the interval when both dimensions can consume it (#51)', async () => {
+    analyzeFacets.mockResolvedValue({ total: 1, facets: [methodFacet([])] });
+    await analyzeCollection.handler(
+      analyzeCollection.input.parse({
+        group_by: ['resolution', 'molecular_weight'],
+        interval: 1,
+      }),
+      ctx(),
+    );
+    const [spec] = analyzeFacets.mock.calls[0]![1] as Array<{
+      interval?: unknown;
+      child?: { dimension: string; interval?: unknown };
+    }>;
+    expect(spec?.interval).toBe(1);
+    // The child keeps its own default bin width rather than inheriting the override.
+    expect(spec?.child).toMatchObject({ dimension: 'molecular_weight', interval: 50 });
+  });
+
+  it('rejects an interval no requested dimension can consume (#51)', async () => {
+    for (const group_by of [['method'], ['method', 'organism']] as const) {
+      analyzeFacets.mockClear();
+      await expect(
+        analyzeCollection.handler(
+          analyzeCollection.input.parse({ group_by: [...group_by], interval: 100 }),
+          ctx(),
+        ),
+      ).rejects.toMatchObject({
+        code: -32602,
+        data: {
+          reason: 'interval_not_applicable',
+          recovery: { hint: expect.stringContaining('resolution or molecular_weight') },
+        },
+      });
+      expect(analyzeFacets).not.toHaveBeenCalled();
+    }
+  });
+
+  it('rejects a period interval against histogram-only dimensions (#51)', async () => {
+    // Type compatibility, not merely "not terms": resolution bins numerically.
+    await expect(
+      analyzeCollection.handler(
+        analyzeCollection.input.parse({
+          group_by: ['resolution', 'molecular_weight'],
+          interval: 'year',
+        }),
+        ctx(),
+      ),
+    ).rejects.toMatchObject({ data: { reason: 'interval_not_applicable' } });
+    expect(analyzeFacets).not.toHaveBeenCalled();
+  });
+
+  it('names the requested dimensions in the interval rejection message (#51)', async () => {
+    const err = await Promise.resolve(
+      analyzeCollection.handler(
+        analyzeCollection.input.parse({ group_by: ['method', 'organism'], interval: 100 }),
+        ctx(),
+      ),
+    ).catch((e: Error) => e);
+    expect((err as Error).message).toContain('method or organism');
+    expect((err as Error).message).toContain('resolution, release_year, molecular_weight');
+  });
+
+  it('leaves a cross-tab with no interval on both defaults (#51)', async () => {
+    analyzeFacets.mockResolvedValue({ total: 1, facets: [methodFacet([])] });
+    await analyzeCollection.handler(
+      analyzeCollection.input.parse({ group_by: ['method', 'release_year'] }),
+      ctx(),
+    );
+    const [spec] = analyzeFacets.mock.calls[0]![1] as Array<{
+      child?: { dimension: string; interval?: unknown };
+    }>;
+    expect(spec?.child).toMatchObject({ dimension: 'release_year', interval: 'year' });
+  });
+
+  it('notes a zero-match scope instead of returning a bare success (#54)', async () => {
+    analyzeFacets.mockResolvedValue({ total: 0, facets: [methodFacet([])] });
+    const c = ctx();
+    const out = await analyzeCollection.handler(
+      analyzeCollection.input.parse({ group_by: ['method'], query: 'zzzz-no-such-protein-zzzz' }),
+      c,
+    );
+    // Additive: the success shape is unchanged.
+    expect(out.total).toBe(0);
+    expect(out.facets).toEqual([{ dimension: 'method', buckets: [], missingValueCount: 0 }]);
+    expect(getEnrichment(c)).toMatchObject({ bucketsReturned: 0 });
+    const notice = String(getEnrichment(c).notice);
+    expect(notice).toMatch(/^No experimental structures matched this scope/);
+    expect(notice).toMatch(/Broaden or drop the query, organism, method, and max_resolution/);
+    expect(notice).toMatch(/widen content_type to "all"/);
+  });
+
+  it('does not send an "all" caller to a scope that is already the widest (#54)', async () => {
+    analyzeFacets.mockResolvedValue({ total: 0, facets: [methodFacet([])] });
+    const c = ctx();
+    await analyzeCollection.handler(
+      analyzeCollection.input.parse({
+        group_by: ['method'],
+        query: 'zzzznotathing',
+        content_type: 'all',
+      }),
+      c,
+    );
+    const notice = String(getEnrichment(c).notice);
+    expect(notice).toMatch(/already the widest scope/);
+    expect(notice).not.toMatch(/widen content_type/);
+  });
+
+  it('attributes a zero-match scope to the scope, not the content type (#54)', async () => {
+    // A blind dimension under predicted content would normally get the #27
+    // fragment; at total 0 the empty scope is the real cause and takes precedence.
+    analyzeFacets.mockResolvedValue({ total: 0, facets: [methodFacet([])] });
+    const c = ctx();
+    await analyzeCollection.handler(
+      analyzeCollection.input.parse({
+        group_by: ['method', 'resolution'],
+        query: 'zzzznotathing',
+        content_type: 'predicted',
+      }),
+      c,
+    );
+    const notice = String(getEnrichment(c).notice);
+    expect(notice).toMatch(/^No predicted models matched this scope/);
+    expect(notice).not.toMatch(/computed models carry no experimental/);
+  });
+
+  it('carries the zero-match notice on both consumption surfaces (#54)', async () => {
+    analyzeFacets.mockResolvedValue({ total: 0, facets: [methodFacet([])] });
+    const result = (await runToolContract(analyzeCollection, {
+      group_by: ['method'],
+      query: 'zzzz-no-such-protein-zzzz',
+    })) as {
+      structuredContent: { total: number; bucketsReturned?: number; notice?: string };
+      content: Array<{ type: string; text: string }>;
+    };
+
+    expect(result.structuredContent.total).toBe(0);
+    expect(result.structuredContent.bucketsReturned).toBe(0);
+    expect(String(result.structuredContent.notice)).toMatch(/matched this scope/);
+    const [formatted, ...trailer] = result.content;
+    expect(formatted?.text).toContain('Collection profile — 0 entries');
+    expect(trailer.map((b) => b.text).join('\n')).toMatch(/matched this scope/);
+  });
+
+  it('adds no zero-match notice when the scope did match (#54)', async () => {
+    analyzeFacets.mockResolvedValue({
+      total: 1000,
+      facets: [methodFacet([{ label: 'X-RAY DIFFRACTION', count: 1000 }])],
+    });
+    const c = ctx();
+    await analyzeCollection.handler(analyzeCollection.input.parse({ group_by: ['method'] }), c);
+    expect(getEnrichment(c)).not.toHaveProperty('notice');
   });
 
   it('output conforms to the declared schema', async () => {

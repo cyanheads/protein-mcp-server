@@ -123,8 +123,8 @@ function withRange<T extends { rangeFrom?: number; rangeTo?: number }>(
  *
  * - `buckets` must be the UNCAPPED list. Measured after {@link toFacetOutput}
  *   slices to the bucket cap, the difference would fold in what the cap removed
- *   — a separate condition the response already discloses through `truncated` /
- *   `shown` / `cap`.
+ *   — a separate condition the response already discloses through the
+ *   per-position `truncated` flags and {@link truncationNotices}.
  * - The result floors at 0. A multi-valued attribute puts one match in several
  *   buckets (an entry with two source organisms lands in both), so the sum can
  *   legitimately exceed the total. That is over-counting, a different phenomenon
@@ -328,6 +328,52 @@ export function coverageNotices(facets: FacetDimensionOutput[], total: number): 
       `${p.dimension} buckets cover ${p.scope - p.missing} of ${p.scope} matches; the other ${p.missing} (${pct}%) carry no ${p.dimension} value and fall in no bucket.`,
     );
   }
+  return notices;
+}
+
+/**
+ * Advisory fragments for the dimension positions the bucket cap sliced, ready to
+ * join into the shared `notice` field alongside a caller's other advisories.
+ *
+ * Walks the same positions as {@link coverageNotices}: the top-level dimension,
+ * then each distinct child dimension aggregated across the parent buckets that
+ * carry it. A cross-tab caps each position independently, so the parent can fit
+ * under the cap while a child does not — and a child can be capped under some
+ * parent buckets and not others, which is what the per-position counts report.
+ * A single fragment naming one dimension would misstate all three cases.
+ *
+ * The list closes with the cap itself and the way past it, so a caller reading
+ * only `notice` has the recovery without re-deriving it per position.
+ */
+export function truncationNotices(facets: FacetDimensionOutput[], cap: number): string[] {
+  const notices: string[] = [];
+  for (const f of facets) {
+    if (f.truncated) {
+      notices.push(`${f.dimension} was capped to the ${f.buckets.length} highest-count buckets.`);
+    }
+    const children = new Map<string, { buckets: number; parents: number; truncated: number }>();
+    for (const b of f.buckets) {
+      const c = b.child;
+      if (!c) continue;
+      const acc = children.get(c.dimension) ?? { buckets: 0, parents: 0, truncated: 0 };
+      acc.parents += 1;
+      if (c.truncated) {
+        acc.truncated += 1;
+        acc.buckets = Math.max(acc.buckets, c.buckets.length);
+      }
+      children.set(c.dimension, acc);
+    }
+    for (const [dimension, acc] of children) {
+      if (acc.truncated === 0) continue;
+      notices.push(
+        `${dimension} (nested under ${f.dimension}) was capped to ${acc.buckets} buckets in ${acc.truncated} of the ${acc.parents} ${f.dimension} buckets shown.`,
+      );
+    }
+  }
+  if (notices.length === 0) return [];
+  notices.push(
+    `Each dimension level is capped at ${cap} buckets independently; raise bucket_limit (up to 500) or scope the query tighter to reach the long tail.`,
+  );
   return notices;
 }
 

@@ -62,12 +62,31 @@ export const FACET_DIMENSION_NAMES = Object.keys(FACET_DIMENSIONS) as [
   ...FacetDimensionName[],
 ];
 
-/** Build a {@link FacetSpec} for a dimension, with an optional interval override and nested child. */
-export function buildFacetSpec(
+/** The histogram / date-histogram dimensions, in enum order — the set an `interval` can reach. */
+export const INTERVAL_DIMENSION_NAMES = FACET_DIMENSION_NAMES.filter(
+  (d) => FACET_DIMENSIONS[d].aggregation !== 'terms',
+);
+
+/**
+ * Which requested dimension can consume an `interval` override, or `undefined`
+ * when neither can. Compatibility is by value type rather than merely "not
+ * terms": a numeric bin width belongs to a `histogram` dimension, the `year`
+ * period to a `date_histogram` one. The primary position wins when both could
+ * take it, so an ambiguous override lands where the caller can predict.
+ */
+export function intervalTarget(
+  interval: number | string,
   dimension: FacetDimensionName,
-  interval?: number | string,
   child?: FacetDimensionName,
-): FacetSpec {
+): FacetDimensionName | undefined {
+  const wanted = typeof interval === 'number' ? 'histogram' : 'date_histogram';
+  if (FACET_DIMENSIONS[dimension].aggregation === wanted) return dimension;
+  if (child && FACET_DIMENSIONS[child].aggregation === wanted) return child;
+  return undefined;
+}
+
+/** Build one position's {@link FacetSpec}, falling back to its default bin width or period. */
+function specFor(dimension: FacetDimensionName, interval?: number | string): FacetSpec {
   const def: DimensionDef = FACET_DIMENSIONS[dimension];
   const resolvedInterval = interval ?? def.defaultInterval;
   return {
@@ -77,6 +96,27 @@ export function buildFacetSpec(
     ...(def.aggregation !== 'terms' && resolvedInterval !== undefined
       ? { interval: resolvedInterval }
       : {}),
-    ...(child ? { child: buildFacetSpec(child) } : {}),
+  };
+}
+
+/**
+ * Build a {@link FacetSpec} for a dimension, with an optional interval override
+ * and nested child. The override reaches whichever of the two positions can
+ * consume it ({@link intervalTarget}) — RCSB honours a per-position `interval`
+ * on a nested facet, so a histogram child is not stuck on its default just
+ * because the parent aggregates by terms. The position that cannot consume it
+ * keeps its own default, and an override no position accepts is dropped rather
+ * than sent upstream; callers that must reject that case ask
+ * {@link intervalTarget} first.
+ */
+export function buildFacetSpec(
+  dimension: FacetDimensionName,
+  interval?: number | string,
+  child?: FacetDimensionName,
+): FacetSpec {
+  const target = interval === undefined ? undefined : intervalTarget(interval, dimension, child);
+  return {
+    ...specFor(dimension, target === dimension ? interval : undefined),
+    ...(child ? { child: specFor(child, target === child ? interval : undefined) } : {}),
   };
 }

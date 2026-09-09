@@ -4,8 +4,9 @@
  * coverage gap), renderFacets (the markdown twin, including the truncation
  * marker, the coverage marker, the nested cross-tab line shape, and the
  * explanation that replaces a bare empty-dimension heading), coverageNotices
- * (the materiality filter that decides which gaps earn prose), and countBuckets
- * (the realized bucket total across every dimension position).
+ * (the materiality filter that decides which gaps earn prose), truncationNotices
+ * (one advisory per capped dimension position, top-level and nested), and
+ * countBuckets (the realized bucket total across every dimension position).
  * @module tests/tools/_schemas.test
  */
 
@@ -15,6 +16,7 @@ import {
   coverageNotices,
   renderFacets,
   toFacetOutput,
+  truncationNotices,
 } from '@/mcp-server/tools/definitions/_schemas.js';
 import type { FacetDimension } from '@/services/rcsb/types.js';
 
@@ -607,6 +609,135 @@ describe('coverageNotices (#32)', () => {
     // 58289 missing across the 117719 matches the two parent buckets describe.
     expect(notices[0]).toContain('58289');
     expect(notices[0]).toContain('117719');
+  });
+});
+
+describe('truncationNotices (#37)', () => {
+  type Facets = Parameters<typeof truncationNotices>[0];
+  interface ChildShape {
+    bucketCount: number;
+    dimension: string;
+    truncated: boolean;
+  }
+
+  const parent = (
+    dimension: string,
+    truncated: boolean,
+    bucketCount: number,
+    children: ChildShape[] = [],
+  ): Facets[number] => ({
+    dimension,
+    missingValueCount: 0,
+    ...(truncated ? { truncated: true } : {}),
+    buckets: Array.from({ length: bucketCount }, (_, i) => {
+      const c = children[i];
+      return {
+        label: `v${i}`,
+        count: 1,
+        ...(c
+          ? {
+              child: {
+                dimension: c.dimension,
+                missingValueCount: 0,
+                ...(c.truncated ? { truncated: true } : {}),
+                buckets: Array.from({ length: c.bucketCount }, (_, j) => ({
+                  label: `c${j}`,
+                  count: 1,
+                })),
+              },
+            }
+          : {}),
+      };
+    }),
+  });
+
+  it('stays silent when no position was capped', () => {
+    expect(truncationNotices([parent('method', false, 2)], 50)).toEqual([]);
+  });
+
+  it('names a capped top-level dimension and closes with the cap and the way past it', () => {
+    const notices = truncationNotices([parent('organism', true, 3)], 3);
+    expect(notices).toHaveLength(2);
+    expect(notices[0]).toBe('organism was capped to the 3 highest-count buckets.');
+    expect(notices[1]).toMatch(/capped at 3 buckets independently/);
+    expect(notices[1]).toMatch(/bucket_limit/);
+  });
+
+  it('fires for a nested child even when the parent fits under the cap', () => {
+    // The exact gap #37 reports: `out.find((f) => f.truncated)` saw nothing in
+    // this shape, so no truncation was disclosed at all.
+    const notices = truncationNotices(
+      [
+        parent('organism', false, 2, [
+          { dimension: 'method', bucketCount: 3, truncated: true },
+          { dimension: 'method', bucketCount: 3, truncated: true },
+        ]),
+      ],
+      3,
+    );
+    expect(notices[0]).toBe(
+      'method (nested under organism) was capped to 3 buckets in 2 of the 2 organism buckets shown.',
+    );
+  });
+
+  it('counts only the parent buckets whose child was actually capped', () => {
+    // The live repro shape: two organism buckets carry more method values than
+    // the cap, the third carries exactly the cap and is untouched.
+    const notices = truncationNotices(
+      [
+        parent('organism', true, 3, [
+          { dimension: 'method', bucketCount: 3, truncated: true },
+          { dimension: 'method', bucketCount: 3, truncated: true },
+          { dimension: 'method', bucketCount: 3, truncated: false },
+        ]),
+      ],
+      3,
+    );
+    expect(notices[0]).toBe('organism was capped to the 3 highest-count buckets.');
+    expect(notices[1]).toBe(
+      'method (nested under organism) was capped to 3 buckets in 2 of the 3 organism buckets shown.',
+    );
+  });
+
+  it('aggregates one child dimension into a single fragment, never one per parent', () => {
+    const notices = truncationNotices(
+      [
+        parent(
+          'organism',
+          false,
+          4,
+          Array.from({ length: 4 }, () => ({
+            dimension: 'method',
+            bucketCount: 2,
+            truncated: true,
+          })),
+        ),
+      ],
+      2,
+    );
+    expect(notices.filter((n) => n.startsWith('method'))).toHaveLength(1);
+  });
+
+  it('stays silent about an untruncated child under a capped parent', () => {
+    const notices = truncationNotices(
+      [parent('organism', true, 2, [{ dimension: 'method', bucketCount: 1, truncated: false }])],
+      2,
+    );
+    expect(notices.some((n) => n.includes('nested under'))).toBe(false);
+    expect(notices[0]).toContain('organism');
+  });
+
+  it('appends the cap sentence exactly once across several capped positions', () => {
+    const notices = truncationNotices(
+      [
+        parent('organism', true, 2, [{ dimension: 'method', bucketCount: 2, truncated: true }]),
+        parent('polymer_type', true, 2),
+      ],
+      2,
+    );
+    expect(notices).toHaveLength(4);
+    expect(notices.filter((n) => n.includes('independently'))).toHaveLength(1);
+    expect(notices.at(-1)).toMatch(/independently/);
   });
 });
 
