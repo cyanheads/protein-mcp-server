@@ -6,7 +6,9 @@
  * cross-tab the facet engine produces; the flat variant drops the child position
  * for the tool that requests single-dimension breakdowns only. Every dimension
  * position also reports its coverage gap, so buckets that sum to less than the
- * stated total say so.
+ * stated total say so. Also holds the entry-level polymer-entity and ligand
+ * schemas shared by `protein_get_structure` and the `pdb://{entry_id}` resource,
+ * so tool and resource representations of the same record stay identical.
  * @module mcp-server/tools/definitions/_schemas
  */
 
@@ -401,3 +403,41 @@ export function renderAttribution(attributions: AttributionOutput[]): string[] {
   }
   return lines;
 }
+
+/**
+ * One modeled polymer entity (chain group) of a PDB entry. Shared by
+ * `protein_get_structure` and the `pdb://{entry_id}` resource so the tool and its
+ * resource twin cannot drift on how the two chain namespaces are named or
+ * described. The `label_asym_id` / `auth_asym_id` split is load-bearing: the two
+ * are unrelated by any transformation, and each is consumed by a different tool
+ * parameter, so a caller that substitutes one for the other gets no alignment.
+ */
+export const polymerEntitySchema = z
+  .object({
+    entityId: z.string().describe('Polymer entity ID (e.g. 4HHB_1).'),
+    description: z.string().optional().describe('Entity description.'),
+    organism: z.string().optional().describe('Source organism.'),
+    authAsymIds: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Author-assigned chain IDs (auth_asym_id, e.g. ["A","C"]) — the namespace protein_get_annotations.chain takes. Omitted when upstream does not report them.',
+      ),
+    labelAsymIds: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'mmCIF label_asym_id chain IDs (e.g. ["I","OB"]) — the namespace protein_compare_structures.chain takes. Not derivable from authAsymIds: for 6QNR_9 the label chains are I/OB against author chains 82/8E. Omitted when upstream does not report them.',
+      ),
+    sequenceLength: z.number().optional().describe('Residue count of the sample sequence.'),
+  })
+  .describe('A modeled polymer entity (chain group), with both chain namespaces.');
+
+/** One bound non-polymer component (ligand) of a PDB entry. */
+export const ligandSchema = z
+  .object({
+    compId: z.string().describe('Chemical component ID (e.g. HEM).'),
+    name: z.string().optional().describe('Chemical name.'),
+    formula: z.string().optional().describe('Molecular formula.'),
+  })
+  .describe('A bound ligand (non-polymer chemical component).');

@@ -66,12 +66,21 @@ export interface SearchResult {
 
 /** A modeled polymer (protein/nucleic) entity within an entry. */
 export interface PolymerEntityMeta {
-  /** Author-assigned chain IDs for this entity. */
-  chains?: string[];
+  /**
+   * Author-assigned chain IDs (`auth_asym_id`) for this entity — the namespace
+   * `protein_get_annotations.chain` consumes. Absent when upstream omits it.
+   */
+  authAsymIds?: string[];
   /** Free-text description (e.g. "Hemoglobin subunit alpha"). */
   description?: string;
   /** Entity identifier (e.g. `4HHB_1`). */
   entityId: string;
+  /**
+   * mmCIF `label_asym_id` chain IDs for this entity — the namespace
+   * `protein_compare_structures.chain` consumes. Unrelated to `authAsymIds` by any
+   * transformation, though the two coincide for many entries.
+   */
+  labelAsymIds?: string[];
   /** Source organism scientific name. */
   organism?: string;
   /** One-letter canonical sequence (present only when explicitly requested). */

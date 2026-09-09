@@ -1,19 +1,21 @@
 /**
  * @fileoverview pdb://{entry_id} — experimental structure summary (title, method,
- * resolution, organism, ligands, chains). The injectable-context twin of
- * protein_get_structure for source: experimental.
+ * resolution, organism, ligands, and per-entity chain IDs in both the author and
+ * mmCIF label namespaces). The injectable-context twin of protein_get_structure
+ * for source: experimental.
  * @module mcp-server/resources/definitions/pdb-summary.resource
  */
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
 import { notFound } from '@cyanheads/mcp-ts-core/errors';
+import { ligandSchema, polymerEntitySchema } from '@/mcp-server/tools/definitions/_schemas.js';
 import { getRcsbService } from '@/services/rcsb/rcsb-service.js';
 
 export const pdbSummaryResource = resource('pdb://{entry_id}', {
   name: 'pdb-structure-summary',
   title: 'PDB structure summary',
   description:
-    'Experimental structure summary for a PDB entry: title, method, resolution, organism, chains, and bound ligands.',
+    'Experimental structure summary for a PDB entry: title, method, resolution, organism, bound ligands, and per-entity chain IDs in both the author (auth_asym_id) and mmCIF label (label_asym_id) namespaces.',
   mimeType: 'application/json',
   params: z.object({
     entry_id: z.string().describe('PDB entry ID (e.g. 4HHB).'),
@@ -27,29 +29,11 @@ export const pdbSummaryResource = resource('pdb://{entry_id}', {
     releaseDate: z.string().optional().describe('Initial release date (ISO 8601).'),
     organisms: z.array(z.string()).describe('Source organisms.'),
     polymerEntities: z
-      .array(
-        z
-          .object({
-            entityId: z.string().describe('Polymer entity ID.'),
-            description: z.string().optional().describe('Entity description.'),
-            organism: z.string().optional().describe('Source organism.'),
-            chains: z.array(z.string()).optional().describe('Author chain IDs.'),
-            sequenceLength: z.number().optional().describe('Residue count.'),
-          })
-          .describe('A modeled polymer entity (chain group).'),
-      )
-      .describe('Modeled polymer entities.'),
-    ligands: z
-      .array(
-        z
-          .object({
-            compId: z.string().describe('Chemical component ID.'),
-            name: z.string().optional().describe('Chemical name.'),
-            formula: z.string().optional().describe('Molecular formula.'),
-          })
-          .describe('A bound ligand (non-polymer chemical component).'),
-      )
-      .describe('Bound ligands.'),
+      .array(polymerEntitySchema)
+      .describe(
+        'Modeled polymer entities, each carrying both chain namespaces — authAsymIds for protein_get_annotations, labelAsymIds for protein_compare_structures.',
+      ),
+    ligands: z.array(ligandSchema).describe('Bound ligands.'),
   }),
 
   async handler(params, ctx) {

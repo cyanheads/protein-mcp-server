@@ -50,7 +50,10 @@ describe('RcsbService.getEntries', () => {
       {
         rcsb_id: '4HHB_1',
         rcsb_polymer_entity: { pdbx_description: 'Hemoglobin subunit alpha' },
-        rcsb_polymer_entity_container_identifiers: { auth_asym_ids: ['A', 'C'] },
+        rcsb_polymer_entity_container_identifiers: {
+          auth_asym_ids: ['A', 'C'],
+          asym_ids: ['A', 'C'],
+        },
         entity_poly: { rcsb_sample_sequence_length: 141 },
         rcsb_entity_source_organism: [{ ncbi_scientific_name: 'Homo sapiens' }],
       },
@@ -92,7 +95,8 @@ describe('RcsbService.getEntries', () => {
       entityId: '4HHB_1',
       description: 'Hemoglobin subunit alpha',
       organism: 'Homo sapiens',
-      chains: ['A', 'C'],
+      authAsymIds: ['A', 'C'],
+      labelAsymIds: ['A', 'C'],
       sequenceLength: 141,
     });
     expect(meta?.ligands).toEqual([
@@ -133,6 +137,53 @@ describe('RcsbService.getEntries', () => {
       expect(meta?.methods).toBeUndefined();
       expect(meta?.resolution).toBeUndefined();
     }
+  });
+
+  it('keeps the two chain namespaces apart when they differ (6QNR_9)', async () => {
+    // Live RCSB shape: no transformation relates label_asym_id to auth_asym_id,
+    // so collapsing them to one field leaves a per-chain alignment unsetupable.
+    fetchJsonMock.mockResolvedValue(
+      gql({
+        entries: [
+          {
+            rcsb_id: '6QNR',
+            polymer_entities: [
+              {
+                rcsb_id: '6QNR_9',
+                rcsb_polymer_entity_container_identifiers: {
+                  auth_asym_ids: ['82', '8E'],
+                  asym_ids: ['I', 'OB'],
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const [meta] = await service().getEntries(['6QNR'], createMockContext());
+    expect(meta?.polymerEntities[0]).toEqual({
+      entityId: '6QNR_9',
+      authAsymIds: ['82', '8E'],
+      labelAsymIds: ['I', 'OB'],
+    });
+  });
+
+  it('omits both chain namespaces for an entity with no container identifiers', async () => {
+    fetchJsonMock.mockResolvedValue(gql({ entries: [ENTRY_4HHB] }));
+    const [meta] = await service().getEntries(['4HHB'], createMockContext());
+    // 4HHB_2 in the fixture carries no container block — unknown data is omitted,
+    // never emitted as an empty array.
+    expect(meta?.polymerEntities[1]).not.toHaveProperty('authAsymIds');
+    expect(meta?.polymerEntities[1]).not.toHaveProperty('labelAsymIds');
+  });
+
+  it('selects both chain-identifier fields in the entries query', async () => {
+    fetchJsonMock.mockResolvedValue(gql({ entries: [] }));
+    await service().getEntries(['4HHB'], createMockContext());
+    const opts = fetchJsonMock.mock.calls[0]?.[2] as unknown as { body: string };
+    const query = JSON.parse(opts.body).query as string;
+    expect(query).toContain('auth_asym_ids');
+    expect(query).toContain('asym_ids');
   });
 
   it('requests the computed-model provenance field', async () => {

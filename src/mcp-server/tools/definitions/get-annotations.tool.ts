@@ -105,7 +105,7 @@ export const getAnnotations = tool('protein_get_annotations', {
       code: JsonRpcErrorCode.NotFound,
       when: 'A supplied chain matches no UniProt-mapped polymer entity in the resolved PDB entry.',
       recovery:
-        'Omit chain for the deterministic default mapping, or pass an author chain ID the entry exposes (see polymerEntities[].chains in the pdb://{entry_id} resource).',
+        'Omit chain for the deterministic default mapping, or pass an author chain ID the entry exposes (see polymerEntities[].authAsymIds in the pdb://{entry_id} resource).',
     },
   ],
 
@@ -122,7 +122,7 @@ export const getAnnotations = tool('protein_get_annotations', {
       .string()
       .optional()
       .describe(
-        'Author chain ID (auth_asym_id, e.g. "A") that disambiguates a multi-chain PDB entry to a specific UniProt accession. Case-sensitive — must match the author chain ID exactly (large structures can carry distinct "A" and "a" chains). Only applies with pdb_id; ignored when uniprot is supplied directly. See polymerEntities[].chains in the pdb://{entry_id} resource for an entry\'s author chain IDs.',
+        'Author chain ID (auth_asym_id, e.g. "A") that disambiguates a multi-chain PDB entry to a specific UniProt accession. Case-sensitive — must match the author chain ID exactly (large structures can carry distinct "A" and "a" chains). Only applies with pdb_id; ignored when uniprot is supplied directly. See polymerEntities[].authAsymIds in the pdb://{entry_id} resource for an entry\'s author chain IDs.',
       ),
     include: z
       .enum(['features', 'domains', 'variants', 'all'])

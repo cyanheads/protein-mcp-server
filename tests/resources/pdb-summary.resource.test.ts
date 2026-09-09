@@ -31,7 +31,12 @@ describe('pdb://{entry_id}', () => {
         releaseDate: '1984-07-17T00:00:00Z',
         organisms: ['Homo sapiens'],
         polymerEntities: [
-          { entityId: '4HHB_1', description: 'Hemoglobin subunit alpha', chains: ['A'] },
+          {
+            entityId: '4HHB_1',
+            description: 'Hemoglobin subunit alpha',
+            authAsymIds: ['A'],
+            labelAsymIds: ['A'],
+          },
         ],
         ligands: [{ compId: 'HEM', name: 'PROTOPORPHYRIN IX CONTAINING FE' }],
       },
@@ -49,6 +54,43 @@ describe('pdb://{entry_id}', () => {
       resolution: 1.74,
       organisms: ['Homo sapiens'],
     });
+    expect(out).toEqual(expect.schemaMatching(pdbSummaryResource.output));
+  });
+
+  it('exposes both chain namespaces per polymer entity when they differ (6QNR)', async () => {
+    getEntries.mockResolvedValue([
+      {
+        id: '6QNR',
+        organisms: [],
+        polymerEntities: [
+          { entityId: '6QNR_9', authAsymIds: ['82', '8E'], labelAsymIds: ['I', 'OB'] },
+        ],
+        ligands: [],
+      },
+    ]);
+    const params = pdbSummaryResource.params!.parse({ entry_id: '6QNR' });
+    const out = await pdbSummaryResource.handler(
+      params,
+      createMockContext({ uri: new URL('pdb://6qnr') }),
+    );
+
+    expect(out.polymerEntities).toEqual([
+      { entityId: '6QNR_9', authAsymIds: ['82', '8E'], labelAsymIds: ['I', 'OB'] },
+    ]);
+    expect(out).toEqual(expect.schemaMatching(pdbSummaryResource.output));
+  });
+
+  it('omits an entity chain namespace the upstream did not supply', async () => {
+    getEntries.mockResolvedValue([
+      { id: '1ABC', organisms: [], polymerEntities: [{ entityId: '1ABC_1' }], ligands: [] },
+    ]);
+    const params = pdbSummaryResource.params!.parse({ entry_id: '1ABC' });
+    const out = await pdbSummaryResource.handler(
+      params,
+      createMockContext({ uri: new URL('pdb://1abc') }),
+    );
+
+    expect(out.polymerEntities).toEqual([{ entityId: '1ABC_1' }]);
     expect(out).toEqual(expect.schemaMatching(pdbSummaryResource.output));
   });
 

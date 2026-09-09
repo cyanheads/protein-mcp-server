@@ -22,7 +22,9 @@ const inputSchema = z.object({
           chain: z
             .string()
             .optional()
-            .describe('Chain (label_asym_id) to restrict the alignment to a single chain.'),
+            .describe(
+              `mmCIF label_asym_id restricting the alignment to a single chain. Read it from polymerEntities[].labelAsymIds on protein_get_structure (source experimental) or the pdb://{entry_id} resource. Author chain IDs are a different namespace — polymerEntities[].authAsymIds, what protein_get_annotations.chain takes — and are not interchangeable with this one. Case-sensitive.`,
+            ),
         })
         .describe('A structure to align, by PDB entry ID with optional chain.'),
     )

@@ -614,14 +614,21 @@ function normalizePolymerEntity(raw: RawPolymerEntity): PolymerEntityMeta {
   const organism = raw.rcsb_entity_source_organism?.find(
     (o) => o.ncbi_scientific_name,
   )?.ncbi_scientific_name;
-  const chains = raw.rcsb_polymer_entity_container_identifiers?.auth_asym_ids;
+  // Two distinct chain namespaces, never interchangeable: `auth_asym_ids` are the
+  // depositor's labels (what protein_get_annotations.chain takes), `asym_ids` the
+  // mmCIF label_asym_ids (what protein_compare_structures.chain takes). For many
+  // entries they coincide; for 6QNR_9 they are ["82","8E"] vs ["I","OB"].
+  const container = raw.rcsb_polymer_entity_container_identifiers;
+  const authAsymIds = container?.auth_asym_ids;
+  const labelAsymIds = container?.asym_ids;
   return {
     entityId: raw.rcsb_id ?? '',
+    ...(authAsymIds && authAsymIds.length > 0 ? { authAsymIds } : {}),
     ...(raw.rcsb_polymer_entity?.pdbx_description
       ? { description: raw.rcsb_polymer_entity.pdbx_description }
       : {}),
+    ...(labelAsymIds && labelAsymIds.length > 0 ? { labelAsymIds } : {}),
     ...(organism ? { organism } : {}),
-    ...(chains && chains.length > 0 ? { chains } : {}),
     ...(typeof raw.entity_poly?.rcsb_sample_sequence_length === 'number'
       ? { sequenceLength: raw.entity_poly.rcsb_sample_sequence_length }
       : {}),
@@ -691,7 +698,7 @@ interface RawPolymerEntity {
   rcsb_entity_source_organism?: Array<{ ncbi_scientific_name?: string }>;
   rcsb_id?: string;
   rcsb_polymer_entity?: { pdbx_description?: string };
-  rcsb_polymer_entity_container_identifiers?: { auth_asym_ids?: string[] };
+  rcsb_polymer_entity_container_identifiers?: { asym_ids?: string[]; auth_asym_ids?: string[] };
 }
 
 interface RawNonpolymerEntity {
@@ -755,7 +762,7 @@ const ENTRIES_QUERY = `query Entries($ids: [String!]!) {
     polymer_entities {
       rcsb_id
       rcsb_polymer_entity { pdbx_description }
-      rcsb_polymer_entity_container_identifiers { auth_asym_ids }
+      rcsb_polymer_entity_container_identifiers { auth_asym_ids asym_ids }
       entity_poly { rcsb_sample_sequence_length }
       rcsb_entity_source_organism { ncbi_scientific_name }
     }
