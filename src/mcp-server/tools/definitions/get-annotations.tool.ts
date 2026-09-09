@@ -94,9 +94,23 @@ export const getAnnotations = tool('protein_get_annotations', {
 
   errors: [
     {
+      reason: 'missing_identifier',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'Neither uniprot nor pdb_id was supplied, so there is no protein to look up.',
+      recovery:
+        'Provide uniprot (e.g. P69905) or pdb_id (e.g. 4HHB) — either one identifies the protein.',
+    },
+    {
+      reason: 'invalid_accession',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'The supplied uniprot value is not a syntactically valid UniProt accession.',
+      recovery:
+        'Pass a UniProt accession in its 6- or 10-character form (e.g. P69905, A0A024R161), or supply pdb_id instead.',
+    },
+    {
       reason: 'no_uniprot_mapping',
       code: JsonRpcErrorCode.NotFound,
-      when: 'A PDB ID has no UniProt cross-reference (e.g. nucleic-acid-only entry), or neither uniprot nor pdb_id was provided.',
+      when: 'A supplied PDB ID resolved to no usable UniProt cross-reference (e.g. a nucleic-acid-only entry).',
       recovery:
         'Pass a UniProt accession directly, or use protein_search_structures to find a structure with a modeled protein chain.',
     },
@@ -189,6 +203,22 @@ export const getAnnotations = tool('protein_get_annotations', {
     const uniprot = getUniProtService();
     const rcsb = getRcsbService();
 
+    // Reject unusable input up front, before any upstream call: a caller that
+    // omitted both parameters or mistyped an accession has an input problem, not a
+    // lookup that found nothing, and the two are different next moves. Guarded
+    // here rather than by a Zod refine so the rejection carries `data.reason` and
+    // the declared recovery hint.
+    if (!input.uniprot && !input.pdb_id) {
+      throw ctx.fail('missing_identifier', 'Provide uniprot (e.g. P69905) or pdb_id (e.g. 4HHB).', {
+        ...ctx.recoveryFor('missing_identifier'),
+      });
+    }
+    if (input.uniprot && !isUniProtAccession(input.uniprot)) {
+      throw ctx.fail('invalid_accession', `"${input.uniprot}" is not a valid UniProt accession.`, {
+        ...ctx.recoveryFor('invalid_accession'),
+      });
+    }
+
     let accession = input.uniprot?.toUpperCase();
     let resolvedFrom: string | undefined;
     let ambiguity: AnnotationAmbiguity | undefined;
@@ -228,10 +258,13 @@ export const getAnnotations = tool('protein_get_annotations', {
       }
     }
 
+    // Both checks below are upstream-resolution outcomes now: an absent or
+    // malformed `uniprot` input was rejected before any lookup ran, so reaching
+    // either means a supplied pdb_id resolved to nothing usable.
     if (!accession) {
       throw ctx.fail(
         'no_uniprot_mapping',
-        'Provide a UniProt accession, or a PDB ID with a modeled protein chain.',
+        'The supplied PDB ID carries no UniProt-mapped protein chain.',
         { ...ctx.recoveryFor('no_uniprot_mapping') },
       );
     }

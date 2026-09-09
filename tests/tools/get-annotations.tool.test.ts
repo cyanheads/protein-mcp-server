@@ -2,14 +2,16 @@
  * @fileoverview Tests for protein_get_annotations: direct-accession vs. PDB→UniProt
  * resolution, deterministic multi-accession disambiguation (default lowest-chain
  * pick + ambiguity block, chain selection, unrecognized-chain error), the
- * no_uniprot_mapping failure (missing input, unresolvable PDB, malformed
- * accession), include-scope gating of features/variants/domains, per-response
+ * missing_identifier / invalid_accession input rejections, the
+ * no_uniprot_mapping failure (unresolvable PDB, upstream-malformed accession),
+ * include-scope gating of features/variants/domains, per-response
  * attribution gating (UniProt / InterPro / GO), the resolvedFrom enrichment, and
  * format() rendering of ambiguity, features, variants, InterPro domains with GO
  * terms, and attribution. Services mocked.
  * @module tests/tools/get-annotations.tool.test
  */
 
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -106,29 +108,74 @@ describe('protein_get_annotations', () => {
     expect(getEnrichment(c)).toMatchObject({ resolvedFrom: '4HHB' });
   });
 
-  it('throws no_uniprot_mapping (with its declared recovery hint) when neither uniprot nor pdb_id is given', async () => {
+  it('throws missing_identifier (InvalidParams) naming both parameters when neither is given (#46)', async () => {
     await expect(
       getAnnotations.handler(getAnnotations.input.parse({}), ctx()),
     ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
       data: {
-        reason: 'no_uniprot_mapping',
-        recovery: { hint: expect.stringContaining('Pass a UniProt accession directly') },
+        reason: 'missing_identifier',
+        recovery: { hint: expect.stringMatching(/uniprot[\s\S]*pdb_id/i) },
       },
     });
+    // Rejected handler-side before any upstream call — an absent parameter is not
+    // a lookup that found nothing.
+    expect(resolveUniprotEntities).not.toHaveBeenCalled();
+    expect(getEntry).not.toHaveBeenCalled();
   });
 
   it('throws no_uniprot_mapping when the PDB entry has no UniProt cross-reference', async () => {
     resolveUniprotEntities.mockResolvedValue([]); // nucleic-acid-only entry
     await expect(
       getAnnotations.handler(getAnnotations.input.parse({ pdb_id: '1ABC' }), ctx()),
-    ).rejects.toMatchObject({ data: { reason: 'no_uniprot_mapping' } });
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'no_uniprot_mapping' },
+    });
     expect(getEntry).not.toHaveBeenCalled();
   });
 
-  it('throws no_uniprot_mapping when the resolved accession is malformed', async () => {
+  it('throws invalid_accession (InvalidParams) describing the format for a malformed uniprot (#46)', async () => {
     await expect(
       getAnnotations.handler(getAnnotations.input.parse({ uniprot: 'NOTANACC' }), ctx()),
-    ).rejects.toMatchObject({ data: { reason: 'no_uniprot_mapping' } });
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: {
+        reason: 'invalid_accession',
+        recovery: { hint: expect.stringContaining('P69905') },
+      },
+    });
+    expect(resolveUniprotEntities).not.toHaveBeenCalled();
+    expect(getEntry).not.toHaveBeenCalled();
+  });
+
+  it('keeps no_uniprot_mapping when a pdb_id resolves to a malformed accession (#46)', async () => {
+    // An upstream-data problem, not caller input — this branch stays NotFound.
+    resolveUniprotEntities.mockResolvedValue([{ chains: ['A'], accession: 'NOTANACC' }]);
+    await expect(
+      getAnnotations.handler(getAnnotations.input.parse({ pdb_id: '1ABC' }), ctx()),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'no_uniprot_mapping' },
+    });
+    expect(getEntry).not.toHaveBeenCalled();
+  });
+
+  it('leaves a valid uniprot and a resolving pdb_id unaffected (#46)', async () => {
+    getEntry.mockResolvedValue(entry());
+    getInterPro.mockResolvedValue([]);
+    const direct = await getAnnotations.handler(
+      getAnnotations.input.parse({ uniprot: 'p69905' }),
+      ctx(),
+    );
+    expect(direct.accession).toBe('P69905');
+
+    resolveUniprotEntities.mockResolvedValue([{ chains: ['A'], accession: 'P69905' }]);
+    const resolved = await getAnnotations.handler(
+      getAnnotations.input.parse({ pdb_id: '4HHB' }),
+      ctx(),
+    );
+    expect(resolved.accession).toBe('P69905');
   });
 
   it('include:features omits domains and skips the InterPro call', async () => {
