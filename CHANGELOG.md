@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.1](changelog/0.8.x/0.8.1.md) — 2026-09-16
+
+Adopts @cyanheads/mcp-ts-core 0.13.2, declaring stateless HTTP session mode in source, plus dependency and skills-tree maintenance.
+
 ## [0.8.0](changelog/0.8.x/0.8.0.md) — 2026-09-09 · ⚠️ Breaking
 
 protein_find_similar rejects fields the selected by mode can't consume and paginates completed structure searches with a re-usable ticket; protein_get_annotations reclassifies a missing or malformed identifier as InvalidParams; plus RCSB GraphQL, ligand-formula, and get_structure text-surface fixes.
