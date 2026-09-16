@@ -41,6 +41,8 @@ await createApp({
   prompts: [],
   // Public, keyless data server — serve the full inventory to unauthenticated callers.
   landing: { requireAuth: false },
+  // No tool gates on ctx.requestInput, so HTTP serving needs no live session.
+  sessionMode: 'stateless',
   /**
    * Cache hints for protocol revision 2026-07-28. Every listing is static per
    * build and identical for every caller — no auth-gated definitions, no
