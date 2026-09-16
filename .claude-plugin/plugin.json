@@ -1,13 +1,26 @@
 {
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "protein-mcp-server",
   "version": "0.8.0",
   "description": "Federated protein structure & annotation across experimental (PDB) and predicted (AlphaFold) models.",
   "author": {
-    "name": "cyanheads"
+    "name": "cyanheads",
+    "email": "casey@caseyjhand.com",
+    "url": "https://github.com/cyanheads"
   },
   "homepage": "https://github.com/cyanheads/protein-mcp-server#readme",
   "repository": "https://github.com/cyanheads/protein-mcp-server",
   "license": "Apache-2.0",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "protein",
+    "structural-biology",
+    "pdb",
+    "alphafold",
+    "bioinformatics"
+  ],
   "mcpServers": {
     "protein-mcp-server": {
       "command": "npx",
