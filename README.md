@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.8.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.8.0-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -27,9 +27,11 @@
 
 ---
 
-## Tools
+## Overview
 
-Seven tools spanning the structure-research arc — discover, fetch, find homologs, track ligands, compare, profile the corpus, and annotate — over experimental (PDB) and predicted (AlphaFold) structures from one surface:
+Experimental (PDB) and predicted (AlphaFold) protein structures, federated behind one surface. Search, fetch, align, compare, and annotate structures and their ligands across RCSB, AlphaFold DB, 3D-Beacons, UniProt, InterPro, and Foldseek — all keyless. Runs as a stdio process, a local Streamable HTTP server, or the public hosted endpoint above.
+
+### Tools
 
 | Tool | Description |
 |:---|:---|
@@ -41,122 +43,107 @@ Seven tools spanning the structure-research arc — discover, fetch, find homolo
 | `protein_analyze_collection` | Profile the PDB into distributions and trends with server-side facets — counts, histograms, timelines, and cross-tabs. |
 | `protein_get_annotations` | Fetch UniProt features and natural variants plus InterPro domain/family memberships with GO terms. |
 
-### `protein_search_structures`
+### Resources
 
-Federated search across experimental (PDB) and predicted (computed-model) structures via RCSB Search v2.
+| Resource | Description |
+|:---|:---|
+| `pdb://{entry_id}` | Experimental structure summary for a PDB entry — title, method, resolution, organism, bound ligands, and per-entity chain IDs in both the author (`authAsymIds`) and mmCIF label (`labelAsymIds`) namespaces. |
+| `af://{uniprot}` | Predicted-structure summary for a UniProt accession from AlphaFold DB — mean pLDDT, confidence-band fractions, model URLs, and version. |
+
+All resource data is also reachable via tools — `pdb://{entry_id}` mirrors `protein_get_structure` for `source: experimental`, and `af://{uniprot}` mirrors it for `source: predicted`. Many MCP clients are tool-only and don't surface resources; the summaries remain reachable through the tools.
+
+## Capability reference
+
+### `protein_search_structures` <sub>tool</sub>
 
 - Free-text, protein-sequence (triggers an mmseqs2 similarity search), and organism / method / resolution filters
-- `content_type` scopes the search to `experimental`, `predicted`, or `all` — the default `all` is a genuine union of both universes, so computed models appear alongside PDB entries
-- Every hit names its `source`; experimental sequence hits expose a chainable PDB entry `id` plus the matched polymer `entityId`, with title, method, resolution, and organism enrichment, while computed models retain their complete model ID and parsed UniProt accession
+- `content_type` scopes the search to `experimental`, `predicted`, or `all` (default) — `all` is a genuine union, so computed models appear alongside PDB entries
+- Every hit names its `source`; experimental sequence hits expose a chainable PDB entry `id` plus the matched polymer `entityId`, with title, method, resolution, and organism enrichment; computed models retain their complete model ID and parsed UniProt accession
 - `start` and `limit` page through ranked results; `nextStart` is returned while another page remains
-- Optional `facets` return a method / organism / release-year breakdown alongside the hits at no extra call, each reporting how many matches carry no value for that dimension; each dimension may be listed once. A dimension whose buckets hit the server-side cap is named in `notice`, with `protein_analyze_collection` and a larger `bucket_limit` as the route to the long tail (a sequence search gets a narrowing step instead, since that tool has no sequence input)
+- Optional `facets` return a method / organism / release-year breakdown alongside the hits — each dimension may be listed once and reports how many matches carry no value for it; a capped dimension is named in `notice`, with `protein_analyze_collection` (larger `bucket_limit`) as the route to the long tail
 - Chain hit IDs straight into `protein_get_structure`
 
 ---
 
-### `protein_get_structure`
+### `protein_get_structure` <sub>tool</sub>
 
-Fetch structures with metadata and coordinate-file URLs, resolving across providers by `source`.
-
-- `source: experimental` takes PDB entry IDs, batched in one RCSB GraphQL call; it also resolves the computed-model IDs search returns (`AF_*` / `MA_*`), which come back as `source: predicted` credited to their modelling provider
-- `source: predicted` takes UniProt accessions and returns the AlphaFold model with pLDDT/PAE confidence
-- `source: best_available` takes UniProt accessions and returns the top federated model (experimental if one exists, else the best prediction)
-- Per-ID partial success — unresolved IDs are listed in `failed[]`, not a batch-level error
-- Batch cap disclosure — `requested` is the original request length and `processed` the count after the cap, so IDs dropped beyond the cap are visible rather than silently discarded; every advisory (cap, partial failure, coordinate overflow, failed inlining) is joined into one `notice`
-- Records served by the RCSB entry endpoint also carry `polymerEntities` (with both `authAsymIds` and `labelAsymIds`), `ligands`, `molecularWeight`, and `releaseDate`
-- `include_coords` inlines coordinate content, subject to the response budget: a batch over budget returns a per-structure size outline you can re-call with `sections: [ids]`, and a single file over budget is withheld with a pointer to its `coordinateUrls` (a `sections` re-call would return the same bytes). A `sections` re-call is not re-gated — `structuredContent` carries the named payload whole at any size, while the token-bounded text surface withholds anything over the budget and points at `coordinateUrls` instead of truncating it
-- Every response carries an `attribution` block naming the upstream data licenses and citations (see [Upstream data licensing](#upstream-data-licensing))
+- `source: experimental` batches PDB entry IDs (also resolving computed-model IDs like `AF_*`/`MA_*` from search, tagged `source: predicted` with their provider); `source: predicted` takes UniProt accessions for AlphaFold models with pLDDT/PAE; `source: best_available` takes UniProt accessions and returns the top federated model (highest-resolution experimental if one exists, else the best prediction)
+- Per-ID partial success — unresolved IDs land in `failed[]`; `requested`/`processed` disclose IDs dropped beyond the batch cap, and every advisory (cap, failure, overflow) joins into one `notice`
+- Records served by the RCSB entry endpoint also carry `polymerEntities` (both `authAsymIds` and `labelAsymIds`), `ligands`, `molecularWeight`, and `releaseDate`
+- `include_coords` inlines coordinate content, subject to a response budget — an over-budget batch returns a per-structure size outline (re-call with `sections: [ids]`), and a single oversized file is withheld with a pointer to its `coordinateUrls`
+- Every response carries an `attribution` block naming upstream data licenses and citations
 
 ---
 
-### `protein_find_similar`
+### `protein_find_similar` <sub>tool</sub>
 
-Find structurally or evolutionarily related proteins, by sequence or by fold.
-
-- `by: sequence` runs a synchronous RCSB mmseqs2 search; `by: structure` runs an asynchronous Foldseek search against experimental and predicted databases
-- Query from a raw one-letter sequence, a PDB ID, or a UniProt accession
-- Both modes accept `start` with `limit` and report `totalCount`, echoing `start` and returning `nextStart` while another page remains
+- `by: sequence` runs a synchronous RCSB mmseqs2 search; `by: structure` runs an asynchronous Foldseek search against experimental and predicted databases — query from a raw sequence, a PDB ID, or a UniProt accession
+- Both modes accept `start`/`limit` and report `totalCount`, echoing `start` and returning `nextStart` while another page remains
 - Foldseek targets default to `pdb100` + `afdb50`; override via `databases` (e.g. `afdb-swissprot`, `BFVD`)
-- Async jobs that exceed the poll budget return `status: computing` with a `ticketId` — re-call with `ticket_id` set to that value to poll the same job instead of resubmitting. A completed structure search returns the same ticket, so a new `start` pages the finished job without resubmitting the structure
-- Each mode reads only its own controls — `sequence`, `max_evalue` and `min_identity` under `by: sequence`; `ticket_id` and `databases` under `by: structure`; `pdb_id`, `uniprot`, `start` and `limit` shared — and a field the selected mode cannot consume is rejected rather than ignored
+- An async job that exceeds the poll budget returns `status: computing` with a `ticketId` — re-call with `ticket_id` to resume; a completed structure search returns the same ticket so a new `start` pages the finished job
+- Each mode reads only its own controls (`sequence`, `max_evalue`, `min_identity` under `by: sequence`; `ticket_id`, `databases` under `by: structure`) — a field the selected mode can't consume is rejected, not ignored
 - Each hit names the engine and source database it came from
 
 ---
 
-### `protein_track_ligands`
+### `protein_track_ligands` <sub>tool</sub>
 
-Ligand discovery and binding-site analysis across the PDB.
-
-- `mode: find_ligand` resolves a name or formula to chemical component IDs with formula, weight, SMILES, and InChIKey
-- A formula-shaped `query` matches on exact composition — spaced (`C29 H31 N7 O`) or unspaced (`C29H31N7O`), either resolves the same component; anything else, a component ID included, matches on name and synonyms and is ranked by deposition frequency
-- `mode: structures_with_ligand` returns PDB entries containing a ligand by exact component ID
-- `mode: structures_with_ligand` accepts `start` with `limit` and returns `nextStart` while another page remains
+- `mode: find_ligand` resolves a name or formula to chemical component IDs with formula, weight, SMILES, and InChIKey — ranked by deposition frequency, most-common match first
+- A formula-shaped `query` matches on exact composition, spaced (`C29 H31 N7 O`) or unspaced; anything else (a component ID included) matches on name and synonyms
+- `mode: structures_with_ligand` returns PDB entries containing a ligand by exact component ID, with `start`/`limit` paging and `nextStart` while another page remains
 - `mode: binding_site` returns the protein residues lining a ligand's pocket in a structure, with contact distances
-- Binding sites are experimental-only — computed from deposited coordinates (predicted models carry no bound ligands)
-
-Paged RCSB results preserve the upstream order within each response. Resolution ties and changes in the live corpus mean traversal is best-effort across calls, not a stable export snapshot.
+- Binding sites are experimental-only — computed from deposited coordinates; predicted models carry no bound ligands
 
 ---
 
-### `protein_compare_structures`
+### `protein_compare_structures` <sub>tool</sub>
 
-Structural alignment of multiple structures (up to the configured `PROTEIN_MAX_COMPARE_STRUCTURES` cap) via the RCSB Structural Comparison service.
-
-- Methods: `tm-align`, `fatcat-rigid`, `fatcat-flexible`
-- `reference: first` aligns every structure to the first; `reference: all_pairs` computes the full pairwise matrix
-- Optional per-structure `chain` restricts the alignment to a single chain
-- A structure repeated in `structures[]` is compared once — the repeat would only add a self-alignment and a mirrored pair, which the resume mechanism cannot tell apart from the original
-- Each pair is an independent async job, fanned out with a concurrency cap and per-pair partial success — a pair still computing when the budget elapses returns `status: computing` with its job `uuid`, and a failed pair degrades its row without sinking the others
-- Re-call with a matching `{ a, b, uuid }` entry in `resume[]` (copied from a prior response's `pairs[]`) to poll a computing pair's job instead of resubmitting
-- Returns TM-score, RMSD, and aligned-residue count per pair, plus `modeledResidues` and `coverage` — each a `[a, b]` tuple, with coverage a 0–100 percentage of that structure's own modeled-residue count
+- Aligns 2 to the configured cap (default 10, max 25) structures per call, via `tm-align`, `fatcat-rigid`, or `fatcat-flexible`; optional per-structure `chain` restricts the alignment to a single mmCIF label chain
+- `reference: first` aligns every structure to the first; `reference: all_pairs` computes the full pairwise matrix; a structure repeated in `structures[]` is compared once
+- Each pair is an independent async job with per-pair partial success — a pair still computing when the poll budget elapses returns `status: computing` with a job `uuid`; a failed pair degrades only its own row
+- Re-call with a matching `{ a, b, uuid }` entry in `resume[]` to poll a computing pair instead of resubmitting
+- Returns TM-score, RMSD, and aligned-residue count per pair, plus each structure's `modeledResidues` and 0–100 `coverage`
 
 ---
 
-### `protein_analyze_collection`
-
-Profile the PDB into distributions and trends over an optional scoping query — backed by RCSB's server-side facet engine (one call, compact buckets, no row pull).
+### `protein_analyze_collection` <sub>tool</sub>
 
 - Group by `method`, `organism`, `polymer_type`, `resolution`, `release_year`, or `molecular_weight`
 - One `group_by` dimension for a breakdown, or two distinct dimensions for a cross-tab (the first nests the second); a repeated dimension is rejected
-- `interval` sets the bin width for a value histogram (a number, for `resolution` or `molecular_weight`) or the period for a date histogram (`year` — the only period RCSB accepts). It applies to whichever requested `group_by` dimension can consume that value type, primary or nested child, so `["method", "resolution"]` bins its nested `resolution` child; when both dimensions can consume it the primary takes it and the child keeps its default, and when neither can the call is rejected rather than silently ignoring the override
+- `interval` sets a histogram bin width (a number, for `resolution` or `molecular_weight`) or date-histogram period (`year`, the only one RCSB accepts) — applies to whichever requested dimension can consume that type; rejected when neither can
 - Scope with a free-text `query`, `organism`, `method`, or `max_resolution`; `content_type` selects the structure universe
-- `bucket_limit` caps buckets per dimension level, not per response — a cross-tab applies it separately to the parent dimension and to the nested child inside each parent bucket, so up to `bucket_limit × (1 + bucket_limit)` buckets come back. Each level flags its own truncation, `notice` names every capped position (the top-level dimension and each nested child, with how many parent buckets it was capped under), and `bucketsReturned` gives the realized total
-- Every dimension reports `missingValueCount` — matches in scope carrying no value for that attribute, which therefore fall in no bucket (a `resolution` breakdown does not cover NMR entries, and neither `method` nor `resolution` covers computed models)
+- `bucket_limit` caps buckets per dimension level, not per response — a cross-tab applies it separately to the parent and each nested child, up to `bucket_limit × (1 + bucket_limit)` buckets; `notice` names every capped position and `bucketsReturned` gives the realized total
+- Every dimension reports `missingValueCount` — matches carrying no value for that attribute (e.g. a `resolution` breakdown excludes NMR entries; computed models have neither `method` nor `resolution`)
 
 ---
 
-### `protein_get_annotations`
+### `protein_get_annotations` <sub>tool</sub>
 
-Sequence and functional annotation for a protein.
-
-- UniProt features (domains, binding sites, PTMs) and natural sequence variants
-- InterPro domain/family memberships (Pfam, PROSITE, …) with associated GO terms
-- Provide a UniProt accession directly, or a PDB ID — resolved to a UniProt accession via the structure's sequence cross-reference
-- A multi-chain PDB entry can map to several accessions; the default is the deterministic lowest-author-chain pick, with the alternatives listed under `ambiguity`. Pass `chain` (an author chain ID, e.g. `A`) to select a specific one
-- `include` scopes which annotation classes are fetched: `features`, `domains`, `variants`, or `all`
+- UniProt features (domains, binding sites, PTMs) and natural variants, plus InterPro domain/family memberships (Pfam, PROSITE, …) with associated GO terms
+- Provide a UniProt accession directly, or a PDB ID — resolved via the structure's sequence cross-reference
+- A multi-chain PDB entry can map to several accessions; the default is the deterministic lowest-author-chain pick, with alternatives listed under `ambiguity` — pass `chain` (an author chain ID) to select a specific one
+- `include` scopes which classes are fetched (`features`, `domains`, `variants`, `all`); `limit` caps each class independently (1–200, default 50), with a truncated class disclosed in `notice`
 - Every response carries an `attribution` block naming the upstream data licenses and citations (see [Upstream data licensing](#upstream-data-licensing))
 
-## Resources
+---
 
-| Type | Name | Description |
-|:---|:---|:---|
-| Resource | `pdb://{entry_id}` | Experimental structure summary for a PDB entry — title, method, resolution, organism, bound ligands, and per-entity chain IDs in both the author (`authAsymIds`) and mmCIF label (`labelAsymIds`) namespaces. |
-| Resource | `af://{uniprot}` | Predicted-structure summary for a UniProt accession from AlphaFold DB — mean pLDDT, confidence-band fractions, model URLs, and version. |
+### `pdb://{entry_id}` <sub>resource</sub>
 
-All resource data is also reachable via tools — `pdb://{entry_id}` mirrors `protein_get_structure` for `source: experimental`, and `af://{uniprot}` mirrors it for `source: predicted`. Many MCP clients are tool-only and don't surface resources; the summaries remain reachable through the tools.
+- Experimental structure summary as `application/json` — title, method, resolution, organism, bound ligands, and per-entity chain IDs in both the author (`authAsymIds`) and mmCIF label (`labelAsymIds`) namespaces
+- Mirrors `protein_get_structure` for `source: experimental`; `entry_id` is a PDB entry ID (e.g. `4HHB`)
+
+---
+
+### `af://{uniprot}` <sub>resource</sub>
+
+- Predicted-structure summary as `application/json` — mean pLDDT, confidence-band fractions, model URLs (`cif`/`pdb`/`bcif`), and AlphaFold model version
+- `uniprot` accepts a UniProt accession or an AlphaFold DB entry ID (e.g. `AF-P69905-F1`); mirrors `protein_get_structure` for `source: predicted`
 
 ## Features
 
-Built on [`@cyanheads/mcp-ts-core`](https://www.npmjs.com/package/@cyanheads/mcp-ts-core):
+Built on [`@cyanheads/mcp-ts-core`](https://github.com/cyanheads/mcp-ts-core): stdio and Streamable HTTP transports, pluggable auth (`none` / `jwt` / `oauth`), swappable storage (`in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`), structured logging with optional OpenTelemetry tracing.
 
-- Declarative tool and resource definitions — single file per primitive, framework handles registration and validation
-- Unified error handling — handlers throw, framework catches, classifies, and formats
-- Pluggable auth: `none`, `jwt`, `oauth`
-- Swappable storage backends: `in-memory`, `filesystem`, `Supabase`, `Cloudflare KV/R2/D1`
-- Structured logging with optional OpenTelemetry tracing
-- STDIO and Streamable HTTP transports
-
-Protein-specific:
+PDB / AlphaFold-specific:
 
 - One federated surface over experimental (PDB) and predicted (AlphaFold / 3D-Beacons) structures — search, fetch, and compare treat both universes the same
 - Keyless across every upstream — RCSB, AlphaFold DB, 3D-Beacons, UniProt, InterPro, and Foldseek, no API keys to provision
@@ -186,7 +173,7 @@ A public instance is available at `https://protein.caseyjhand.com/mcp` — no in
 }
 ```
 
-### Self-hosted
+### Self-Hosted / Local
 
 Add the following to your MCP client configuration file. No API key is required — every upstream provider is keyless.
 
@@ -247,7 +234,7 @@ MCP_TRANSPORT_TYPE=http MCP_HTTP_PORT=3010 bun run start:http
 
 ### Prerequisites
 
-- [Bun v1.3.2](https://bun.sh/) or higher (or Node.js v24+).
+- [Bun v1.4.0](https://bun.sh/) or higher (or Node.js v24+).
 - No accounts or API keys — RCSB, AlphaFold DB, 3D-Beacons, UniProt, InterPro, and Foldseek are all public and keyless.
 
 ### Installation
@@ -286,6 +273,7 @@ All upstream providers are keyless, so the server runs out of the box with no co
 | `FOLDSEEK_BASE_URL` | Base URL for the Foldseek structural-similarity search service. | `https://search.foldseek.com` |
 | `MCP_TRANSPORT_TYPE` | Transport: `stdio` or `http`. | `stdio` |
 | `MCP_HTTP_PORT` | Port for the HTTP server. | `3010` |
+| `MCP_SESSION_MODE` | HTTP session mode: `stateless`, `stateful`, or `auto`. The server declares `stateless` in code; set this to override it. | `stateless` |
 | `MCP_AUTH_MODE` | Auth mode: `none`, `jwt`, or `oauth`. | `none` |
 | `MCP_LOG_LEVEL` | Log level (RFC 5424). | `info` |
 | `OTEL_ENABLED` | Enable [OpenTelemetry instrumentation](https://github.com/cyanheads/mcp-ts-core/tree/main/docs/telemetry). | `false` |
@@ -333,7 +321,7 @@ The Dockerfile defaults to HTTP transport, stateless session mode, and logs to `
 | `src/config` | Server-specific environment variable parsing and validation with Zod. |
 | `src/mcp-server/tools` | Tool definitions (`*.tool.ts`). |
 | `src/mcp-server/resources` | Resource definitions (`*.resource.ts`). |
-| `src/services` | Provider service layer — RCSB, AlphaFold, 3D-Beacons, UniProt, InterPro, Foldseek, and shared HTTP/identifier helpers. |
+| `src/services` | Provider service layer — RCSB (search, data, facets), AlphaFold, 3D-Beacons (best-available), UniProt (incl. InterPro/GO), Structural Comparison alignment, Foldseek, and shared HTTP/identifier/concurrency helpers. |
 | `tests/` | Unit and integration tests mirroring `src/`. |
 
 ## Development guide
@@ -344,15 +332,6 @@ See [`CLAUDE.md`/`AGENTS.md`](./CLAUDE.md) for development guidelines and archit
 - Use `ctx.log` for request-scoped logging, `ctx.state` for tenant-scoped storage
 - Register new tools and resources via the barrels in `src/mcp-server/*/definitions/index.ts`
 - Wrap external API calls: validate raw → normalize to domain type → return output schema; never fabricate missing fields
-
-## Contributing
-
-Issues and pull requests are welcome. Run checks and tests before submitting:
-
-```sh
-bun run devcheck
-bun run test
-```
 
 ## Upstream data licensing
 
@@ -370,6 +349,15 @@ Structure and annotation data comes from public upstream databases, each under i
 | [GO](https://geneontology.org/) | `protein_get_annotations` — GO terms | CC BY 4.0 |
 
 `best_available` federates predicted models through [3D-Beacons](https://3d-beacons.org/), so the `attribution` block credits the actual contributing provider (AlphaFold DB, SWISS-MODEL, BFVD, …); a provider without a curated license entry carries a `See provider terms` fallback pointing back to 3D-Beacons rather than a fabricated license. InterPro's own domain/family classifications are CC0; the GO terms carried alongside them are separately CC BY 4.0, so each is credited independently only when it actually contributes. Full citations for each source travel in the `attribution` block of the relevant tool responses. This covers upstream *data* licensing — the server's own code is licensed separately (see [License](#license)).
+
+## Contributing
+
+Issues are welcome. Run checks and tests before submitting:
+
+```sh
+bun run devcheck
+bun run test
+```
 
 ## License
 
