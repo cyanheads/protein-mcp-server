@@ -18,10 +18,23 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const searchSequence = vi.fn();
 const getEntries = vi.fn();
 const getSequence = vi.fn();
-const coordinateFileUrl = vi.fn((id: string, fmt: string) => `https://files/${id}.${fmt}`);
-vi.mock('@/services/rcsb/rcsb-service.js', () => ({
-  getRcsbService: () => ({ searchSequence, getEntries, getSequence, coordinateFileUrl }),
-}));
+// Coordinate-URL construction runs the real service code; only upstream calls are faked.
+vi.mock('@/services/rcsb/rcsb-service.js', async (importOriginal) => {
+  const { RcsbService } = await importOriginal<typeof import('@/services/rcsb/rcsb-service.js')>();
+  const real = new RcsbService(
+    {} as never,
+    {} as never,
+    { rcsbFilesBaseUrl: 'https://files', rcsbModelsBaseUrl: 'https://models' } as never,
+  );
+  return {
+    getRcsbService: () => ({
+      searchSequence,
+      getEntries,
+      getSequence,
+      mmcifUrl: real.mmcifUrl.bind(real),
+    }),
+  };
+});
 
 const foldseekSearch = vi.fn();
 const foldseekResume = vi.fn();
@@ -245,22 +258,24 @@ describe('protein_find_similar — by:sequence', () => {
 
   it('derives the query sequence from a PDB ID', async () => {
     getSequence.mockResolvedValue({ entityId: '4HHB_1', sequence: 'MVLSPADK' });
-    searchSequence.mockResolvedValue({ total: 1, hits: [] });
+    // An empty first page means the search matched nothing, so the upstream total is 0.
+    searchSequence.mockResolvedValue({ total: 0, hits: [] });
     getEntries.mockResolvedValue([]);
-    await findSimilar.handler(findSimilar.input.parse({ by: 'sequence', pdb_id: '4hhb' }), ctx());
+    const c = ctx();
+    await findSimilar.handler(findSimilar.input.parse({ by: 'sequence', pdb_id: '4hhb' }), c);
     expect(getSequence).toHaveBeenCalledWith('4hhb', expect.anything());
     expect(searchSequence.mock.calls[0]?.[0]).toBe('MVLSPADK');
+    expect(String(getEnrichment(c).notice)).toMatch(/^No sequence-similar entries found/);
   });
 
   it('derives the query sequence from a UniProt accession', async () => {
     getUniProtSequence.mockResolvedValue('MKTAYIAK');
-    searchSequence.mockResolvedValue({ total: 1, hits: [] });
+    searchSequence.mockResolvedValue({ total: 0, hits: [] });
     getEntries.mockResolvedValue([]);
-    await findSimilar.handler(
-      findSimilar.input.parse({ by: 'sequence', uniprot: 'P69905' }),
-      ctx(),
-    );
+    const c = ctx();
+    await findSimilar.handler(findSimilar.input.parse({ by: 'sequence', uniprot: 'P69905' }), c);
     expect(searchSequence.mock.calls[0]?.[0]).toBe('MKTAYIAK');
+    expect(String(getEnrichment(c).notice)).toMatch(/^No sequence-similar entries found/);
   });
 
   it('notes an empty result set', async () => {
@@ -273,6 +288,50 @@ describe('protein_find_similar — by:sequence', () => {
     );
     expect(out.hits).toEqual([]);
     expect(String(getEnrichment(c).notice)).toMatch(/min_identity|max_evalue|No sequence-similar/i);
+  });
+
+  it('names the offset on a past-end sequence page instead of claiming no matches, on both surfaces (#66)', async () => {
+    getUniProtSequence.mockResolvedValue('MVLSPADK');
+    searchSequence.mockResolvedValue({ total: 1376, hits: [] });
+    getEntries.mockResolvedValue([]);
+
+    const result = (await runToolContract(findSimilar, {
+      by: 'sequence',
+      uniprot: 'P69905',
+      start: 2000,
+      limit: 1,
+    })) as {
+      structuredContent: {
+        hits: unknown[];
+        totalCount: number;
+        nextStart?: number;
+        notice?: string;
+      };
+      content: Array<{ text: string }>;
+    };
+
+    expect(result.structuredContent.hits).toEqual([]);
+    expect(result.structuredContent.totalCount).toBe(1376);
+    expect(result.structuredContent).not.toHaveProperty('nextStart');
+    const notice = String(result.structuredContent.notice);
+    expect(notice).toContain('start 2000 is past the end of the 1376 matches');
+    expect(notice).not.toMatch(/No sequence-similar entries found/);
+    const rendered = result.content.map((block) => block.text).join('\n');
+    expect(rendered).toContain('start 2000 is past the end of the 1376 matches');
+    expect(rendered).not.toMatch(/No sequence-similar entries found/);
+  });
+
+  it('keeps the zero-match advice when the sequence search matched nothing at any offset (#66)', async () => {
+    searchSequence.mockResolvedValue({ total: 0, hits: [] });
+    getEntries.mockResolvedValue([]);
+    const c = ctx();
+    await findSimilar.handler(
+      findSimilar.input.parse({ by: 'sequence', sequence: 'XXXX', start: 40 }),
+      c,
+    );
+    expect(String(getEnrichment(c).notice)).toBe(
+      'No sequence-similar entries found. Lower min_identity or raise max_evalue.',
+    );
   });
 
   it('throws no_sequence when the PDB entry yields no protein sequence', async () => {
@@ -516,6 +575,20 @@ describe('protein_find_similar — by:structure', () => {
     await expect(
       findSimilar.handler(findSimilar.input.parse({ by: 'structure', pdb_id: '4HHB' }), ctx()),
     ).rejects.toMatchObject({ data: { reason: 'search_failed' } });
+  });
+
+  it('uploads the mmCIF file for a PDB ID, which every entry has, including mmCIF-only ones (#61)', async () => {
+    fetchTextMock.mockResolvedValue('data_4V6X');
+    foldseekSearch.mockResolvedValue({ status: 'complete', ticketId: 't', total: 0, hits: [] });
+    await findSimilar.handler(findSimilar.input.parse({ by: 'structure', pdb_id: '4v6x' }), ctx());
+    expect(fetchTextMock).toHaveBeenCalledTimes(1);
+    expect(fetchTextMock.mock.calls[0]?.[0]).toBe('https://files/download/4V6X.cif');
+    expect(foldseekSearch.mock.calls[0]?.[0]).toMatchObject({
+      fileContent: 'data_4V6X',
+      fileName: '4V6X.cif',
+    });
+    // No metadata lookup is needed to choose the format.
+    expect(getEntries).not.toHaveBeenCalled();
   });
 
   it('derives coordinates from an AlphaFold model when given a UniProt accession', async () => {

@@ -410,6 +410,209 @@ describe('protein_compare_structures per-structure length and coverage', () => {
   });
 });
 
+describe('protein_compare_structures resume keeps the job orientation (#62)', () => {
+  /**
+   * The live 4HHB.A → 1CRN.A tm-align job: 4HHB.A models 141 residues at 19%
+   * coverage, 1CRN.A models 46 at 59%. TM-score is normalized by the first
+   * structure's length, so it is directional too (0.17 here, 0.40 reversed).
+   */
+  const JOB = {
+    status: 'complete' as const,
+    uuid: 'job-1',
+    scores: {
+      tmScore: 0.17,
+      rmsd: 3.18,
+      sequenceIdentity: 0.03,
+      alignedResidues: 27,
+      modeledResidues: [141, 46] as [number, number],
+      coverage: [19, 59] as [number, number],
+    },
+    job: {
+      method: 'tm-align',
+      structures: [
+        { entryId: '4HHB', asymId: 'A' },
+        { entryId: '1CRN', asymId: 'A' },
+      ] as [{ entryId: string; asymId?: string }, { entryId: string; asymId?: string }],
+    },
+  };
+  const forward = [
+    { pdb_id: '4HHB', chain: 'A' },
+    { pdb_id: '1CRN', chain: 'A' },
+  ];
+  const reversed = [...forward].reverse();
+  const ticket = { a: '4HHB.A', b: '1CRN.A', uuid: 'job-1' };
+
+  it('labels a resumed row in the order its job was submitted, not the current structures[] order', async () => {
+    resumePair.mockResolvedValue(JOB);
+    const out = await compareStructures.handler(
+      compareStructures.input.parse({ structures: reversed, resume: [ticket] }),
+      ctx(),
+    );
+
+    expect(comparePair).not.toHaveBeenCalled();
+    expect(out.pairs).toEqual([
+      {
+        a: '4HHB.A',
+        b: '1CRN.A',
+        status: 'complete',
+        uuid: 'job-1',
+        tmScore: 0.17,
+        rmsd: 3.18,
+        alignedResidues: 27,
+        modeledResidues: [141, 46],
+        coverage: [19, 59],
+      },
+    ]);
+  });
+
+  it('attaches 1CRN.A to its own 46 residues and 59% coverage on both surfaces', async () => {
+    resumePair.mockResolvedValue(JOB);
+    const result = (await runToolContract(compareStructures, {
+      structures: reversed,
+      resume: [{ a: '1CRN.A', b: '4HHB.A', uuid: 'job-1' }], // ticket copied reversed too
+    })) as {
+      structuredContent: {
+        pairs: Array<{ a: string; b: string; modeledResidues: number[]; coverage: number[] }>;
+      };
+      content: Array<{ type: string; text: string }>;
+    };
+
+    const [row] = result.structuredContent.pairs;
+    if (!row) throw new Error('expected one pair');
+    const side = (lbl: string) => (row.a === lbl ? 0 : 1);
+    expect(row.modeledResidues[side('1CRN.A')]).toBe(46);
+    expect(row.coverage[side('1CRN.A')]).toBe(59);
+    expect(row.modeledResidues[side('4HHB.A')]).toBe(141);
+    expect(row.coverage[side('4HHB.A')]).toBe(19);
+
+    const text = result.content[0]?.text ?? '';
+    expect(text).toContain(
+      '| 4HHB.A ↔ 1CRN.A | complete | 0.170 | 3.18 | 27 | 141 / 46 | 19 / 59 |',
+    );
+    expect(text).not.toContain('1CRN.A ↔ 4HHB.A');
+  });
+
+  it('keeps the current order when the resumed job was submitted in that order', async () => {
+    resumePair.mockResolvedValue(JOB);
+    const out = await compareStructures.handler(
+      compareStructures.input.parse({ structures: forward, resume: [ticket] }),
+      ctx(),
+    );
+
+    expect(out.pairs[0]).toMatchObject({
+      a: '4HHB.A',
+      b: '1CRN.A',
+      modeledResidues: [141, 46],
+      coverage: [19, 59],
+    });
+  });
+
+  it('remaps chainless structures by entry ID, case-insensitively', async () => {
+    resumePair.mockResolvedValue({
+      ...JOB,
+      job: { method: 'tm-align', structures: [{ entryId: '4HHB' }, { entryId: '1CRN' }] },
+    });
+    const out = await compareStructures.handler(
+      compareStructures.input.parse({
+        structures: [{ pdb_id: '1crn' }, { pdb_id: '4hhb' }],
+        resume: [{ a: '1crn', b: '4hhb', uuid: 'job-1' }],
+      }),
+      ctx(),
+    );
+
+    expect(out.pairs[0]).toMatchObject({ a: '4HHB', b: '1CRN', modeledResidues: [141, 46] });
+  });
+
+  it('remaps only the resumed row; freshly submitted rows keep their build order', async () => {
+    resumePair.mockResolvedValue(JOB);
+    comparePair.mockResolvedValue({ status: 'complete', uuid: 'fresh', scores: {} });
+    const out = await compareStructures.handler(
+      compareStructures.input.parse({
+        structures: [...reversed, { pdb_id: '2HHB', chain: 'A' }],
+        reference: 'all_pairs', // 1CRN.A↔4HHB.A, 1CRN.A↔2HHB.A, 4HHB.A↔2HHB.A
+        resume: [ticket],
+      }),
+      ctx(),
+    );
+
+    expect(out.pairs.map((p) => `${p.a}-${p.b}`)).toEqual([
+      '4HHB.A-1CRN.A',
+      '1CRN.A-2HHB.A',
+      '4HHB.A-2HHB.A',
+    ]);
+    expect(comparePair).toHaveBeenCalledTimes(2);
+  });
+
+  it('falls back to the current order when the job carries no echoed pair', async () => {
+    resumePair.mockResolvedValue({ ...JOB, job: undefined });
+    const out = await compareStructures.handler(
+      compareStructures.input.parse({ structures: reversed, resume: [ticket] }),
+      ctx(),
+    );
+
+    expect(out.pairs[0]).toMatchObject({ a: '1CRN.A', b: '4HHB.A', status: 'complete' });
+  });
+
+  it('rejects a resumed job that ran a different method than this call', async () => {
+    resumePair.mockResolvedValue(JOB);
+    await expect(
+      compareStructures.handler(
+        compareStructures.input.parse({
+          structures: reversed,
+          method: 'fatcat-rigid',
+          resume: [ticket],
+        }),
+        ctx(),
+      ),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining('tm-align'),
+      data: {
+        reason: 'resume_method_mismatch',
+        recovery: { hint: expect.stringContaining('method') },
+      },
+    });
+  });
+
+  it('rejects a resume ticket whose job aligned a different pair', async () => {
+    resumePair.mockResolvedValue({
+      ...JOB,
+      job: {
+        method: 'tm-align',
+        structures: [
+          { entryId: '2HHB', asymId: 'A' },
+          { entryId: '1MBN', asymId: 'A' },
+        ],
+      },
+    });
+    await expect(
+      compareStructures.handler(
+        compareStructures.input.parse({ structures: forward, resume: [ticket] }),
+        ctx(),
+      ),
+    ).rejects.toMatchObject({
+      message: expect.stringContaining('2HHB.A'),
+      data: {
+        reason: 'resume_job_mismatch',
+        recovery: { hint: expect.stringContaining('uuid') },
+      },
+    });
+  });
+
+  it('does not check the method of a resumed job still computing', async () => {
+    resumePair.mockResolvedValue({ status: 'computing', uuid: 'job-1' });
+    const out = await compareStructures.handler(
+      compareStructures.input.parse({
+        structures: reversed,
+        method: 'fatcat-rigid',
+        resume: [ticket],
+      }),
+      ctx(),
+    );
+
+    expect(out.pairs[0]).toMatchObject({ status: 'computing', uuid: 'job-1' });
+  });
+});
+
 describe('protein_compare_structures TM-score length-normalization caveat', () => {
   it('documents the length-normalization caveat in the tool description', () => {
     expect(compareStructures.description).toMatch(/length-normalized/i);

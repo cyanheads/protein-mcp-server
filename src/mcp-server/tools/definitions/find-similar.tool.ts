@@ -127,7 +127,12 @@ const enrichmentShape = {
     .number()
     .optional()
     .describe('Offset for the next result page; absent on the final or past-end page.'),
-  notice: z.string().optional().describe('Advisory note (still computing, empty results).'),
+  notice: z
+    .string()
+    .optional()
+    .describe(
+      'Advisory note: a structure job still computing (with how to resume it), no matches, or a start past the end of the results.',
+    ),
 };
 
 type FindSimilarInput = z.infer<typeof inputSchema>;
@@ -252,8 +257,14 @@ async function runSequence(input: FindSimilarInput, ctx: Ctx): Promise<FindSimil
     start: input.start,
     ...(nextStart < result.total ? { nextStart } : {}),
   });
+  // Same two empty-page causes runStructure separates: nothing matched, or an
+  // offset past the end of a populated result set.
   if (result.hits.length === 0)
-    ctx.enrich.notice('No sequence-similar entries found. Lower min_identity or raise max_evalue.');
+    ctx.enrich.notice(
+      result.total === 0
+        ? 'No sequence-similar entries found. Lower min_identity or raise max_evalue.'
+        : `start ${input.start} is past the end of the ${result.total} matches. Re-call with a lower start to read a populated page.`,
+    );
 
   return {
     by: 'sequence',
@@ -439,16 +450,17 @@ async function resolveSequence(input: FindSimilarInput, ctx: Ctx): Promise<strin
   });
 }
 
-/** Resolve a query coordinate file (PDB-format text) from a PDB ID or UniProt accession. */
+/** Resolve a query coordinate file (mmCIF or PDB-format text) from a PDB ID or UniProt accession. */
 async function resolveCoordinateFile(
   input: FindSimilarInput,
   ctx: Ctx,
 ): Promise<{ content: string; fileName: string }> {
-  const rcsb = getRcsbService();
   if (input.pdb_id && isPdbId(input.pdb_id)) {
+    // mmCIF, not PDB format: every entry has an mmCIF file, while large entries
+    // are archived without a PDB-format one, and Foldseek reads either.
     const id = input.pdb_id.toUpperCase();
-    const content = await fetchCoordinateText(rcsb.coordinateFileUrl(id, 'pdb'), ctx);
-    return { content, fileName: `${id}.pdb` };
+    const content = await fetchCoordinateText(getRcsbService().mmcifUrl(id), ctx);
+    return { content, fileName: `${id}.cif` };
   }
   if (input.uniprot && isUniProtAccession(input.uniprot)) {
     const model = await getAlphaFoldService().getPrediction(input.uniprot, ctx);

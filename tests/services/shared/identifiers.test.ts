@@ -77,4 +77,15 @@ describe('entryIdOf', () => {
   it('passes a bare entry ID through, upper-cased', () => {
     expect(entryIdOf('1iep')).toBe('1IEP');
   });
+
+  it('strips only the trailing entity suffix from a computed-model entity ID (#60)', () => {
+    expect(entryIdOf('AF_AFP69905F1_1')).toBe('AF_AFP69905F1');
+    expect(entryIdOf('MA_MAASFVASFVG001_1')).toBe('MA_MAASFVASFVG001');
+    expect(entryIdOf('af_afp69905f1_12')).toBe('AF_AFP69905F1');
+  });
+
+  it('passes a bare computed-model entry ID through unchanged (#60)', () => {
+    expect(entryIdOf('AF_AFP69905F1')).toBe('AF_AFP69905F1');
+    expect(entryIdOf('MA_MAASFVASFVG001')).toBe('MA_MAASFVASFVG001');
+  });
 });

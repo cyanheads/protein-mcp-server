@@ -59,7 +59,7 @@ await createApp({
     'resources/read': { ttlMs: 3_600_000, cacheScope: 'public' },
   },
   instructions:
-    'Find structures with protein_search_structures, then pass the returned IDs to protein_get_structure for metadata and coordinate URLs, or pass UniProt accessions there for AlphaFold predictions and the best available model. A PDB ID also chains into protein_get_annotations, protein_track_ligands, protein_find_similar, and protein_compare_structures for annotations, binding sites, homologs, and structural alignment, while protein_analyze_collection profiles the whole PDB without pulling rows. A Foldseek search or structural alignment still running when the poll budget elapses returns status "computing" with a ticket (protein_find_similar) or a job UUID (protein_compare_structures); re-call with it to resume that job rather than resubmitting.',
+    'Find structures with protein_search_structures, then pass the returned IDs to protein_get_structure for metadata and coordinate URLs, or pass UniProt accessions there for AlphaFold predictions and the best available model. A PDB ID also chains into protein_get_annotations, protein_track_ligands, protein_find_similar, and protein_compare_structures for annotations, binding sites, homologs, and structural alignment, while protein_analyze_collection profiles the whole PDB as aggregate counts. A Foldseek search or structural alignment still running when the poll budget elapses returns status "computing" with a ticket (protein_find_similar) or a job UUID (protein_compare_structures); re-call with it to resume that job rather than resubmitting.',
   setup(core) {
     const serverConfig = getServerConfig();
     initRcsbService(core.config, core.storage, serverConfig);

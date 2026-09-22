@@ -149,7 +149,9 @@ export const trackLigands = tool('protein_track_ligands', {
     notice: z
       .string()
       .optional()
-      .describe('Advisory note when a mode-specific input is missing or absent.'),
+      .describe(
+        'Advisory note: a structures_with_ligand page that is empty because no entry contains the component or because start is past the end, or binding-site instances beyond limit that were left out.',
+      ),
   },
 
   async handler(input, ctx) {
@@ -210,9 +212,12 @@ export const trackLigands = tool('protein_track_ligands', {
       });
       // A valid component with zero containing structures is an empty result set,
       // not a not-found — mirrors protein_search_structures' empty-hits behavior.
+      // An empty page over a nonzero total is an offset past the end instead.
       if (result.hits.length === 0) {
         ctx.enrich.notice(
-          `No PDB entries contain ${compId}. Verify the component ID via mode find_ligand.`,
+          result.total === 0
+            ? `No PDB entries contain ${compId}. Verify the component ID via mode find_ligand.`
+            : `start ${input.start} is past the end of the ${result.total} PDB entries containing ${compId}. Re-call with a lower start to read a populated page.`,
         );
       }
       // Replace RCSB's uniform containment score (noise for a boolean filter) with

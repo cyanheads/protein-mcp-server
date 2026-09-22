@@ -25,9 +25,11 @@ describe('getServerConfig — defaults', () => {
       rcsbSearchBaseUrl: 'https://search.rcsb.org',
       rcsbDataBaseUrl: 'https://data.rcsb.org',
       rcsbFilesBaseUrl: 'https://files.rcsb.org',
+      rcsbModelsBaseUrl: 'https://models.rcsb.org',
       rcsbAlignmentBaseUrl: 'https://alignment.rcsb.org',
       beaconsBaseUrl: 'https://www.ebi.ac.uk/pdbe/pdbe-kb/3dbeacons/api',
       alphafoldBaseUrl: 'https://alphafold.ebi.ac.uk',
+      modelArchiveBaseUrl: 'https://modelarchive.org',
       foldseekBaseUrl: 'https://search.foldseek.com',
       uniprotBaseUrl: 'https://rest.uniprot.org',
       interproBaseUrl: 'https://www.ebi.ac.uk/interpro/api',
@@ -59,6 +61,14 @@ describe('getServerConfig — overrides', () => {
     expect(cfg.rcsbSearchBaseUrl).toBe('https://search.mirror.internal');
     // Unset vars keep their defaults.
     expect(cfg.alphafoldBaseUrl).toBe('https://alphafold.ebi.ac.uk');
+  });
+
+  it('maps the coordinate-host overrides to their env vars', async () => {
+    vi.stubEnv('RCSB_MODELS_BASE_URL', 'https://models.mirror.internal');
+    vi.stubEnv('MODELARCHIVE_BASE_URL', 'https://ma.mirror.internal');
+    const cfg = await loadConfig();
+    expect(cfg.rcsbModelsBaseUrl).toBe('https://models.mirror.internal');
+    expect(cfg.modelArchiveBaseUrl).toBe('https://ma.mirror.internal');
   });
 
   it('coerces numeric env strings to numbers', async () => {

@@ -9,7 +9,11 @@
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
-import type { AlignmentMethod, CompareStructure } from '@/services/alignment/alignment-service.js';
+import type {
+  AlignmentJob,
+  AlignmentMethod,
+  CompareStructure,
+} from '@/services/alignment/alignment-service.js';
 import { getAlignmentService } from '@/services/alignment/alignment-service.js';
 import { mapWithConcurrency } from '@/services/shared/async.js';
 
@@ -75,7 +79,7 @@ const inputSchema = z.object({
     )
     .optional()
     .describe(
-      "Resume tickets from a prior call: for each pair whose labels match an entry here, poll the existing UUID instead of submitting a new alignment job. Copy a, b, and uuid verbatim from a prior response's pairs[]; keep structures and reference unchanged.",
+      "Resume tickets from a prior call: for each pair whose labels match an entry here, poll the existing UUID instead of submitting a new alignment job. Copy a, b, and uuid verbatim from a prior response's pairs[]; keep structures, reference, and method unchanged. The order of structures may change — a resumed pair keeps the orientation its job was submitted in.",
     ),
 });
 
@@ -86,14 +90,18 @@ const outputSchema = z.object({
     .array(
       z
         .object({
-          a: z.string().describe('First structure of the pair (entry[.chain]).'),
+          a: z
+            .string()
+            .describe(
+              "First structure of the pair (entry[.chain]), as the alignment job was submitted — for a resumed pair that can differ from this call's structures[] order.",
+            ),
           b: z.string().describe('Second structure of the pair (entry[.chain]).'),
           status: z.enum(['complete', 'computing', 'failed']).describe('Outcome for this pair.'),
           tmScore: z
             .number()
             .optional()
             .describe(
-              'TM-score (0–1; higher is more similar). Length-normalized, so it can be sensitive to terminal length differences between the two structures — a one-residue overhang can flip the greedy superposition into a worse local optimum, dropping the score sharply. Cross-check rmsd and alignedResidues to spot such cases.',
+              "TM-score (0–1; higher is more similar). Length-normalized by structure a's modeled length, so the same pair aligned b-first can score very differently (0.17 vs 0.40 for a 141- vs a 46-residue chain). It can also be sensitive to terminal length differences between the two structures — a one-residue overhang can flip the greedy superposition into a worse local optimum, dropping the score sharply. Cross-check rmsd and alignedResidues to spot such cases.",
             ),
           rmsd: z.number().optional().describe('RMSD in Å over aligned residues.'),
           alignedResidues: z.number().optional().describe('Number of aligned residue pairs.'),
@@ -126,7 +134,7 @@ type StructInput = z.infer<typeof inputSchema>['structures'][number];
 
 export const compareStructures = tool('protein_compare_structures', {
   title: 'protein-mcp-server: compare structures',
-  description: `Structurally align multiple structures (up to the configured batch cap) via the RCSB Structural Comparison service (TM-align / jFATCAT). reference:"first" aligns every structure to the first; reference:"all_pairs" computes the full pairwise matrix. Each pair is an independent async alignment job, fanned out with a concurrency cap and per-pair partial success — a pair still computing when the budget elapses returns status "computing" with its job UUID, and a failed pair degrades its row without sinking the others. Re-call with a matching entry in resume[] to poll a computing pair's UUID instead of resubmitting. Returns TM-score, RMSD, and aligned-residue count per pair, plus each structure's modeled-residue count and alignment coverage. TM-score is length-normalized and can shift sharply between structures that differ only by a terminal residue or two — the greedy superposition can settle into a worse local optimum — so read tmScore alongside rmsd, alignedResidues, modeledResidues and coverage, the columns that make such cases diagnosable.`,
+  description: `Structurally align multiple structures (up to the configured batch cap) via the RCSB Structural Comparison service (TM-align / jFATCAT). reference:"first" aligns every structure to the first; reference:"all_pairs" computes the full pairwise matrix. Each pair is an independent async alignment job with per-pair partial success — a pair still computing when the budget elapses returns status "computing" with its job UUID, and a failed pair degrades its row without sinking the others. Re-call with a matching entry in resume[] to poll a computing pair's UUID instead of resubmitting; a resumed pair reports a and b in the order its job was submitted, and a resume under a different method is rejected. Returns TM-score, RMSD, and aligned-residue count per pair, plus each structure's modeled-residue count and alignment coverage. TM-score is length-normalized and can shift sharply between structures that differ only by a terminal residue or two — the greedy superposition can settle into a worse local optimum — so read tmScore alongside rmsd, alignedResidues, modeledResidues and coverage, the columns that make such cases diagnosable.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   errors: [
@@ -144,6 +152,20 @@ export const compareStructures = tool('protein_compare_structures', {
       recovery:
         'Pass at least two different structures (entry ID, or entry ID + chain); a structure repeated in the list is compared once.',
     },
+    {
+      reason: 'resume_method_mismatch',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: "A resumed alignment job completed under a different method than this call's method input.",
+      recovery:
+        'Re-call with the method the job ran (named in the message), or drop that resume entry to submit a fresh alignment with the new method.',
+    },
+    {
+      reason: 'resume_job_mismatch',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: "A resume entry's uuid belongs to an alignment job for a different structure pair than its a/b labels.",
+      recovery:
+        "Copy each resume entry's uuid from the same pairs[] row as its a and b, or drop the entry to submit a fresh alignment for that pair.",
+    },
   ],
 
   input: inputSchema,
@@ -152,7 +174,12 @@ export const compareStructures = tool('protein_compare_structures', {
   enrichment: {
     pairsTotal: z.number().describe('Number of pairs compared.'),
     computing: z.number().describe('Number of pairs still computing.'),
-    notice: z.string().optional().describe('Advisory note (pending pairs, failures).'),
+    notice: z
+      .string()
+      .optional()
+      .describe(
+        'Advisory note: pairs still computing or failed (with how to resume them), structures beyond the batch cap that were ignored, and repeated structures compared once.',
+      ),
   },
 
   async handler(input, ctx) {
@@ -203,12 +230,21 @@ export const compareStructures = tool('protein_compare_structures', {
     }
 
     const alignment = getAlignmentService();
+    // A resumed job whose own record contradicts this call is a client error, but
+    // it only surfaces once that job completes. Record the first one and throw
+    // after the fanout settles, so no sibling pair is left polling in the background.
+    let rejection: ResumeRejection | undefined;
     const rows = await mapWithConcurrency(pairs, cfg.fanoutConcurrency, async ([a, b]) => {
       const resumeUuid = resumeByPair.get(pairKey(label(a), label(b)));
       const outcome = resumeUuid
         ? await alignment.resumePair(resumeUuid, timeoutMs, ctx)
         : await alignment.comparePair(toCompare(a), toCompare(b), method, timeoutMs, ctx);
-      const base = { a: label(a), b: label(b) };
+      let base = { a: label(a), b: label(b) };
+      if (outcome.status === 'complete' && resumeUuid && outcome.job) {
+        const oriented = orientResumedJob(outcome.job, base, method, resumeUuid);
+        if ('reason' in oriented) rejection ??= oriented;
+        else base = oriented;
+      }
       if (outcome.status === 'complete') {
         return {
           ...base,
@@ -233,13 +269,19 @@ export const compareStructures = tool('protein_compare_structures', {
       return { ...base, status: 'failed' as const, error: outcome.error };
     });
 
+    if (rejection) {
+      throw ctx.fail(rejection.reason, rejection.message, {
+        ...ctx.recoveryFor(rejection.reason),
+      });
+    }
+
     const computing = rows.filter((r) => r.status === 'computing').length;
     const failed = rows.filter((r) => r.status === 'failed').length;
     ctx.enrich({ pairsTotal: rows.length, computing });
     if (computing > 0 || failed > 0) {
       notices.push(
         `${computing} pair(s) still computing${failed > 0 ? `, ${failed} failed` : ''}. ` +
-          `Re-call with a resume entry per pair (copy a, b, uuid from the pairs above) to poll existing jobs — cold alignment jobs typically finish within 30–60 s.`,
+          `Re-call with a resume entry per pair (copy a, b, uuid from the pairs above) to poll existing jobs — cold alignment jobs typically finish within 30–60 s. The alignment service answers an expired job the same way as a running one, so a pair that stays computing across several resumes should be resubmitted without its resume entry.`,
       );
     }
     if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
@@ -283,9 +325,9 @@ export const compareStructures = tool('protein_compare_structures', {
  * keyed exactly as {@link pairKey} normalizes labels. Two entries for one
  * structure yield pairs that are indistinguishable under that key — `(A,B)` and
  * `(B,A)` collapse to one — so a single resume ticket would be applied to two
- * separate alignment jobs, silently discarding one. Case-folding the whole label
- * follows the same normalization: distinguishing chains `A` and `a` here would
- * hand the resume lookup two pairs it cannot tell apart.
+ * separate alignment jobs, silently discarding one. The entry ID is case-folded
+ * and the chain suffix kept as-is, matching that normalization: chains `A` and
+ * `a` are distinct chains and stay distinct here too.
  */
 function dedupeStructures(structures: StructInput[]): {
   unique: StructInput[];
@@ -332,7 +374,7 @@ function toCompare(s: StructInput): CompareStructure {
 }
 
 function label(s: StructInput): string {
-  return s.chain ? `${s.pdb_id.toUpperCase()}.${s.chain}` : s.pdb_id.toUpperCase();
+  return compareLabel(toCompare(s));
 }
 
 /**
@@ -350,4 +392,53 @@ function normalizeLabel(value: string): string {
 
 function pairKey(a: string, b: string): string {
   return [normalizeLabel(a), normalizeLabel(b)].sort().join('\u0000');
+}
+
+interface PairLabels {
+  a: string;
+  b: string;
+}
+
+interface ResumeRejection {
+  message: string;
+  reason: 'resume_method_mismatch' | 'resume_job_mismatch';
+}
+
+/**
+ * Orient a completed resumed pair by the job's own record rather than this
+ * call's `structures[]` order. Resume matching is order-insensitive, but every
+ * per-structure value (and the TM-score, normalized by the first structure) is
+ * ordered as the job was submitted — so the row's `a`/`b` follow the job. The
+ * method can't be remapped: a job that ran a different one is rejected, as is a
+ * ticket whose job aligned a different pair. A record missing either echo keeps
+ * the current order.
+ */
+function orientResumedJob(
+  job: AlignmentJob,
+  current: PairLabels,
+  method: AlignmentMethod,
+  uuid: string,
+): PairLabels | ResumeRejection {
+  if (job.method && job.method !== method) {
+    return {
+      reason: 'resume_method_mismatch',
+      message: `Alignment job ${uuid} for ${current.a} ↔ ${current.b} ran ${job.method}, not the requested ${method}.`,
+    };
+  }
+  if (!job.structures) return current;
+  const first = compareLabel(job.structures[0]);
+  const second = compareLabel(job.structures[1]);
+  if (pairKey(first, second) !== pairKey(current.a, current.b)) {
+    return {
+      reason: 'resume_job_mismatch',
+      message: `Alignment job ${uuid} aligned ${first} ↔ ${second}, not ${current.a} ↔ ${current.b}.`,
+    };
+  }
+  return normalizeLabel(first) === normalizeLabel(current.a)
+    ? current
+    : { a: current.b, b: current.a };
+}
+
+function compareLabel(s: CompareStructure): string {
+  return s.asymId ? `${s.entryId.toUpperCase()}.${s.asymId}` : s.entryId.toUpperCase();
 }

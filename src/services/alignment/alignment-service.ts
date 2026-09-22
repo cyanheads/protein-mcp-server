@@ -38,11 +38,30 @@ export interface PairScores {
   tmScore?: number;
 }
 
+/**
+ * What the alignment job itself records, echoed back by the results poll: the
+ * pair in the order it was submitted and the method it ran. Every per-structure
+ * value in {@link PairScores} — and the TM-score, normalized by the first
+ * structure's length — is oriented to `structures`, which can differ from the
+ * order of a later call resuming the job. Each field is absent when the payload
+ * doesn't carry it in the expected shape.
+ */
+export interface AlignmentJob {
+  method?: string;
+  structures?: [CompareStructure, CompareStructure];
+}
+
 /** Outcome of one pairwise alignment. */
 export type PairOutcome =
-  | { status: 'complete'; uuid: string; scores: PairScores }
+  | { status: 'complete'; uuid: string; scores: PairScores; job?: AlignmentJob }
   | { status: 'computing'; uuid: string }
   | { status: 'failed'; error: string };
+
+/** A completed poll: the row's scores plus the job record, when echoed. */
+interface PolledResult {
+  job?: AlignmentJob;
+  scores: PairScores;
+}
 
 export class AlignmentService {
   private readonly submitUrl: string;
@@ -99,32 +118,19 @@ export class AlignmentService {
     } catch (err) {
       return { status: 'failed', error: err instanceof Error ? err.message : String(err) };
     }
-    try {
-      const outcome = await withAsyncPoll<PairScores>({
-        step: () => this.pollResult(uuid, ctx),
-        timeoutMs,
-        ctx,
-        intervalMs: 1500,
-        maxIntervalMs: 2500,
-      });
-      return outcome.status === 'complete'
-        ? { status: 'complete', uuid, scores: outcome.value }
-        : { status: 'computing', uuid };
-    } catch (err) {
-      return { status: 'failed', error: err instanceof Error ? err.message : String(err) };
-    }
+    return this.resumePair(uuid, timeoutMs, ctx);
   }
 
   /**
    * Resume an existing job: bounded-poll a UUID returned by a prior `comparePair`
-   * without resubmitting. Reuses the same `pollResult` step, so a `404` — which the
-   * RCSB API returns identically for an expired UUID and a job still computing —
-   * degrades to `{ status: 'computing' }` on timeout rather than a false `failed`.
-   * A legitimately in-flight job is never mistaken for a dead one. Never throws.
+   * without resubmitting. A `404` — which the RCSB API returns identically for an
+   * expired UUID and a job still computing — degrades to `{ status: 'computing' }`
+   * on timeout rather than a false `failed`, so a legitimately in-flight job is
+   * never mistaken for a dead one. Never throws.
    */
   async resumePair(uuid: string, timeoutMs: number, ctx: Context): Promise<PairOutcome> {
     try {
-      const outcome = await withAsyncPoll<PairScores>({
+      const outcome = await withAsyncPoll<PolledResult>({
         step: () => this.pollResult(uuid, ctx),
         timeoutMs,
         ctx,
@@ -132,7 +138,7 @@ export class AlignmentService {
         maxIntervalMs: 2500,
       });
       return outcome.status === 'complete'
-        ? { status: 'complete', uuid, scores: outcome.value }
+        ? { status: 'complete', uuid, ...outcome.value }
         : { status: 'computing', uuid };
     } catch (err) {
       return { status: 'failed', error: err instanceof Error ? err.message : String(err) };
@@ -140,7 +146,7 @@ export class AlignmentService {
   }
 
   /** Single poll of a job's results. 404 = still computing; a result body = ready. */
-  private async pollResult(uuid: string, ctx: Context): Promise<PollStep<PairScores>> {
+  private async pollResult(uuid: string, ctx: Context): Promise<PollStep<PolledResult>> {
     const res = await fetchResponse(`${this.resultsUrl}?uuid=${encodeURIComponent(uuid)}`, ctx, {
       operation: 'AlignmentService.pollResult',
       timeoutMs: 15_000,
@@ -151,7 +157,8 @@ export class AlignmentService {
     const raw = parseJson<RawAlignmentResponse>(await res.text(), 'RCSB Alignment API');
     const first = raw.results?.[0];
     if (!first) return { ready: false };
-    return { ready: true, value: normalizeScores(first) };
+    const job = parseJob(raw.meta?.alignment_method, first.structures);
+    return { ready: true, value: { scores: normalizeScores(first), ...(job ? { job } : {}) } };
   }
 }
 
@@ -204,12 +211,44 @@ function numberPair(value: unknown): [number, number] | undefined {
   return [a, b];
 }
 
+/**
+ * Read the job record from a completed poll. The method is kept only as a
+ * string; the pair only as exactly two structures, each with a string
+ * `entry_id` — anything else is upstream drift and drops that field alone.
+ */
+function parseJob(method: unknown, structures: unknown): AlignmentJob | undefined {
+  const job: AlignmentJob = {};
+  if (typeof method === 'string') job.method = method;
+  if (Array.isArray(structures) && structures.length === 2) {
+    const [a, b] = structures.map(parseStructure);
+    if (a && b) job.structures = [a, b];
+  }
+  return job.method || job.structures ? job : undefined;
+}
+
+function parseStructure(value: unknown): CompareStructure | undefined {
+  const raw = value as RawQueryStructure | null;
+  if (typeof raw?.entry_id !== 'string') return;
+  const asymId = raw.selection?.asym_id;
+  return { entryId: raw.entry_id, ...(typeof asymId === 'string' ? { asymId } : {}) };
+}
+
 interface RawAlignmentResponse {
   info?: { status?: string };
+  /** Echo of the submitted job: `alignment_method` is the method it ran. */
+  meta?: { alignment_method?: unknown };
   results?: RawAlignmentResult[];
 }
 
+/** One structure as submitted, echoed back on the result row. */
+interface RawQueryStructure {
+  entry_id?: unknown;
+  selection?: { asym_id?: unknown };
+}
+
 interface RawAlignmentResult {
+  /** The submitted pair, in submitted order. */
+  structures?: unknown;
   summary?: {
     scores?: Array<{ type?: string; value?: number }>;
     n_aln_residue_pairs?: number;

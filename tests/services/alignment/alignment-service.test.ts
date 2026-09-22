@@ -1,8 +1,9 @@
 /**
  * @fileoverview Tests for the RCSB alignment service: submit-UUID unwrapping, the
  * heterogeneous result `scores` normalization (against the real API shape), the
- * per-structure modeled-residue / coverage tuples and their arity guard, and the
- * complete / computing / failed outcome branches — with the HTTP layer mocked.
+ * per-structure modeled-residue / coverage tuples and their arity guard, the
+ * echoed job record (submitted pair order and method), and the complete /
+ * computing / failed outcome branches — with the HTTP layer mocked.
  * @module tests/services/alignment/alignment-service.test
  */
 
@@ -350,5 +351,133 @@ describe('AlignmentService.resumePair — poll an existing UUID without resubmit
 
     const out = await service().resumePair('u', 1000, createMockContext());
     expect(out).toMatchObject({ status: 'failed', error: expect.stringMatching(/HTTP 500/) });
+  });
+});
+
+/**
+ * The live RCSB shape for a completed 4HHB.A → 1CRN.A tm-align job: the poll
+ * echoes the submitted pair in `results[0].structures[]` (a chainless structure
+ * carries no `selection`) and the method in `meta.alignment_method`. Every
+ * per-structure tuple is ordered as submitted — 141 vs 46 modeled residues.
+ */
+const ECHO_PAYLOAD = JSON.stringify({
+  info: { uuid: 'job-1', status: 'COMPLETE' },
+  meta: { alignment_mode: 'pairwise', alignment_method: 'tm-align' },
+  results: [
+    {
+      structures: [{ entry_id: '4HHB', selection: { asym_id: 'A' } }, { entry_id: '1CRN' }],
+      summary: {
+        scores: [
+          { value: 0.03, type: 'sequence-identity' },
+          { value: 0.17, type: 'TM-score' },
+          { value: 3.18, type: 'RMSD' },
+        ],
+        n_aln_residue_pairs: 27,
+        n_modeled_residues: [141, 46],
+        seq_aln_len: 156,
+        aln_coverage: [19, 59],
+      },
+    },
+  ],
+});
+
+describe('AlignmentService — the job record echoed by the results poll', () => {
+  it.each([
+    ['resumePair', () => service().resumePair('job-1', 1000, createMockContext())],
+    [
+      'comparePair',
+      () =>
+        service().comparePair(
+          { entryId: '4HHB', asymId: 'A' },
+          { entryId: '1CRN' },
+          'tm-align',
+          1000,
+          createMockContext(),
+        ),
+    ],
+  ] as const)('%s surfaces the submitted pair order and method', async (_name, run) => {
+    fetchTextMock.mockResolvedValue('"job-1"');
+    fetchResponseMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () => ECHO_PAYLOAD,
+    } as Response);
+
+    const out = await run();
+
+    expect(out).toEqual({
+      status: 'complete',
+      uuid: 'job-1',
+      scores: {
+        tmScore: 0.17,
+        rmsd: 3.18,
+        sequenceIdentity: 0.03,
+        alignedResidues: 27,
+        modeledResidues: [141, 46],
+        coverage: [19, 59],
+      },
+      job: {
+        method: 'tm-align',
+        structures: [{ entryId: '4HHB', asymId: 'A' }, { entryId: '1CRN' }],
+      },
+    });
+  });
+
+  it('omits the job record when the payload carries neither echo (older API shape)', async () => {
+    fetchResponseMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () => READY_PAYLOAD,
+    } as Response);
+
+    const out = await service().resumePair('abc-123', 1000, createMockContext());
+
+    expect(out).not.toHaveProperty('job');
+  });
+
+  it('drops a malformed echo field without degrading the other or the scores', async () => {
+    fetchResponseMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          meta: { alignment_method: 'fatcat-rigid' },
+          results: [
+            {
+              structures: [{ entry_id: '4HHB' }], // one structure, not a pair
+              summary: { scores: [{ type: 'TM-score', value: 0.9 }] },
+            },
+          ],
+        }),
+    } as Response);
+
+    const out = await service().resumePair('u', 1000, createMockContext());
+
+    expect(out).toEqual({
+      status: 'complete',
+      uuid: 'u',
+      scores: { tmScore: 0.9 },
+      job: { method: 'fatcat-rigid' },
+    });
+  });
+
+  it('ignores a structure entry with no string entry_id', async () => {
+    fetchResponseMock.mockResolvedValue({
+      status: 200,
+      ok: true,
+      text: async () =>
+        JSON.stringify({
+          results: [
+            {
+              structures: [{ entry_id: '4HHB' }, { selection: { asym_id: 'A' } }],
+              summary: { scores: [{ type: 'TM-score', value: 0.9 }] },
+            },
+          ],
+        }),
+    } as Response);
+
+    const out = await service().resumePair('u', 1000, createMockContext());
+
+    expect(out).not.toHaveProperty('job');
   });
 });

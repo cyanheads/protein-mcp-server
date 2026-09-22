@@ -19,6 +19,7 @@ import type {
   BindingSite,
   ChemComp,
   ContentType,
+  CoordinateUrls,
   EntryMeta,
   FacetBucket,
   FacetDimension,
@@ -79,12 +80,14 @@ export class RcsbService {
   private readonly graphqlUrl: string;
   private readonly dataRestBase: string;
   private readonly filesBase: string;
+  private readonly modelsBase: string;
 
   constructor(_config: AppConfig, _storage: StorageService, serverConfig: ServerConfig) {
     this.searchUrl = `${serverConfig.rcsbSearchBaseUrl}/rcsbsearch/v2/query`;
     this.graphqlUrl = `${serverConfig.rcsbDataBaseUrl}/graphql`;
     this.dataRestBase = `${serverConfig.rcsbDataBaseUrl}/rest/v1/core`;
     this.filesBase = serverConfig.rcsbFilesBaseUrl;
+    this.modelsBase = serverConfig.rcsbModelsBaseUrl;
   }
 
   // ─── Search ────────────────────────────────────────────────────────────────
@@ -364,9 +367,32 @@ export class RcsbService {
 
   // ─── Files ────────────────────────────────────────────────────────────────────
 
-  /** Construct a coordinate-file download URL for a PDB entry. */
-  coordinateFileUrl(pdbId: string, format: 'cif' | 'pdb' | 'bcif'): string {
-    return `${this.filesBase}/download/${pdbId.toUpperCase()}.${format}`;
+  /**
+   * Coordinate-file URLs RCSB serves for an entry. mmCIF and PDB format come from
+   * the file-download host, BinaryCIF only from the ModelServer host. The PDB
+   * format is omitted when the entry reports it is not PDB-format compatible
+   * (large entries archived as mmCIF only); an unreported value keeps it. A
+   * computed model is not in the file-download archive at all, so only its
+   * BinaryCIF is listed — its provider publishes the text formats.
+   */
+  coordinateUrls(
+    entry: Pick<EntryMeta, 'id' | 'computedModelProvider' | 'pdbFormatCompatible'>,
+  ): CoordinateUrls {
+    const id = entry.id.toUpperCase();
+    const bcif = `${this.modelsBase}/${id}.bcif`;
+    if (entry.computedModelProvider) return { bcif };
+    return {
+      cif: this.mmcifUrl(id),
+      ...(entry.pdbFormatCompatible === false
+        ? {}
+        : { pdb: `${this.filesBase}/download/${id}.pdb` }),
+      bcif,
+    };
+  }
+
+  /** mmCIF download URL for an experimental entry — the one text format every entry has. */
+  mmcifUrl(pdbId: string): string {
+    return `${this.filesBase}/download/${pdbId.toUpperCase()}.cif`;
   }
 
   // ─── Private ───────────────────────────────────────────────────────────────────
@@ -681,8 +707,10 @@ const CSM_PROVIDER_NAMES: Record<string, string> = {
 };
 
 function normalizeEntry(raw: RawEntry): EntryMeta {
-  const sourceDb = raw.rcsb_comp_model_provenance?.source_db;
+  const provenance = raw.rcsb_comp_model_provenance;
+  const sourceDb = provenance?.source_db;
   const computedModelProvider = sourceDb ? (CSM_PROVIDER_NAMES[sourceDb] ?? sourceDb) : undefined;
+  const pdbCompatible = raw.pdbx_database_status?.pdb_format_compatible;
   const polymerEntities = (raw.polymer_entities ?? []).map(normalizePolymerEntity);
   const organisms = [
     ...new Set(polymerEntities.map((e) => e.organism).filter((o): o is string => !!o)),
@@ -695,6 +723,10 @@ function normalizeEntry(raw: RawEntry): EntryMeta {
   return {
     id: raw.rcsb_id,
     ...(computedModelProvider ? { computedModelProvider } : {}),
+    ...(provenance?.entry_id ? { computedModelEntryId: provenance.entry_id } : {}),
+    ...(pdbCompatible === 'Y' || pdbCompatible === 'N'
+      ? { pdbFormatCompatible: pdbCompatible === 'Y' }
+      : {}),
     ...(raw.struct?.title ? { title: raw.struct.title } : {}),
     ...(methods.length > 0 ? { methods } : {}),
     ...(typeof resolution === 'number' ? { resolution } : {}),
@@ -784,10 +816,12 @@ function normalizeChemComp(id: string, raw: RawChemComp): ChemComp {
 interface RawEntry {
   exptl?: Array<{ method?: string }>;
   nonpolymer_entities?: RawNonpolymerEntity[];
+  /** `pdb_format_compatible` is "Y"/"N" on experimental entries, null on computed models. */
+  pdbx_database_status?: { pdb_format_compatible?: string | null } | null;
   polymer_entities?: RawPolymerEntity[];
   rcsb_accession_info?: { initial_release_date?: string };
   /** Present only on computed structure models; `null` for experimental entries. */
-  rcsb_comp_model_provenance?: { source_db?: string } | null;
+  rcsb_comp_model_provenance?: { entry_id?: string | null; source_db?: string } | null;
   rcsb_entry_info?: { resolution_combined?: number[]; molecular_weight?: number };
   rcsb_id: string;
   struct?: { title?: string };
@@ -856,7 +890,8 @@ const ENTRIES_QUERY = `query Entries($ids: [String!]!) {
     rcsb_id
     struct { title }
     exptl { method }
-    rcsb_comp_model_provenance { source_db }
+    pdbx_database_status { pdb_format_compatible }
+    rcsb_comp_model_provenance { source_db entry_id }
     rcsb_entry_info { resolution_combined molecular_weight }
     rcsb_accession_info { initial_release_date }
     polymer_entities {

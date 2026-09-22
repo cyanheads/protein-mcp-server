@@ -340,6 +340,87 @@ describe('protein_search_structures', () => {
     });
   });
 
+  it('keeps a non-sequence predicted hit on its bare entry ID with no entityId (#60)', async () => {
+    search.mockResolvedValue({
+      total: 2,
+      hits: [
+        { id: 'AF_AFP69905F1', score: 1 },
+        { id: 'MA_MAASFVASFVG001', score: 0.9 },
+      ],
+    });
+    getEntries.mockResolvedValue([]);
+    const out = await searchStructures.handler(
+      searchStructures.input.parse({ query: 'hemoglobin', content_type: 'predicted' }),
+      ctx(),
+    );
+
+    expect(out.hits).toEqual([
+      { id: 'AF_AFP69905F1', source: 'predicted', score: 1, uniprotAccession: 'P69905' },
+      { id: 'MA_MAASFVASFVG001', source: 'predicted', score: 0.9 },
+    ]);
+    expect(getEntries).not.toHaveBeenCalled();
+  });
+
+  it('returns the chainable entry ID plus entityId and accession for an AlphaFold sequence hit (#60)', async () => {
+    search.mockResolvedValue({ total: 1, hits: [{ id: 'AF_AFP69905F1_1', score: 1 }] });
+    getEntries.mockResolvedValue([]);
+
+    const result = (await runToolContract(searchStructures, {
+      sequence: 'VLSPADKTNVKAAWGKVGAHAGEYGAEALERMF',
+      content_type: 'predicted',
+      limit: 1,
+    })) as {
+      structuredContent: {
+        hits: Array<{ id: string; entityId?: string; uniprotAccession?: string }>;
+      };
+      content: Array<{ text: string }>;
+    };
+
+    expect(result.structuredContent.hits[0]).toEqual({
+      id: 'AF_AFP69905F1',
+      entityId: 'AF_AFP69905F1_1',
+      source: 'predicted',
+      score: 1,
+      uniprotAccession: 'P69905',
+    });
+    const text = result.content[0]?.text ?? '';
+    expect(text).toContain('### AF_AFP69905F1 _(predicted)_');
+    expect(text).toContain('**Entity:** AF_AFP69905F1_1');
+    expect(text).toContain('**UniProt:** P69905');
+    // Computed models carry no experimental metadata worth an entry lookup.
+    expect(getEntries).not.toHaveBeenCalled();
+  });
+
+  it('strips the entity suffix from a ModelArchive sequence hit, with no accession (#60)', async () => {
+    search.mockResolvedValue({
+      total: 3,
+      hits: [
+        { id: 'MA_MAASFVASFVG001_1', score: 1 },
+        { id: 'AF_AFQ8WZ42F12_1', score: 0.8 },
+        { id: '4HHB_1', score: 0.7 },
+      ],
+    });
+    getEntries.mockResolvedValue([]);
+    const out = await searchStructures.handler(
+      searchStructures.input.parse({ sequence: 'MVLSPADK' }),
+      ctx(),
+    );
+
+    expect(out.hits).toEqual([
+      { id: 'MA_MAASFVASFVG001', entityId: 'MA_MAASFVASFVG001_1', source: 'predicted', score: 1 },
+      // A multi-digit fragment number survives: only the trailing entity suffix goes.
+      {
+        id: 'AF_AFQ8WZ42F12',
+        entityId: 'AF_AFQ8WZ42F12_1',
+        source: 'predicted',
+        score: 0.8,
+        uniprotAccession: 'Q8WZ42',
+      },
+      { id: '4HHB', entityId: '4HHB_1', source: 'experimental', score: 0.7 },
+    ]);
+    expect(getEntries).toHaveBeenCalledWith(['4HHB'], expect.anything());
+  });
+
   it('enriches experimental hits and records the total + echoed query', async () => {
     search.mockResolvedValue({ total: 9064, hits: [{ id: '4HHB', score: 1 }] });
     getEntries.mockResolvedValue([
@@ -429,6 +510,52 @@ describe('protein_search_structures', () => {
       );
       expect(getEnrichment(c)).toMatchObject({ totalCount: total, start });
       expect(getEnrichment(c)).not.toHaveProperty('nextStart');
+    }
+  });
+
+  it('names the offset on a past-end page instead of claiming no matches, on both surfaces (#66)', async () => {
+    search.mockResolvedValue({ total: 9171, hits: [] });
+    getEntries.mockResolvedValue([]);
+
+    const result = (await runToolContract(searchStructures, {
+      query: 'hemoglobin',
+      content_type: 'experimental',
+      start: 10000,
+      limit: 1,
+    })) as {
+      structuredContent: {
+        hits: unknown[];
+        totalCount: number;
+        nextStart?: number;
+        notice?: string;
+      };
+      content: Array<{ text: string }>;
+    };
+
+    expect(result.structuredContent.hits).toEqual([]);
+    expect(result.structuredContent.totalCount).toBe(9171);
+    expect(result.structuredContent).not.toHaveProperty('nextStart');
+    const notice = String(result.structuredContent.notice);
+    expect(notice).toContain('start 10000 is past the end of the 9171 matches');
+    expect(notice).toMatch(/lower start/);
+    expect(notice).not.toMatch(/No experimental structures matched/);
+    const rendered = result.content.map((block) => block.text).join('\n');
+    expect(rendered).toContain('start 10000 is past the end of the 9171 matches');
+    expect(rendered).not.toMatch(/No experimental structures matched/);
+  });
+
+  it('keeps the zero-match advice for every scope when the total is zero (#66)', async () => {
+    for (const content_type of ['experimental', 'predicted', 'all'] as const) {
+      search.mockResolvedValue({ total: 0, hits: [] });
+      getEntries.mockResolvedValue([]);
+      const c = ctx();
+      await searchStructures.handler(
+        searchStructures.input.parse({ query: 'zzzznotathing', content_type, start: 50 }),
+        c,
+      );
+      const notice = String(getEnrichment(c).notice);
+      expect(notice).toMatch(/matched/);
+      expect(notice).not.toMatch(/past the end/);
     }
   });
 
@@ -626,13 +753,14 @@ describe('protein_search_structures', () => {
     expect(getEnrichment(c)).not.toHaveProperty('notice');
   });
 
-  it('composes the truncation fragment with the zero-hit and coverage notices (#52)', async () => {
+  it('composes the truncation fragment with the past-end and coverage notices (#52, #66)', async () => {
     const buckets = Array.from({ length: FACET_CAP + 1 }, (_, i) => ({
       label: `org${i}`,
       count: 10,
     }));
+    const total = (FACET_CAP + 1) * 10 + 5000;
     search.mockResolvedValue({
-      total: (FACET_CAP + 1) * 10 + 5000,
+      total,
       hits: [],
       facets: [
         {
@@ -649,12 +777,16 @@ describe('protein_search_structures', () => {
         query: 'kinase',
         content_type: 'experimental',
         facets: ['organism'],
+        start: total + 100,
       }),
       c,
     );
     // One joined string carries all three; none may overwrite another.
     const notice = String(getEnrichment(c).notice);
-    expect(notice).toMatch(/^No experimental structures matched/);
+    expect(notice).toMatch(
+      new RegExp(`^start ${total + 100} is past the end of the ${total} matches`),
+    );
+    expect(notice).not.toMatch(/No experimental structures matched/);
     expect(notice).toContain(`organism was capped at ${FACET_CAP} buckets.`);
     expect(notice).toContain('organism buckets cover');
   });
@@ -691,7 +823,7 @@ describe('protein_search_structures', () => {
     expect(trailer.map((b) => b.text).join('\n')).toContain('protein_analyze_collection');
   });
 
-  it('composes the coverage gap with the zero-hit notice (#32)', async () => {
+  it('composes the coverage gap with the past-end notice (#32, #66)', async () => {
     search.mockResolvedValue({
       total: 1000,
       hits: [],
@@ -710,11 +842,13 @@ describe('protein_search_structures', () => {
         query: 'kinase',
         content_type: 'experimental',
         facets: ['method'],
+        start: 1000,
       }),
       c,
     );
     const notice = String(getEnrichment(c).notice);
-    expect(notice).toMatch(/no experimental structures matched/i);
+    expect(notice).toMatch(/^start 1000 is past the end of the 1000 matches/);
+    expect(notice).not.toMatch(/no experimental structures matched/i);
     expect(notice).toContain('600');
   });
 

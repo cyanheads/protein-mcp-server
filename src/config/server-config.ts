@@ -23,7 +23,12 @@ const ServerConfigSchema = z.object({
     .string()
     .url()
     .default('https://files.rcsb.org')
-    .describe('Base URL for RCSB coordinate-file downloads.'),
+    .describe('Base URL for RCSB mmCIF and PDB-format coordinate-file downloads.'),
+  rcsbModelsBaseUrl: z
+    .string()
+    .url()
+    .default('https://models.rcsb.org')
+    .describe('Base URL for RCSB BinaryCIF coordinate downloads (ModelServer).'),
   rcsbAlignmentBaseUrl: z
     .string()
     .url()
@@ -39,6 +44,11 @@ const ServerConfigSchema = z.object({
     .url()
     .default('https://alphafold.ebi.ac.uk')
     .describe('Base URL for the AlphaFold Protein Structure Database API.'),
+  modelArchiveBaseUrl: z
+    .string()
+    .url()
+    .default('https://modelarchive.org')
+    .describe('Base URL for ModelArchive computed-model coordinate downloads.'),
   foldseekBaseUrl: z
     .string()
     .url()
@@ -103,9 +113,11 @@ export function getServerConfig(): ServerConfig {
     rcsbSearchBaseUrl: 'RCSB_SEARCH_BASE_URL',
     rcsbDataBaseUrl: 'RCSB_DATA_BASE_URL',
     rcsbFilesBaseUrl: 'RCSB_FILES_BASE_URL',
+    rcsbModelsBaseUrl: 'RCSB_MODELS_BASE_URL',
     rcsbAlignmentBaseUrl: 'RCSB_ALIGNMENT_BASE_URL',
     beaconsBaseUrl: 'BEACONS_BASE_URL',
     alphafoldBaseUrl: 'ALPHAFOLD_BASE_URL',
+    modelArchiveBaseUrl: 'MODELARCHIVE_BASE_URL',
     foldseekBaseUrl: 'FOLDSEEK_BASE_URL',
     uniprotBaseUrl: 'UNIPROT_BASE_URL',
     interproBaseUrl: 'INTERPRO_BASE_URL',

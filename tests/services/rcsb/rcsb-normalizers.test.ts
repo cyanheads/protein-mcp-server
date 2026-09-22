@@ -31,6 +31,7 @@ const service = () =>
       rcsbSearchBaseUrl: 'https://search.test',
       rcsbDataBaseUrl: 'https://data.test',
       rcsbFilesBaseUrl: 'https://files.test',
+      rcsbModelsBaseUrl: 'https://models.test',
     } as never,
   );
 
@@ -191,6 +192,58 @@ describe('RcsbService.getEntries', () => {
     await service().getEntries(['4HHB'], createMockContext());
     const opts = fetchJsonMock.mock.calls[0]?.[2] as unknown as { body: string };
     expect(JSON.parse(opts.body).query).toContain('rcsb_comp_model_provenance');
+  });
+
+  it('reads legacy-PDB-format compatibility and the provider entry ID (#61)', async () => {
+    fetchJsonMock.mockResolvedValue(
+      gql({
+        entries: [
+          { ...ENTRY_4HHB, pdbx_database_status: { pdb_format_compatible: 'Y' } },
+          { rcsb_id: '4V6X', pdbx_database_status: { pdb_format_compatible: 'N' } },
+          {
+            rcsb_id: 'AF_AFP69905F1',
+            pdbx_database_status: { pdb_format_compatible: null },
+            rcsb_comp_model_provenance: { source_db: 'AlphaFoldDB', entry_id: 'AF-P69905-F1' },
+          },
+          {
+            rcsb_id: 'MA_MAASFVASFVG001',
+            pdbx_database_status: null,
+            rcsb_comp_model_provenance: {
+              source_db: 'ModelArchive',
+              entry_id: 'ma-asfv-asfvg-001',
+            },
+          },
+        ],
+      }),
+    );
+    const [hhb, ribosome, af, ma] = await service().getEntries(
+      ['4HHB', '4V6X', 'AF_AFP69905F1', 'MA_MAASFVASFVG001'],
+      createMockContext(),
+    );
+
+    expect(hhb?.pdbFormatCompatible).toBe(true);
+    expect(hhb).not.toHaveProperty('computedModelEntryId');
+    expect(ribosome?.pdbFormatCompatible).toBe(false);
+    // Computed models report no compatibility value — unknown stays absent.
+    expect(af).not.toHaveProperty('pdbFormatCompatible');
+    expect(af).toMatchObject({
+      computedModelProvider: 'AlphaFold DB',
+      computedModelEntryId: 'AF-P69905-F1',
+    });
+    expect(ma).not.toHaveProperty('pdbFormatCompatible');
+    expect(ma).toMatchObject({
+      computedModelProvider: 'ModelArchive',
+      computedModelEntryId: 'ma-asfv-asfvg-001',
+    });
+  });
+
+  it('requests the format-compatibility flag and provenance entry ID (#61)', async () => {
+    fetchJsonMock.mockResolvedValue(gql({ entries: [] }));
+    await service().getEntries(['4HHB'], createMockContext());
+    const opts = fetchJsonMock.mock.calls[0]?.[2] as unknown as { body: string };
+    const query = JSON.parse(opts.body).query as string;
+    expect(query).toContain('pdbx_database_status { pdb_format_compatible }');
+    expect(query).toContain('rcsb_comp_model_provenance { source_db entry_id }');
   });
 
   it('upper-cases ids in the GraphQL variables', async () => {
@@ -910,11 +963,40 @@ describe('RcsbService results_content_type emission (#29)', () => {
   });
 });
 
-describe('RcsbService.coordinateFileUrl', () => {
-  it('builds an upper-cased download URL for the requested format', () => {
-    expect(service().coordinateFileUrl('4hhb', 'cif')).toBe('https://files.test/download/4HHB.cif');
-    expect(service().coordinateFileUrl('4hhb', 'bcif')).toBe(
-      'https://files.test/download/4HHB.bcif',
-    );
+describe('RcsbService.coordinateUrls (#61)', () => {
+  it('serves mmCIF and PDB from the file host and BinaryCIF from the model host', () => {
+    expect(service().coordinateUrls({ id: '4hhb', pdbFormatCompatible: true })).toEqual({
+      cif: 'https://files.test/download/4HHB.cif',
+      pdb: 'https://files.test/download/4HHB.pdb',
+      bcif: 'https://models.test/4HHB.bcif',
+    });
+  });
+
+  it('keeps the PDB-format URL when an experimental entry reports no compatibility value', () => {
+    expect(service().coordinateUrls({ id: '1ABC' })).toEqual({
+      cif: 'https://files.test/download/1ABC.cif',
+      pdb: 'https://files.test/download/1ABC.pdb',
+      bcif: 'https://models.test/1ABC.bcif',
+    });
+  });
+
+  it('omits the PDB-format URL for an mmCIF-only entry', () => {
+    const urls = service().coordinateUrls({ id: '4V6X', pdbFormatCompatible: false });
+    expect(urls).toEqual({
+      cif: 'https://files.test/download/4V6X.cif',
+      bcif: 'https://models.test/4V6X.bcif',
+    });
+    expect(urls).not.toHaveProperty('pdb');
+  });
+
+  it('lists only BinaryCIF for a computed model, which the file host does not serve', () => {
+    for (const [id, provider] of [
+      ['AF_AFP69905F1', 'AlphaFold DB'],
+      ['MA_MAASFVASFVG001', 'ModelArchive'],
+    ] as const) {
+      expect(service().coordinateUrls({ id, computedModelProvider: provider })).toEqual({
+        bcif: `https://models.test/${id}.bcif`,
+      });
+    }
   });
 });

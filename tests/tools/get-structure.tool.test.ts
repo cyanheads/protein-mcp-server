@@ -17,10 +17,19 @@ import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mc
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const getEntries = vi.fn();
-const coordinateFileUrl = vi.fn((id: string, fmt: string) => `https://files/${id}.${fmt}`);
-vi.mock('@/services/rcsb/rcsb-service.js', () => ({
-  getRcsbService: () => ({ getEntries, coordinateFileUrl }),
-}));
+// Only the upstream call is faked; coordinate-URL construction runs the real
+// service code so the host/format routing under test is exercised here too.
+vi.mock('@/services/rcsb/rcsb-service.js', async (importOriginal) => {
+  const { RcsbService } = await importOriginal<typeof import('@/services/rcsb/rcsb-service.js')>();
+  const real = new RcsbService(
+    {} as never,
+    {} as never,
+    { rcsbFilesBaseUrl: 'https://files', rcsbModelsBaseUrl: 'https://models' } as never,
+  );
+  return {
+    getRcsbService: () => ({ getEntries, coordinateUrls: real.coordinateUrls.bind(real) }),
+  };
+});
 
 const getPrediction = vi.fn();
 vi.mock('@/services/alphafold/alphafold-service.js', () => ({
@@ -365,13 +374,15 @@ describe('protein_get_structure', () => {
     // Full three-format set built from the chosen pdbId via the same RCSB URL builder
     // fetchExperimental uses — not the single beacon modelUrl.
     expect(rec?.coordinateUrls).toEqual({
-      cif: 'https://files/2W72.cif',
-      pdb: 'https://files/2W72.pdb',
-      bcif: 'https://files/2W72.bcif',
+      cif: 'https://files/download/2W72.cif',
+      pdb: 'https://files/download/2W72.pdb',
+      bcif: 'https://models/2W72.bcif',
     });
-    expect(coordinateFileUrl).toHaveBeenCalledWith('2W72', 'cif');
-    expect(coordinateFileUrl).toHaveBeenCalledWith('2W72', 'pdb');
-    expect(coordinateFileUrl).toHaveBeenCalledWith('2W72', 'bcif');
+    const experimental = await getStructure.handler(
+      getStructure.input.parse({ ids: ['2W72'], source: 'experimental' }),
+      ctx(),
+    );
+    expect(rec?.coordinateUrls).toEqual(experimental.structures[0]?.coordinateUrls);
     // Experimental pick reports no predicted-confidence fields.
     expect(rec?.meanPlddt).toBeUndefined();
     expect(rec?.confidence).toBeUndefined();
@@ -458,6 +469,255 @@ describe('protein_get_structure computed structure models', () => {
     expect(out.structures[0]).toMatchObject({ source: 'experimental' });
     expect(out.structures[0]).not.toHaveProperty('provider');
     expect(out.attribution.map((a) => a.source)).toEqual(['RCSB PDB']);
+  });
+});
+
+describe('protein_get_structure coordinate URL routing (#61)', () => {
+  /** The live AlphaFold DB prediction for P69905, trimmed to what the tool reads. */
+  const AF_P69905 = {
+    uniprotAccession: 'P69905',
+    entryId: 'AF-P69905-F1',
+    meanPlddt: 98.1,
+    cifUrl: 'https://alphafold.ebi.ac.uk/files/AF-P69905-F1-model_v6.cif',
+    pdbUrl: 'https://alphafold.ebi.ac.uk/files/AF-P69905-F1-model_v6.pdb',
+    bcifUrl: 'https://alphafold.ebi.ac.uk/files/AF-P69905-F1-model_v6.bcif',
+  };
+  const afCsm = {
+    id: 'AF_AFP69905F1',
+    computedModelProvider: 'AlphaFold DB',
+    computedModelEntryId: 'AF-P69905-F1',
+    title: 'Computed structure model of Hemoglobin subunit alpha',
+    organisms: ['Homo sapiens'],
+    polymerEntities: [],
+    ligands: [],
+  };
+  const maCsm = {
+    id: 'MA_MAASFVASFVG001',
+    computedModelProvider: 'ModelArchive',
+    computedModelEntryId: 'ma-asfv-asfvg-001',
+    organisms: [],
+    polymerEntities: [],
+    ligands: [],
+  };
+  const noticeOf = (c: ReturnType<typeof ctx>) => String(getEnrichment(c).notice ?? '');
+
+  it('routes BinaryCIF through the model host for an experimental entry', async () => {
+    getEntries.mockResolvedValue([{ ...experimentalMeta('4HHB'), pdbFormatCompatible: true }]);
+    const out = await getStructure.handler(
+      getStructure.input.parse({ ids: ['4HHB'], source: 'experimental' }),
+      ctx(),
+    );
+    expect(out.structures[0]?.coordinateUrls).toEqual({
+      cif: 'https://files/download/4HHB.cif',
+      pdb: 'https://files/download/4HHB.pdb',
+      bcif: 'https://models/4HHB.bcif',
+    });
+    expect(getPrediction).not.toHaveBeenCalled();
+  });
+
+  it('omits the PDB-format URL for an mmCIF-only entry on both surfaces', async () => {
+    getEntries.mockResolvedValue([{ ...experimentalMeta('4V6X'), pdbFormatCompatible: false }]);
+    const result = (await runToolContract(getStructure, {
+      ids: ['4V6X'],
+      source: 'experimental',
+    })) as {
+      structuredContent: { structures: Array<{ coordinateUrls: Record<string, string> }> };
+      content: Array<{ text: string }>;
+    };
+    expect(result.structuredContent.structures[0]?.coordinateUrls).toEqual({
+      cif: 'https://files/download/4V6X.cif',
+      bcif: 'https://models/4V6X.bcif',
+    });
+    const text = result.content.map((b) => b.text).join('\n');
+    expect(text).toContain(
+      '**Coordinates:** [cif](https://files/download/4V6X.cif) · [bcif](https://models/4V6X.bcif)',
+    );
+    expect(text).not.toContain('[pdb]');
+  });
+
+  it('resolves an AlphaFold computed model to the same URLs source predicted returns', async () => {
+    getEntries.mockResolvedValue([afCsm]);
+    getPrediction.mockResolvedValue(AF_P69905);
+    const c = ctx();
+    const viaExperimental = await getStructure.handler(
+      getStructure.input.parse({ ids: ['AF_AFP69905F1'], source: 'experimental' }),
+      c,
+    );
+    // Keyed on the provider's own entry ID, so a non-F1 fragment resolves to itself.
+    expect(getPrediction).toHaveBeenCalledWith('AF-P69905-F1', expect.anything());
+    expect(noticeOf(c)).toBe('');
+
+    const viaPredicted = await getStructure.handler(
+      getStructure.input.parse({ ids: ['P69905'], source: 'predicted' }),
+      ctx(),
+    );
+    expect(viaExperimental.structures[0]?.coordinateUrls).toEqual({
+      cif: AF_P69905.cifUrl,
+      pdb: AF_P69905.pdbUrl,
+      bcif: AF_P69905.bcifUrl,
+    });
+    expect(viaExperimental.structures[0]?.coordinateUrls).toEqual(
+      viaPredicted.structures[0]?.coordinateUrls,
+    );
+    // Still the RCSB record: its id, provenance, and credit are unchanged.
+    expect(viaExperimental.structures[0]).toMatchObject({
+      id: 'AF_AFP69905F1',
+      source: 'predicted',
+      provider: 'AlphaFold DB',
+    });
+  });
+
+  it.each([
+    [
+      'the AlphaFold lookup fails',
+      () => getPrediction.mockRejectedValue(new Error('upstream 503')),
+    ],
+    ['AlphaFold DB has no model', () => getPrediction.mockResolvedValue(null)],
+  ])('falls back to the RCSB BinaryCIF URL and discloses it when %s', async (_label, arrange) => {
+    getEntries.mockResolvedValue([
+      afCsm,
+      { ...experimentalMeta('4HHB'), pdbFormatCompatible: true },
+    ]);
+    arrange();
+    const c = ctx();
+    const out = await getStructure.handler(
+      getStructure.input.parse({ ids: ['AF_AFP69905F1', '4HHB'], source: 'experimental' }),
+      c,
+    );
+    // A failed best-effort lookup never costs the record or its batch-mates.
+    expect(out.structures.map((s) => s.id)).toEqual(['AF_AFP69905F1', '4HHB']);
+    expect(out.failed).toEqual([]);
+    expect(out.structures[0]?.coordinateUrls).toEqual({
+      bcif: 'https://models/AF_AFP69905F1.bcif',
+    });
+    expect(out.structures[1]?.coordinateUrls.pdb).toBe('https://files/download/4HHB.pdb');
+    expect(noticeOf(c)).toContain('AF_AFP69905F1');
+    expect(noticeOf(c)).toMatch(/AlphaFold DB/);
+    expect(noticeOf(c)).toMatch(/BinaryCIF/);
+  });
+
+  it('carries the AlphaFold fallback disclosure on both consumption surfaces', async () => {
+    getEntries.mockResolvedValue([afCsm]);
+    getPrediction.mockResolvedValue(null);
+    const result = (await runToolContract(getStructure, {
+      ids: ['AF_AFP69905F1'],
+      source: 'experimental',
+    })) as {
+      structuredContent: { notice?: string };
+      content: Array<{ type: string; text: string }>;
+    };
+    const disclosure = 'AlphaFold DB coordinate lookup did not resolve for AF_AFP69905F1';
+    expect(result.structuredContent.notice).toContain(disclosure);
+    expect(result.content.map((b) => b.text).join('\n')).toContain(disclosure);
+  });
+
+  it('derives ModelArchive mmCIF from the provider entry ID, with no extra lookup', async () => {
+    getEntries.mockResolvedValue([maCsm]);
+    const c = ctx();
+    const out = await getStructure.handler(
+      getStructure.input.parse({ ids: ['MA_MAASFVASFVG001'], source: 'experimental' }),
+      c,
+    );
+    expect(out.structures[0]?.coordinateUrls).toEqual({
+      cif: 'https://modelarchive.org/api/projects/ma-asfv-asfvg-001?type=basic__model_file_name',
+      bcif: 'https://models/MA_MAASFVASFVG001.bcif',
+    });
+    expect(getPrediction).not.toHaveBeenCalled();
+    expect(noticeOf(c)).toBe('');
+  });
+
+  it('lists only the RCSB BinaryCIF URL for a provider it cannot resolve', async () => {
+    getEntries.mockResolvedValue([
+      {
+        ...maCsm,
+        id: 'XX_MODEL1',
+        computedModelProvider: 'SomeFutureModelDB',
+        computedModelEntryId: 'm-1',
+      },
+    ]);
+    const out = await getStructure.handler(
+      getStructure.input.parse({ ids: ['XX_MODEL1'], source: 'experimental' }),
+      ctx(),
+    );
+    expect(out.structures[0]?.coordinateUrls).toEqual({ bcif: 'https://models/XX_MODEL1.bcif' });
+    expect(getPrediction).not.toHaveBeenCalled();
+  });
+
+  it('inlines an AlphaFold computed model from its resolved mmCIF URL', async () => {
+    getEntries.mockResolvedValue([afCsm]);
+    getPrediction.mockResolvedValue(AF_P69905);
+    fetchTextMock.mockResolvedValue('data_AF-P69905-F1');
+    const c = ctx();
+    const out = await getStructure.handler(
+      getStructure.input.parse({
+        ids: ['AF_AFP69905F1'],
+        source: 'experimental',
+        include_coords: true,
+      }),
+      c,
+    );
+    expect(fetchTextMock.mock.calls[0]?.[0]).toBe(AF_P69905.cifUrl);
+    expect(out.structures[0]).toMatchObject({
+      coordinateFormat: 'cif',
+      coordinates: 'data_AF-P69905-F1',
+    });
+    expect(noticeOf(c)).toBe('');
+  });
+
+  it('inlines an mmCIF-only entry from its mmCIF URL, never the absent PDB file', async () => {
+    getEntries.mockResolvedValue([{ ...experimentalMeta('4V6X'), pdbFormatCompatible: false }]);
+    fetchTextMock.mockResolvedValue('data_4V6X');
+    const out = await getStructure.handler(
+      getStructure.input.parse({ ids: ['4V6X'], source: 'experimental', include_coords: true }),
+      ctx(),
+    );
+    expect(fetchTextMock).toHaveBeenCalledTimes(1);
+    expect(fetchTextMock.mock.calls[0]?.[0]).toBe('https://files/download/4V6X.cif');
+    expect(out.structures[0]?.coordinateFormat).toBe('cif');
+  });
+
+  it('names a record with no text coordinate format in the inline-failure notice', async () => {
+    // BinaryCIF is binary; a record left with only that URL cannot be inlined, and
+    // silently skipping it would read as "never asked to inline".
+    getEntries.mockResolvedValue([afCsm]);
+    getPrediction.mockResolvedValue(null);
+    const c = ctx();
+    const out = await getStructure.handler(
+      getStructure.input.parse({
+        ids: ['AF_AFP69905F1'],
+        source: 'experimental',
+        include_coords: true,
+      }),
+      c,
+    );
+    expect(fetchTextMock).not.toHaveBeenCalled();
+    expect(out.structures[0]?.coordinates).toBeUndefined();
+    expect(noticeOf(c)).toContain('Coordinate inlining failed for AF_AFP69905F1');
+  });
+
+  it('keeps best_available on the same routing for an mmCIF-only experimental pick', async () => {
+    getSummary.mockResolvedValue({
+      accession: 'P0DOX5',
+      found: true,
+      models: [
+        {
+          modelIdentifier: '4v6x',
+          modelCategory: 'EXPERIMENTALLY DETERMINED',
+          provider: 'PDBe',
+          modelUrl: 'https://www.ebi.ac.uk/pdbe/static/entry/4v6x_updated.cif',
+          resolution: 5,
+        },
+      ],
+    });
+    getEntries.mockResolvedValue([{ ...experimentalMeta('4V6X'), pdbFormatCompatible: false }]);
+    const out = await getStructure.handler(
+      getStructure.input.parse({ ids: ['P0DOX5'], source: 'best_available' }),
+      ctx(),
+    );
+    expect(out.structures[0]?.coordinateUrls).toEqual({
+      cif: 'https://files/download/4V6X.cif',
+      bcif: 'https://models/4V6X.bcif',
+    });
   });
 });
 
@@ -776,9 +1036,9 @@ describe('protein_get_structure coordinate inlining budget', () => {
     expect(out.overflow?.notice).toContain('coordinateUrls');
     expect(out.overflow?.notice).not.toContain('sections:[');
     expect(out.structures[0]?.coordinateUrls).toEqual({
-      cif: 'https://files/4HHB.cif',
-      pdb: 'https://files/4HHB.pdb',
-      bcif: 'https://files/4HHB.bcif',
+      cif: 'https://files/download/4HHB.cif',
+      pdb: 'https://files/download/4HHB.pdb',
+      bcif: 'https://models/4HHB.bcif',
     });
     expect(String(getEnrichment(c).notice)).toContain('coordinateUrls');
   });
@@ -828,7 +1088,7 @@ describe('protein_get_structure coordinate inlining budget', () => {
     // The ID resolved — it is not a failed[] row; only its coordinate content is missing.
     expect(out.failed).toHaveLength(0);
     expect(out.structures[0]?.coordinates).toBeUndefined();
-    expect(out.structures[0]?.coordinateUrls.cif).toBe('https://files/4HHB.cif');
+    expect(out.structures[0]?.coordinateUrls.cif).toBe('https://files/download/4HHB.cif');
     expect(String(getEnrichment(c).notice)).toContain('Coordinate inlining failed for 4HHB');
     expect(out.overflow).toBeUndefined();
   });
@@ -952,7 +1212,7 @@ describe('protein_get_structure format() coordinate state parity (#59)', () => {
     expect(result.structuredContent.overflow).toBeUndefined();
     const text = result.content.map((b) => b.text).join('\n');
     expect(text).toContain('Coordinates withheld');
-    expect(text).toContain('https://files/4HHB.cif');
+    expect(text).toContain('https://files/download/4HHB.cif');
     expect(text).not.toContain('A'.repeat(500));
     expect(text).not.toContain('truncated in text view');
   });

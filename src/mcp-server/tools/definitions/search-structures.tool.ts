@@ -12,7 +12,7 @@ import { getServerConfig } from '@/config/server-config.js';
 import { buildFacetSpec, FACET_DIMENSION_NAMES } from '@/services/rcsb/facets.js';
 import { getRcsbService } from '@/services/rcsb/rcsb-service.js';
 import type { EntryMeta, SearchHit } from '@/services/rcsb/types.js';
-import { entryIdOf } from '@/services/shared/identifiers.js';
+import { entryIdOf, isComputedModelId } from '@/services/shared/identifiers.js';
 import {
   CONTENT_TYPE_SCOPES,
   coverageNotices,
@@ -33,11 +33,6 @@ const ZERO_HIT_NOTICE = {
     'No predicted models matched. Predicted search covers computed models indexed by RCSB; widen content_type to "all" to include experimental structures.',
   all: 'No structures matched in either the experimental or computed-model universe — content_type "all" is already the widest scope. Broaden the query or drop filters.',
 } satisfies Record<'experimental' | 'predicted' | 'all', string>;
-
-/** A computed-model identifier (AlphaFold / ModelArchive) vs an experimental PDB entry. */
-function isPredictedId(id: string): boolean {
-  return /^(AF|MA)_/i.test(id);
-}
 
 /** Pull a UniProt accession out of a computed-model identifier when present (`AF_AFP69905F1` → `P69905`). */
 function accessionFromCsm(id: string): string | undefined {
@@ -66,7 +61,7 @@ function truncationNotice(dimensions: string[], cap: number, sequenceSearch: boo
 export const searchStructures = tool('protein_search_structures', {
   title: 'protein-mcp-server: search structures',
   description:
-    'Search experimental (PDB) and predicted (computed-model) protein structures by free text, protein sequence (triggers an mmseqs2 similarity search), and/or organism, method, and resolution filters. Returns ranked hits; the experimental page is enriched with title, method, resolution, and organism. Chain hit IDs into protein_get_structure. Optionally returns a facet breakdown (counts by method / organism / release year / …) alongside the hits at no extra call. A facet on a dimension you are already filtering (e.g. the organism facet while organism is set) lists unfiltered alternatives by design — it does not constrain by its own active filter, so you can see sibling values to pivot to. Numeric histogram buckets (resolution, molecular weight) carry explicit rangeFrom/rangeTo bounds so a boundary label is unambiguous.',
+    'Search experimental (PDB) and predicted (computed-model) protein structures by free text, protein sequence (triggers an mmseqs2 similarity search), and/or organism, method, and resolution filters. Returns ranked hits; the experimental page is enriched with title, method, resolution, and organism. Chain hit IDs into protein_get_structure. Optionally returns a facet breakdown (counts by method / organism / release year / …) alongside the hits in the same response. A facet on a dimension you are already filtering (e.g. the organism facet while organism is set) lists unfiltered alternatives by design — it does not constrain by its own active filter, so you can see sibling values to pivot to. Numeric histogram buckets (resolution, molecular weight) carry explicit rangeFrom/rangeTo bounds so a boundary label is unambiguous.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   errors: [
@@ -122,14 +117,14 @@ export const searchStructures = tool('protein_search_structures', {
       .max(1)
       .optional()
       .describe(
-        'Minimum sequence identity (0–1) for a sequence search. Requires sequence — supplying it without one is rejected, since the threshold would never reach RCSB. Default 0.',
+        'Minimum sequence identity (0–1) for a sequence search. Requires sequence — supplying it without one is rejected, since the threshold filters only a sequence search. Default 0.',
       ),
     max_evalue: z
       .number()
       .positive()
       .optional()
       .describe(
-        'Maximum E-value for a sequence search. Requires sequence — supplying it without one is rejected, since the threshold would never reach RCSB. Default 1.',
+        'Maximum E-value for a sequence search. Requires sequence — supplying it without one is rejected, since the threshold filters only a sequence search. Default 1.',
       ),
     content_type: z
       .enum(['experimental', 'predicted', 'all'])
@@ -162,7 +157,7 @@ export const searchStructures = tool('protein_search_structures', {
               .string()
               .optional()
               .describe(
-                'Matched polymer-entity ID for experimental sequence hits; id remains the chainable PDB entry ID.',
+                'Matched polymer-entity ID for sequence hits (e.g. 4HHB_1, AF_AFP69905F1_1); id remains the chainable entry ID.',
               ),
             source: z
               .enum(['experimental', 'predicted'])
@@ -279,7 +274,7 @@ export const searchStructures = tool('protein_search_structures', {
     );
 
     const experimentalIds = [
-      ...new Set(result.hits.filter((h) => !isPredictedId(h.id)).map((h) => entryIdOf(h.id))),
+      ...new Set(result.hits.filter((h) => !isComputedModelId(h.id)).map((h) => entryIdOf(h.id))),
     ];
     const metaById = new Map<string, EntryMeta>();
     if (experimentalIds.length > 0) {
@@ -300,7 +295,14 @@ export const searchStructures = tool('protein_search_structures', {
     // `notice` is a single last-wins field, so the zero-hit advice, the capped-facet
     // advice, and one fragment per under-covered facet dimension compose into ONE string.
     const notices: string[] = [];
-    if (hits.length === 0) notices.push(ZERO_HIT_NOTICE[input.content_type]);
+    // An empty page with a nonzero total is an offset past the end, not a query
+    // that matched nothing — the two need opposite next moves.
+    if (hits.length === 0)
+      notices.push(
+        result.total === 0
+          ? ZERO_HIT_NOTICE[input.content_type]
+          : `start ${input.start} is past the end of the ${result.total} matches. Re-call with a lower start to read a populated page.`,
+      );
     if (facets) {
       const capped = facets.filter((f) => f.truncated).map((f) => f.dimension);
       if (capped.length > 0)
@@ -337,20 +339,25 @@ export const searchStructures = tool('protein_search_structures', {
 
 /** Build one output hit, folding in enrichment metadata when available. */
 function toHit(hit: SearchHit, metaById: Map<string, EntryMeta>, sequenceSearch: boolean) {
-  if (isPredictedId(hit.id)) {
-    const accession = accessionFromCsm(hit.id);
+  // A sequence search returns polymer entities in both universes (4HHB_1,
+  // AF_AFP69905F1_1); `id` is the chainable entry and `entityId` the matched entity.
+  const entryId = entryIdOf(hit.id);
+  const identity = {
+    id: sequenceSearch ? entryId : hit.id,
+    ...(sequenceSearch ? { entityId: hit.id } : {}),
+  };
+  if (isComputedModelId(hit.id)) {
+    const accession = accessionFromCsm(identity.id);
     return {
-      id: hit.id,
+      ...identity,
       source: 'predicted' as const,
       score: hit.score,
       ...(accession ? { uniprotAccession: accession } : {}),
     };
   }
-  const entryId = entryIdOf(hit.id);
   const meta = metaById.get(entryId);
   return {
-    id: sequenceSearch ? entryId : hit.id,
-    ...(sequenceSearch ? { entityId: hit.id } : {}),
+    ...identity,
     source: 'experimental' as const,
     score: hit.score,
     ...(meta?.title ? { title: meta.title } : {}),

@@ -15,9 +15,13 @@ import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { DEFAULT_OUTLINE_BUDGET_BYTES } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
-import { getAlphaFoldService } from '@/services/alphafold/alphafold-service.js';
+import {
+  type AlphaFoldModel,
+  getAlphaFoldService,
+} from '@/services/alphafold/alphafold-service.js';
 import { getBeaconsService } from '@/services/beacons/beacons-service.js';
 import { getRcsbService } from '@/services/rcsb/rcsb-service.js';
+import type { CoordinateUrls, EntryMeta } from '@/services/rcsb/types.js';
 import { mapWithConcurrency } from '@/services/shared/async.js';
 import { attributionsFor } from '@/services/shared/attribution.js';
 import { fetchText } from '@/services/shared/http.js';
@@ -46,7 +50,7 @@ const structureRecordSchema = z
       .string()
       .optional()
       .describe(
-        'Chosen PDB entry ID when a best_available query resolved to an experimental structure (id stays the queried UniProt accession). Lets an agent cite the structure without parsing the coordinate URL.',
+        'Chosen PDB entry ID when a best_available query resolved to an experimental structure (id stays the queried UniProt accession), so the structure can be cited without parsing the coordinate URL.',
       ),
     title: z.string().optional().describe('Structure / protein title.'),
     method: z.string().optional().describe('Experimental method(s).'),
@@ -56,25 +60,25 @@ const structureRecordSchema = z
       .number()
       .optional()
       .describe(
-        'Deposited structure molecular weight in kDa, from the RCSB entry record. Omitted when the record does not report one.',
+        'Deposited structure molecular weight in kDa. Present only when the call used source experimental; omitted when the record does not report one.',
       ),
     releaseDate: z
       .string()
       .optional()
       .describe(
-        'Initial release date (ISO 8601), from the RCSB entry record. Omitted when the record does not report one.',
+        'Initial release date (ISO 8601). Present only when the call used source experimental; omitted when the record does not report one.',
       ),
     polymerEntities: z
       .array(polymerEntitySchema)
       .optional()
       .describe(
-        'Modeled polymer entities, each with both chain namespaces — authAsymIds for protein_get_annotations.chain, labelAsymIds for protein_compare_structures.chain. Present for records served by the RCSB entry endpoint (source experimental, computed models included); omitted for predicted / best_available records and for entries with none.',
+        'Modeled polymer entities, each with both chain namespaces — authAsymIds for protein_get_annotations.chain, labelAsymIds for protein_compare_structures.chain. Present when the call used source experimental (computed-model IDs included); omitted under source predicted or best_available and for entries with none.',
       ),
     ligands: z
       .array(ligandSchema)
       .optional()
       .describe(
-        'Bound non-polymer components. Present for records served by the RCSB entry endpoint; omitted when the entry binds none or the record carries no ligand data.',
+        'Bound non-polymer components. Present when the call used source experimental; omitted under source predicted or best_available, when the entry binds none, or when the record carries no ligand data.',
       ),
     provider: z.string().optional().describe('Model provider (predicted / best_available).'),
     confidence: z
@@ -108,7 +112,9 @@ const structureRecordSchema = z
         pdb: z.string().optional().describe('PDB-format coordinate file URL.'),
         bcif: z.string().optional().describe('Binary CIF coordinate file URL.'),
       })
-      .describe('Coordinate file download URLs.'),
+      .describe(
+        'Coordinate file download URLs. A format with no published file is omitted — e.g. pdb for large entries archived as mmCIF only.',
+      ),
     coordinateFormat: z
       .enum(['cif', 'pdb', 'bcif'])
       .optional()
@@ -124,7 +130,7 @@ type StructureRecord = z.infer<typeof structureRecordSchema>;
 
 export const getStructure = tool('protein_get_structure', {
   title: 'protein-mcp-server: get structure',
-  description: `Fetch structures with metadata and coordinate-file URLs. source "experimental" takes PDB entry IDs (batched in one call), and also resolves the computed-model IDs protein_search_structures returns (AF_*/MA_*), which come back marked source "predicted" with their modelling provider; "predicted" takes UniProt accessions (AlphaFold, with pLDDT/PAE confidence); "best_available" takes UniProt accessions and returns the top federated model — the highest-resolution experimental structure if one exists (optimizing resolution, not biological representativeness, so it can return an engineered mutant over the wild-type entry), else the best prediction. Records served by the RCSB entry endpoint also carry polymer entities with both chain namespaces (labelAsymIds for protein_compare_structures, authAsymIds for protein_get_annotations), bound ligands, molecular weight, and release date. Resolves up to the configured batch cap per call with per-ID partial success — missed IDs are listed in failed[], and IDs beyond the cap are reported in the notice. Set include_coords to inline coordinate content; if the inlined bytes exceed the response budget the content is withheld and overflow lists each structure's size — re-call with sections:[ids] for specific structures, or for a single oversized file download it from that record's coordinateUrls.`,
+  description: `Fetch structures with metadata and coordinate-file URLs. source "experimental" takes PDB entry IDs, and also resolves the computed-model IDs protein_search_structures returns (AF_*/MA_*), which come back marked source "predicted" with their modelling provider; "predicted" takes UniProt accessions (AlphaFold, with pLDDT/PAE confidence); "best_available" takes UniProt accessions and returns the top federated model — the highest-resolution experimental structure if one exists (optimizing resolution, not biological representativeness, so it can return an engineered mutant over the wild-type entry), else the best prediction. Records fetched under source "experimental", computed models included, also carry polymer entities with both chain namespaces (labelAsymIds for protein_compare_structures, authAsymIds for protein_get_annotations), bound ligands, molecular weight, and release date. Resolves up to the configured batch cap per call with per-ID partial success — missed IDs are listed in failed[], and IDs beyond the cap are reported in the notice. Set include_coords to inline coordinate content; if the inlined bytes exceed the response budget the content is withheld and overflow lists each structure's size — re-call with sections:[ids] for specific structures, or for a single oversized file download it from that record's coordinateUrls.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   errors: [
@@ -160,7 +166,9 @@ export const getStructure = tool('protein_get_structure', {
     include_coords: z
       .boolean()
       .default(false)
-      .describe('Inline coordinate-file content (cif). Off by default — URLs are always returned.'),
+      .describe(
+        'Inline coordinate-file content — mmCIF, or PDB format when no mmCIF URL is available; coordinateFormat names which. Off by default — URLs are always returned.',
+      ),
     sections: z
       .array(z.string())
       .optional()
@@ -211,9 +219,7 @@ export const getStructure = tool('protein_get_structure', {
   enrichment: {
     requested: z
       .number()
-      .describe(
-        'Number of IDs in the original request (input.ids.length), before the batch cap was applied.',
-      ),
+      .describe('Number of IDs in the original request, before the batch cap was applied.'),
     processed: z
       .number()
       .describe(
@@ -224,7 +230,7 @@ export const getStructure = tool('protein_get_structure', {
       .string()
       .optional()
       .describe(
-        'Every applicable advisory joined into one string: batch cap, partial failures, coordinate-budget overflow, and failed coordinate inlining.',
+        'Every applicable advisory joined into one string: batch cap, partial failures, a computed model whose provider coordinate lookup failed (only its BinaryCIF URL listed), coordinate-budget overflow, and failed coordinate inlining.',
       ),
   },
 
@@ -256,10 +262,13 @@ export const getStructure = tool('protein_get_structure', {
       );
     }
 
-    const { structures, failed } =
-      input.source === 'experimental'
-        ? await fetchExperimental(ids, ctx)
-        : await fetchPredictedOrBest(ids, input.source, cfg.fanoutConcurrency, ctx);
+    const {
+      structures,
+      failed,
+      notices: resolutionNotices,
+    } = input.source === 'experimental'
+      ? await fetchExperimental(ids, cfg.fanoutConcurrency, ctx)
+      : await fetchPredictedOrBest(ids, input.source, cfg.fanoutConcurrency, ctx);
 
     if (structures.length === 0) {
       throw ctx.fail(
@@ -274,6 +283,7 @@ export const getStructure = tool('protein_get_structure', {
         `${failed.length} of ${ids.length} IDs did not resolve: ${failed.map((f) => f.id).join(', ')}.`,
       );
     }
+    if (resolutionNotices) notices.push(...resolutionNotices);
 
     // Inline coordinates when requested (all, or only the re-called sections).
     const inlineSet = input.sections?.length
@@ -452,15 +462,22 @@ function pct(fraction: number): string {
 
 interface Resolution {
   failed: Array<{ id: string; reason: string }>;
+  /** Advisories about records that resolved with degraded detail. */
+  notices?: string[];
   structures: StructureRecord[];
 }
 
-async function fetchExperimental(ids: string[], ctx: Context): Promise<Resolution> {
+async function fetchExperimental(
+  ids: string[],
+  concurrency: number,
+  ctx: Context,
+): Promise<Resolution> {
   const rcsb = getRcsbService();
   const entries = await rcsb.getEntries(ids, ctx);
   const byId = new Map(entries.map((e) => [e.id.toUpperCase(), e]));
   const structures: StructureRecord[] = [];
   const failed: Resolution['failed'] = [];
+  const csms: Array<{ meta: EntryMeta; record: StructureRecord }> = [];
   for (const id of ids) {
     const meta = byId.get(id.toUpperCase());
     if (!meta) {
@@ -472,7 +489,7 @@ async function fetchExperimental(ids: string[], ctx: Context): Promise<Resolutio
     // their IDs under the default content_type. Read the provenance rather than
     // stamping every resolved ID experimental — that would both contradict the
     // record and credit an AlphaFold/ModelArchive model to the PDB's CC0.
-    structures.push({
+    const record: StructureRecord = {
       id: meta.id,
       source: meta.computedModelProvider ? 'predicted' : 'experimental',
       ...(meta.computedModelProvider ? { provider: meta.computedModelProvider } : {}),
@@ -488,14 +505,67 @@ async function fetchExperimental(ids: string[], ctx: Context): Promise<Resolutio
       // emitted empty, so a sparse entry does not read as "this entry has none".
       ...(meta.polymerEntities.length > 0 ? { polymerEntities: meta.polymerEntities } : {}),
       ...(meta.ligands.length > 0 ? { ligands: meta.ligands } : {}),
-      coordinateUrls: {
-        cif: rcsb.coordinateFileUrl(meta.id, 'cif'),
-        pdb: rcsb.coordinateFileUrl(meta.id, 'pdb'),
-        bcif: rcsb.coordinateFileUrl(meta.id, 'bcif'),
-      },
-    });
+      coordinateUrls: rcsb.coordinateUrls(meta),
+    };
+    structures.push(record);
+    if (meta.computedModelProvider) csms.push({ meta, record });
   }
-  return { structures, failed };
+
+  // RCSB publishes only BinaryCIF for a computed model; its provider publishes the
+  // text formats. Each lookup degrades to the RCSB BinaryCIF URL on its own row.
+  const notices: string[] = [];
+  await mapWithConcurrency(csms, concurrency, async ({ meta, record }) => {
+    const provider = await providerCoordinateUrls(meta, ctx);
+    if (provider === 'unresolved') {
+      notices.push(
+        `AlphaFold DB coordinate lookup did not resolve for ${meta.id}; only its RCSB BinaryCIF URL is listed — fetch the model by UniProt accession with source "predicted" for mmCIF and PDB files.`,
+      );
+      return;
+    }
+    record.coordinateUrls = { ...record.coordinateUrls, ...provider };
+  });
+  return { structures, failed, notices };
+}
+
+/**
+ * Text-format coordinate URLs from a computed model's own provider, keyed on the
+ * provider entry ID RCSB records. AlphaFold DB file names carry a model version,
+ * so they come from its prediction record — the same URLs `source: "predicted"`
+ * returns. A ModelArchive download is addressed by entry ID alone. `'unresolved'`
+ * marks an AlphaFold model whose lookup failed or found nothing; any other
+ * provider has no known download route and contributes nothing.
+ */
+async function providerCoordinateUrls(
+  meta: EntryMeta,
+  ctx: Context,
+): Promise<CoordinateUrls | 'unresolved'> {
+  const entryId = meta.computedModelEntryId;
+  if (meta.computedModelProvider === 'ModelArchive' && entryId) {
+    return {
+      cif: `${getServerConfig().modelArchiveBaseUrl}/api/projects/${encodeURIComponent(entryId)}?type=basic__model_file_name`,
+    };
+  }
+  if (meta.computedModelProvider !== 'AlphaFold DB') return {};
+  if (!entryId) return 'unresolved';
+  const model = await getAlphaFoldService()
+    .getPrediction(entryId, ctx)
+    .catch((err: unknown) => {
+      ctx.log.warning('AlphaFold coordinate lookup failed', {
+        id: meta.id,
+        error: err instanceof Error ? err.message : err,
+      });
+      return null;
+    });
+  return model ? alphaFoldCoordinateUrls(model) : 'unresolved';
+}
+
+/** The coordinate URLs an AlphaFold DB prediction record publishes. */
+function alphaFoldCoordinateUrls(model: AlphaFoldModel): CoordinateUrls {
+  return {
+    ...(model.cifUrl ? { cif: model.cifUrl } : {}),
+    ...(model.pdbUrl ? { pdb: model.pdbUrl } : {}),
+    ...(model.bcifUrl ? { bcif: model.bcifUrl } : {}),
+  };
 }
 
 /**
@@ -547,11 +617,7 @@ async function fetchPrediction(accession: string, ctx: Context): Promise<Structu
     ...(typeof model.meanPlddt === 'number' ? { meanPlddt: model.meanPlddt } : {}),
     ...(model.confidenceBuckets ? { confidenceBuckets: model.confidenceBuckets } : {}),
     ...(model.paeDocUrl ? { paeDocUrl: model.paeDocUrl } : {}),
-    coordinateUrls: {
-      ...(model.cifUrl ? { cif: model.cifUrl } : {}),
-      ...(model.pdbUrl ? { pdb: model.pdbUrl } : {}),
-      ...(model.bcifUrl ? { bcif: model.bcifUrl } : {}),
-    },
+    coordinateUrls: alphaFoldCoordinateUrls(model),
   };
 }
 
@@ -575,12 +641,12 @@ async function fetchBest(accession: string, ctx: Context): Promise<StructureReco
   // best-effort — a failed lookup must not drop the structure the agent already has.
   const rcsb = getRcsbService();
   let pdbId: string | undefined;
-  let title: string | undefined;
+  let entry: EntryMeta | undefined;
   if (isExperimental && best.modelIdentifier) {
     pdbId = best.modelIdentifier.toUpperCase();
-    const entries = await rcsb.getEntries([pdbId], ctx).catch(() => []);
-    title = entries[0]?.title;
+    entry = (await rcsb.getEntries([pdbId], ctx).catch(() => []))[0];
   }
+  const title = entry?.title;
 
   return {
     id: summary.accession,
@@ -600,12 +666,10 @@ async function fetchBest(accession: string, ctx: Context): Promise<StructureReco
     best.confidenceType?.toLowerCase() === 'plddt'
       ? { meanPlddt: best.confidenceAvgLocalScore }
       : {}),
+    // The entry record (when the best-effort lookup succeeded) says whether a
+    // PDB-format file exists; without it the URL set matches an unreported entry.
     coordinateUrls: pdbId
-      ? {
-          cif: rcsb.coordinateFileUrl(pdbId, 'cif'),
-          pdb: rcsb.coordinateFileUrl(pdbId, 'pdb'),
-          bcif: rcsb.coordinateFileUrl(pdbId, 'bcif'),
-        }
+      ? rcsb.coordinateUrls(entry ?? { id: pdbId })
       : best.modelUrl
         ? coordinateUrlFor(best.modelUrl)
         : {},
@@ -613,7 +677,7 @@ async function fetchBest(accession: string, ctx: Context): Promise<StructureReco
 }
 
 /** Slot a single federated model URL into the right format key. */
-function coordinateUrlFor(url: string): { cif?: string; pdb?: string; bcif?: string } {
+function coordinateUrlFor(url: string): CoordinateUrls {
   if (/\.bcif/i.test(url)) return { bcif: url };
   if (/\.pdb/i.test(url)) return { pdb: url };
   return { cif: url };
@@ -639,7 +703,11 @@ async function inlineCoordinates(
       : s.coordinateUrls.pdb
         ? (['pdb', s.coordinateUrls.pdb] as const)
         : null;
-    if (!pick) return;
+    // BinaryCIF is binary, so a record with no text format cannot be inlined.
+    if (!pick) {
+      failures.push(s.id);
+      return;
+    }
     try {
       s.coordinates = await fetchText(pick[1], ctx, {
         operation: 'getStructure.inlineCoordinates',

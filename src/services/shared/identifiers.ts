@@ -36,8 +36,19 @@ export function isPdbId(value: string): boolean {
   return PDB_RE.test(value.trim());
 }
 
-/** Extract the PDB entry ID from a polymer-entity ID (`4HHB_1` → `4HHB`). */
+/** True when `value` is an RCSB computed-model ID (`AF_*` AlphaFold / `MA_*` ModelArchive). */
+export function isComputedModelId(value: string): boolean {
+  return /^(AF|MA)_/i.test(value);
+}
+
+/**
+ * Extract the entry ID from a polymer-entity ID (`4HHB_1` → `4HHB`). A
+ * computed-model ID carries its own underscore after the `AF_`/`MA_` prefix, so
+ * only its trailing `_<entity number>` is stripped (`AF_AFP69905F1_1` →
+ * `AF_AFP69905F1`); a bare computed-model entry ID passes through.
+ */
 export function entryIdOf(identifier: string): string {
+  if (isComputedModelId(identifier)) return identifier.replace(/_\d+$/, '').toUpperCase();
   const base = identifier.split(/[_.]/)[0] ?? identifier;
   return base.toUpperCase();
 }

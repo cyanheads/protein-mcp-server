@@ -50,7 +50,7 @@ const ZERO_MATCH_NOTICE = {
 export const analyzeCollection = tool('protein_analyze_collection', {
   title: 'protein-mcp-server: analyze collection',
   description:
-    'Profile the PDB into distributions and trends over an optional scoping query: counts by method, organism, or polymer composition; resolution and molecular-weight histograms; release-year timelines; and multidimensional cross-tabs (e.g. method × release_year). Aggregation runs server-side at RCSB — one call returns compact buckets, no row pull. Pass one group_by dimension for a single breakdown, or two distinct dimensions for a cross-tab (the first nests the second). bucket_limit caps each dimension level separately rather than the response, so a cross-tab returns up to that many nested buckets under each of its capped parent buckets; bucketsReturned reports the realized total.',
+    'Profile the PDB into distributions and trends over an optional scoping query: counts by method, organism, or polymer composition; resolution and molecular-weight histograms; release-year timelines; and multidimensional cross-tabs (e.g. method × release_year). Aggregation runs at RCSB, so the response carries compact counts per bucket rather than the matching entries. Pass one group_by dimension for a single breakdown, or two distinct dimensions for a cross-tab (the first nests the second). bucket_limit caps each dimension level separately rather than the response, so a cross-tab returns up to that many nested buckets under each of its capped parent buckets; bucketsReturned reports the realized total.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   errors: [
@@ -123,7 +123,7 @@ export const analyzeCollection = tool('protein_analyze_collection', {
       .max(500)
       .optional()
       .describe(
-        'Max buckets per dimension level, not per response. A cross-tab applies the cap separately to the parent dimension and to the nested child inside each parent bucket, so up to bucket_limit × (1 + bucket_limit) buckets can come back — 2550 at the default 50. The realized count comes back as bucketsReturned. Defaults to the server PROTEIN_FACET_BUCKET_CAP.',
+        'Max buckets per dimension level, not per response. A cross-tab applies the cap separately to the parent dimension and to the nested child inside each parent bucket, so up to bucket_limit × (1 + bucket_limit) buckets can come back — 2550 at the default 50. The realized count comes back as bucketsReturned. Defaults to the configured server cap.',
       ),
   }),
 

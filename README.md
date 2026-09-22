@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.8.2-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.8.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -58,8 +58,8 @@ All resource data is also reachable via tools — `pdb://{entry_id}` mirrors `pr
 
 - Free-text, protein-sequence (triggers an mmseqs2 similarity search), and organism / method / resolution filters
 - `content_type` scopes the search to `experimental`, `predicted`, or `all` (default) — `all` is a genuine union, so computed models appear alongside PDB entries
-- Every hit names its `source`; experimental sequence hits expose a chainable PDB entry `id` plus the matched polymer `entityId`, with title, method, resolution, and organism enrichment; computed models retain their complete model ID and parsed UniProt accession
-- `start` and `limit` page through ranked results; `nextStart` is returned while another page remains
+- Every hit names its `source`; sequence hits in either universe expose a chainable entry `id` plus the matched polymer `entityId`; experimental hits carry title, method, resolution, and organism enrichment, and AlphaFold models their parsed UniProt accession
+- `start` and `limit` page through ranked results; `nextStart` is returned while another page remains, and an empty page past the end names the offset in `notice` rather than reporting no matches
 - Optional `facets` return a method / organism / release-year breakdown alongside the hits — each dimension may be listed once and reports how many matches carry no value for it; a capped dimension is named in `notice`, with `protein_analyze_collection` (larger `bucket_limit`) as the route to the long tail
 - Chain hit IDs straight into `protein_get_structure`
 
@@ -69,7 +69,8 @@ All resource data is also reachable via tools — `pdb://{entry_id}` mirrors `pr
 
 - `source: experimental` batches PDB entry IDs (also resolving computed-model IDs like `AF_*`/`MA_*` from search, tagged `source: predicted` with their provider); `source: predicted` takes UniProt accessions for AlphaFold models with pLDDT/PAE; `source: best_available` takes UniProt accessions and returns the top federated model (highest-resolution experimental if one exists, else the best prediction)
 - Per-ID partial success — unresolved IDs land in `failed[]`; `requested`/`processed` disclose IDs dropped beyond the batch cap, and every advisory (cap, failure, overflow) joins into one `notice`
-- Records served by the RCSB entry endpoint also carry `polymerEntities` (both `authAsymIds` and `labelAsymIds`), `ligands`, `molecularWeight`, and `releaseDate`
+- Records fetched with `source: experimental`, computed models included, also carry `polymerEntities` (both `authAsymIds` and `labelAsymIds`), `ligands`, `molecularWeight`, and `releaseDate`
+- `coordinateUrls` lists only files that exist: BinaryCIF comes from RCSB's ModelServer, the PDB format is omitted for large mmCIF-only entries, and a computed model's files come from its provider (all three formats from AlphaFold DB, mmCIF from ModelArchive) — an AlphaFold model whose provider lookup fails keeps only its RCSB BinaryCIF, named in `notice`
 - `include_coords` inlines coordinate content, subject to a response budget — an over-budget batch returns a per-structure size outline (re-call with `sections: [ids]`), and a single oversized file is withheld with a pointer to its `coordinateUrls`
 - Every response carries an `attribution` block naming upstream data licenses and citations
 
@@ -78,7 +79,7 @@ All resource data is also reachable via tools — `pdb://{entry_id}` mirrors `pr
 ### `protein_find_similar` <sub>tool</sub>
 
 - `by: sequence` runs a synchronous RCSB mmseqs2 search; `by: structure` runs an asynchronous Foldseek search against experimental and predicted databases — query from a raw sequence, a PDB ID, or a UniProt accession
-- Both modes accept `start`/`limit` and report `totalCount`, echoing `start` and returning `nextStart` while another page remains
+- Both modes accept `start`/`limit` and report `totalCount`, echoing `start` and returning `nextStart` while another page remains; an empty page past the end names the offset in `notice`, distinct from a search with no matches
 - Foldseek targets default to `pdb100` + `afdb50`; override via `databases` (e.g. `afdb-swissprot`, `BFVD`)
 - An async job that exceeds the poll budget returns `status: computing` with a `ticketId` — re-call with `ticket_id` to resume; a completed structure search returns the same ticket so a new `start` pages the finished job
 - Each mode reads only its own controls (`sequence`, `max_evalue`, `min_identity` under `by: sequence`; `ticket_id`, `databases` under `by: structure`) — a field the selected mode can't consume is rejected, not ignored
@@ -90,7 +91,7 @@ All resource data is also reachable via tools — `pdb://{entry_id}` mirrors `pr
 
 - `mode: find_ligand` resolves a name or formula to chemical component IDs with formula, weight, SMILES, and InChIKey — ranked by deposition frequency, most-common match first
 - A formula-shaped `query` matches on exact composition, spaced (`C29 H31 N7 O`) or unspaced; anything else (a component ID included) matches on name and synonyms
-- `mode: structures_with_ligand` returns PDB entries containing a ligand by exact component ID, with `start`/`limit` paging and `nextStart` while another page remains
+- `mode: structures_with_ligand` returns PDB entries containing a ligand by exact component ID, with `start`/`limit` paging and `nextStart` while another page remains; a page past the end names the offset in `notice` instead of reporting no entries
 - `mode: binding_site` returns the protein residues lining a ligand's pocket in a structure, with contact distances
 - Binding sites are experimental-only — computed from deposited coordinates; predicted models carry no bound ligands
 
@@ -101,8 +102,8 @@ All resource data is also reachable via tools — `pdb://{entry_id}` mirrors `pr
 - Aligns 2 to the configured cap (default 10, max 25) structures per call, via `tm-align`, `fatcat-rigid`, or `fatcat-flexible`; optional per-structure `chain` restricts the alignment to a single mmCIF label chain
 - `reference: first` aligns every structure to the first; `reference: all_pairs` computes the full pairwise matrix; a structure repeated in `structures[]` is compared once
 - Each pair is an independent async job with per-pair partial success — a pair still computing when the poll budget elapses returns `status: computing` with a job `uuid`; a failed pair degrades only its own row
-- Re-call with a matching `{ a, b, uuid }` entry in `resume[]` to poll a computing pair instead of resubmitting
-- Returns TM-score, RMSD, and aligned-residue count per pair, plus each structure's `modeledResidues` and 0–100 `coverage`
+- Re-call with a matching `{ a, b, uuid }` entry in `resume[]` to poll a computing pair instead of resubmitting; a resumed pair reports `a`/`b` in the order its job was submitted, whatever the current `structures[]` order, and a resume under a different `method` is rejected
+- Returns TM-score, RMSD, and aligned-residue count per pair, plus each structure's `modeledResidues` and 0–100 `coverage`, ordered `[a, b]`; TM-score is normalized by `a`'s length, so the same pair scores differently when reversed
 
 ---
 
@@ -147,7 +148,7 @@ PDB / AlphaFold-specific:
 
 - One federated surface over experimental (PDB) and predicted (AlphaFold / 3D-Beacons) structures — search, fetch, and compare treat both universes the same
 - Keyless across every upstream — RCSB, AlphaFold DB, 3D-Beacons, UniProt, InterPro, and Foldseek, no API keys to provision
-- Corpus analytics run server-side on RCSB's facet engine — distributions, histograms, and cross-tabs in one call, no row pull and no SQL workspace
+- Corpus analytics run on RCSB's facet engine — distributions, histograms, and cross-tabs come back as compact bucket counts, not the matching entries
 - Async alignment and Foldseek jobs poll within a bounded budget and hand back a job ticket (`ticketId` / per-pair `uuid`) instead of blocking — re-call with `ticket_id` or a `resume[]` entry to poll the same job instead of resubmitting
 
 Agent-friendly output:

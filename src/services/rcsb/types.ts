@@ -112,6 +112,12 @@ export interface LigandMeta {
 /** Normalized entry-level metadata from the GraphQL batch. */
 export interface EntryMeta {
   /**
+   * The modelling provider's own ID for a computed model (e.g. `AF-P69905-F1`,
+   * `ma-asfv-asfvg-001`) — the key its coordinate files are published under.
+   * Absent for experimental entries.
+   */
+  computedModelEntryId?: string;
+  /**
    * Modelling provider display name when this ID is a computed structure model
    * (`AF_*` / `MA_*`) rather than an experimental entry — e.g. "AlphaFold DB",
    * "ModelArchive". Absent for experimental entries. RCSB serves both universes
@@ -128,6 +134,12 @@ export interface EntryMeta {
   molecularWeight?: number;
   /** Distinct source organisms across polymer entities. */
   organisms: string[];
+  /**
+   * Whether the archive publishes a legacy PDB-format file for this entry —
+   * `false` for large entries archived as mmCIF only. Absent when the record
+   * reports no value (computed models).
+   */
+  pdbFormatCompatible?: boolean;
   /** Modeled polymer entities. */
   polymerEntities: PolymerEntityMeta[];
   /** Initial release date (ISO 8601). */
@@ -136,6 +148,16 @@ export interface EntryMeta {
   resolution?: number;
   /** Structure title. */
   title?: string;
+}
+
+/** Coordinate-file download URLs by format; a format with no working file is absent. */
+export interface CoordinateUrls {
+  /** Binary CIF. */
+  bcif?: string;
+  /** mmCIF. */
+  cif?: string;
+  /** Legacy PDB format. */
+  pdb?: string;
 }
 
 /** One protein residue lining a ligand's binding pocket. */

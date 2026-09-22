@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.3](changelog/0.8.x/0.8.3.md) — 2026-09-22
+
+Fixes computed-model sequence-hit IDs, dead coordinate-file URLs, reversed alignment-resume labeling, and false zero-match notices past the last results page; tool/resource descriptions reworded to drop implementation leaks.
+
 ## [0.8.2](changelog/0.8.x/0.8.2.md) — 2026-09-21
 
 Adopts mcp-ts-core 0.13.6: argument rejections carry recovery hints (0.13.3), tool arguments pass pre-validation aliasing (0.13.4), and tool-error text names its reason (0.13.5); server instructions rewritten for workflow chaining.

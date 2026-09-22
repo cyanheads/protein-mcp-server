@@ -277,6 +277,47 @@ describe('protein_track_ligands — structures_with_ligand', () => {
     expect(String(getEnrichment(c).notice)).toMatch(/no pdb entries contain zzz/i);
   });
 
+  it('names the offset on a past-end ligand page instead of claiming no entries, on both surfaces (#66)', async () => {
+    searchByLigand.mockResolvedValue({ total: 29, hits: [] });
+
+    const result = (await runToolContract(trackLigands, {
+      mode: 'structures_with_ligand',
+      comp_id: 'STI',
+      start: 29,
+      limit: 1,
+    })) as {
+      structuredContent: {
+        structures: unknown[];
+        totalCount: number;
+        nextStart?: number;
+        notice?: string;
+      };
+      content: Array<{ text: string }>;
+    };
+
+    expect(result.structuredContent.structures).toEqual([]);
+    expect(result.structuredContent.totalCount).toBe(29);
+    expect(result.structuredContent).not.toHaveProperty('nextStart');
+    const notice = String(result.structuredContent.notice);
+    expect(notice).toContain('start 29 is past the end of the 29 PDB entries containing STI');
+    expect(notice).not.toMatch(/No PDB entries contain/);
+    const rendered = result.content.map((block) => block.text).join('\n');
+    expect(rendered).toContain('start 29 is past the end of the 29 PDB entries containing STI');
+    expect(rendered).not.toMatch(/No PDB entries contain/);
+  });
+
+  it('keeps the zero-match notice when no entry contains the ligand at any offset (#66)', async () => {
+    searchByLigand.mockResolvedValue({ total: 0, hits: [] });
+    const c = ctx();
+    await trackLigands.handler(
+      trackLigands.input.parse({ mode: 'structures_with_ligand', comp_id: 'ZZZ', start: 10 }),
+      c,
+    );
+    expect(String(getEnrichment(c).notice)).toBe(
+      'No PDB entries contain ZZZ. Verify the component ID via mode find_ligand.',
+    );
+  });
+
   it('exposes ligand-search offsets and nextStart on both consumption surfaces', async () => {
     searchByLigand.mockResolvedValue({
       total: 30,

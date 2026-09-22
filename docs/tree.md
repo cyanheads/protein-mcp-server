@@ -1,6 +1,6 @@
 # protein-mcp-server - Directory Structure
 
-Generated on: 2026-09-22 04:58:33
+Generated on: 2026-09-22 19:17:44
 
 ```text
 protein-mcp-server/
@@ -211,6 +211,7 @@ protein-mcp-server/
 │       ├── _schemas.test.ts
 │       ├── analyze-collection.tool.test.ts
 │       ├── compare-structures.tool.test.ts
+│       ├── description-hygiene.test.ts
 │       ├── find-similar.tool.test.ts
 │       ├── get-annotations.tool.test.ts
 │       ├── get-structure.tool.test.ts
