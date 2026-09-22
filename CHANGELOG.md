@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.2](changelog/0.8.x/0.8.2.md) — 2026-09-21
+
+Adopts mcp-ts-core 0.13.6's argument-rejection recovery hints and pre-validation aliasing; rewrites server instructions for workflow chaining.
+
 ## [0.8.1](changelog/0.8.x/0.8.1.md) — 2026-09-16
 
 Adopts @cyanheads/mcp-ts-core 0.13.2, declaring stateless HTTP session mode in source, plus dependency and skills-tree maintenance.
