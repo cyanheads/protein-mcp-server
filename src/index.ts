@@ -59,7 +59,7 @@ await createApp({
     'resources/read': { ttlMs: 3_600_000, cacheScope: 'public' },
   },
   instructions:
-    'protein-mcp-server federates experimental (PDB) and predicted (AlphaFold) protein structures: search structures by text, sequence, or organism/method/resolution (protein_search_structures); fetch metadata and coordinate URLs for PDB IDs or UniProt accessions (protein_get_structure); find sequence or fold homologs via mmseqs2 or Foldseek (protein_find_similar); resolve ligands and map binding-site residues (protein_track_ligands); align 2–10 structures with TM-align or jFATCAT (protein_compare_structures); profile the PDB with server-side facet distributions and trends (protein_analyze_collection); and pull UniProt features plus InterPro domains and GO terms (protein_get_annotations).',
+    'Find structures with protein_search_structures, then pass the returned IDs to protein_get_structure for metadata and coordinate URLs, or pass UniProt accessions there for AlphaFold predictions and the best available model. A PDB ID also chains into protein_get_annotations, protein_track_ligands, protein_find_similar, and protein_compare_structures for annotations, binding sites, homologs, and structural alignment, while protein_analyze_collection profiles the whole PDB without pulling rows. A Foldseek search or structural alignment still running when the poll budget elapses returns status "computing" with a ticket (protein_find_similar) or a job UUID (protein_compare_structures); re-call with it to resume that job rather than resubmitting.',
   setup(core) {
     const serverConfig = getServerConfig();
     initRcsbService(core.config, core.storage, serverConfig);
