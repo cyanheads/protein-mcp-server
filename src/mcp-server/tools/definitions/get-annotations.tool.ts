@@ -82,14 +82,7 @@ type AnnotationAmbiguity = z.infer<typeof ambiguitySchema>;
 
 export const getAnnotations = tool('protein_get_annotations', {
   title: 'protein-mcp-server: get annotations',
-  description:
-    'Sequence and functional annotation for a protein: UniProt features (domains, binding sites, PTMs), ' +
-    'natural variants, and InterPro domain/family memberships (Pfam, PROSITE, …) with GO terms. Provide a ' +
-    "UniProt accession directly, or a PDB ID — it is resolved to its UniProt accession via the structure's " +
-    'sequence cross-reference. A multi-chain PDB entry can map to several accessions; the default pick is ' +
-    'deterministic (lowest author chain ID) and the alternatives are listed in "ambiguity" — pass "chain" to ' +
-    'select a specific one. Use "include" to scope which annotation classes are fetched. Every response carries ' +
-    'an "attribution" block with the upstream data licenses and citations.',
+  description: `Sequence and functional annotation for a protein: UniProt features (domains, binding sites, PTMs), natural variants, and InterPro domain/family memberships (Pfam, PROSITE, …) with GO terms. Provide a UniProt accession directly, or a PDB ID — it is resolved to its UniProt accession via the structure's sequence cross-reference. A multi-chain PDB entry can map to several accessions; the default pick is deterministic (lowest author chain ID) and the alternatives are listed in "ambiguity" — pass "chain" to select a specific one. Use "include" to scope which annotation classes are fetched. Every response carries an "attribution" block with the upstream data licenses and citations.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   errors: [
@@ -151,10 +144,7 @@ export const getAnnotations = tool('protein_get_annotations', {
       .max(200)
       .default(50)
       .describe(
-        'Per-class cap (1–200): features, natural variants, and InterPro domains are each independently ' +
-          'truncated to at most this many records. The default keeps a typical annotation set intact while ' +
-          'bounding a densely-annotated protein (a well-studied protein can carry 150+ natural variants); a ' +
-          'truncated class is disclosed in the response notice — raise it to retrieve more.',
+        'Per-class cap (1–200): features, natural variants, and InterPro domains are each independently truncated to at most this many records. The default keeps a typical annotation set intact while bounding a densely-annotated protein (a well-studied protein can carry 150+ natural variants); a truncated class is disclosed in the response notice — raise it to retrieve more.',
       ),
   }),
 

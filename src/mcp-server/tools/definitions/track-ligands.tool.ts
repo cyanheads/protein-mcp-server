@@ -51,15 +51,7 @@ const bindingSiteSchema = z
 
 export const trackLigands = tool('protein_track_ligands', {
   title: 'protein-mcp-server: track ligands',
-  description:
-    'Ligand discovery and binding-site analysis across the PDB. mode "find_ligand" resolves a name or ' +
-    'formula to chemical component IDs with metadata (formula, weight, SMILES), ranked by deposition ' +
-    'frequency — most-deposited component first, so the top hit is the most common match for the name, ' +
-    'not necessarily an exact name-string match. mode "structures_with_ligand" returns PDB entries ' +
-    'containing a ligand (by exact component ID — get the ID from find_ligand first), highest-resolution ' +
-    'first, each with its resolution in Å. mode "binding_site" returns the protein residues lining a ' +
-    "ligand's pocket in a given structure, with contact distances. Binding sites are experimental-only " +
-    '(computed from deposited coordinates; predicted models carry no bound ligands).',
+  description: `Ligand discovery and binding-site analysis across the PDB. mode "find_ligand" resolves a name or formula to chemical component IDs with metadata (formula, weight, SMILES), ranked by deposition frequency — most-deposited component first, so the top hit is the most common match for the name, not necessarily an exact name-string match. mode "structures_with_ligand" returns PDB entries containing a ligand (by exact component ID — get the ID from find_ligand first), highest-resolution first, each with its resolution in Å. mode "binding_site" returns the protein residues lining a ligand's pocket in a given structure, with contact distances. Binding sites are experimental-only (computed from deposited coordinates; predicted models carry no bound ligands).`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   errors: [
