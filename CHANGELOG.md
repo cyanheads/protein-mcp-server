@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.4](changelog/0.8.x/0.8.4.md) — 2026-09-22
+
+Fixes protein_find_similar by:structure exposing only Foldseek's first chain query and ranking hits per-database instead of by combined score.
+
 ## [0.8.3](changelog/0.8.x/0.8.3.md) — 2026-09-22
 
 Fixes computed-model sequence-hit IDs, dead coordinate-file URLs, reversed alignment-resume labeling, and false zero-match notices past the last results page; tool descriptions reworded to drop implementation leaks.

@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.8.3-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.8.4-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.0.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.0%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -82,7 +82,9 @@ All resource data is also reachable via tools — `pdb://{entry_id}` mirrors `pr
 - Both modes accept `start`/`limit` and report `totalCount`, echoing `start` and returning `nextStart` while another page remains; an empty page past the end names the offset in `notice`, distinct from a search with no matches
 - Foldseek targets default to `pdb100` + `afdb50`; override via `databases` (e.g. `afdb-swissprot`, `BFVD`)
 - An async job that exceeds the poll budget returns `status: computing` with a `ticketId` — re-call with `ticket_id` to resume; a completed structure search returns the same ticket so a new `start` pages the finished job
-- Each mode reads only its own controls (`sequence`, `max_evalue`, `min_identity` under `by: sequence`; `ticket_id`, `databases` under `by: structure`) — a field the selected mode can't consume is rejected, not ignored
+- Foldseek searches each chain of a multichain structure as its own query: a structure response covers one query (`query`, 0-based, default `0`) and reports `queryCount`, with a `notice` naming the other queries; pass `query` with `ticket_id` to read another chain's hits from the same job. An out-of-range `query` is rejected (`query_out_of_range`), not answered with an empty list
+- Structure hits are ranked best first by `score` across every searched database (hits without a score last, ties by database then target) before `start`/`limit` paging
+- Each mode reads only its own controls (`sequence`, `max_evalue`, `min_identity` under `by: sequence`; `ticket_id`, `databases`, `query` under `by: structure`) — a field the selected mode can't consume is rejected, not ignored
 - Each hit names the engine and source database it came from
 
 ---

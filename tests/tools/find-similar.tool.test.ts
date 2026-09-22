@@ -3,10 +3,13 @@
  * sequence, PDB-derived, UniProt-derived; metadata enrichment; empty-result
  * notice; no_sequence failure), the by:structure path (Foldseek complete /
  * computing / failed, predicted-source mapping, completed-job paging via
- * totalCount / start / nextStart and a re-usable ticketId), the missing_query
- * guard, the per-mode field rejection, the error envelope each declared reason
- * produces on both client surfaces, and format(). Services and the
- * coordinate-file fetch are mocked.
+ * totalCount / start / nextStart and a re-usable ticketId), query selection on
+ * multichain jobs (query / queryCount, the multi-query notice, out-of-range
+ * rejection), the combined cross-database ranking run through the real Foldseek
+ * service over captured payloads, the missing_query guard, the per-mode field
+ * rejection, the error envelope each declared reason produces on both client
+ * surfaces, and format(). Services, HTTP, and the coordinate-file fetch are
+ * mocked.
  * @module tests/tools/find-similar.tool.test
  */
 
@@ -38,8 +41,12 @@ vi.mock('@/services/rcsb/rcsb-service.js', async (importOriginal) => {
 
 const foldseekSearch = vi.fn();
 const foldseekResume = vi.fn();
-vi.mock('@/services/foldseek/foldseek-service.js', () => ({
-  getFoldseekService: () => ({ search: foldseekSearch, resume: foldseekResume }),
+const fakeFoldseek = { search: foldseekSearch, resume: foldseekResume };
+/** Swapped for a real FoldseekService where a test exercises the service's own ranking and paging. */
+let foldseekImpl: object = fakeFoldseek;
+vi.mock('@/services/foldseek/foldseek-service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/foldseek/foldseek-service.js')>()),
+  getFoldseekService: () => foldseekImpl,
 }));
 
 const getUniProtSequence = vi.fn();
@@ -54,13 +61,23 @@ vi.mock('@/services/alphafold/alphafold-service.js', () => ({
 
 vi.mock('@/services/shared/http.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/services/shared/http.js')>();
-  return { ...actual, fetchText: vi.fn() };
+  return { ...actual, fetchJson: vi.fn(), fetchText: vi.fn() };
 });
 
 import { findSimilar } from '@/mcp-server/tools/definitions/find-similar.tool.js';
-import { fetchText } from '@/services/shared/http.js';
+import { FoldseekService } from '@/services/foldseek/foldseek-service.js';
+import { fetchJson, fetchText } from '@/services/shared/http.js';
 import { entryIdOf } from '@/services/shared/identifiers.js';
+import {
+  QUERIES_1CRN,
+  QUERIES_4HHB,
+  RESULT_1CRN_Q0,
+  RESULT_4HHB_Q0,
+  RESULT_4HHB_Q1,
+  RESULT_EMPTY_QUERY,
+} from '../fixtures/foldseek-captures.js';
 
+const fetchJsonMock = vi.mocked(fetchJson);
 const fetchTextMock = vi.mocked(fetchText);
 const ctx = () => createMockContext({ errors: findSimilar.errors });
 
@@ -74,7 +91,38 @@ const PDB_HIT = {
   score: 800,
 };
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  foldseekImpl = fakeFoldseek;
+});
+
+/** A completed multichain (4HHB-shaped) outcome as the service hands it to the tool. */
+const multichain = (over: Record<string, unknown> = {}) => ({
+  status: 'complete',
+  ticketId: 'tkt-4hhb',
+  query: 0,
+  queryCount: 4,
+  total: 1914,
+  hits: [PDB_HIT],
+  ...over,
+});
+
+type StructureResult = {
+  structuredContent: {
+    hits: Array<{ id: string; score?: number; database?: string }>;
+    nextStart?: number;
+    notice?: string;
+    query?: number;
+    queryCount?: number;
+    start: number;
+    ticketId?: string;
+    totalCount: number;
+  };
+  content: Array<{ text: string }>;
+};
+
+const renderedText = (result: StructureResult) =>
+  result.content.map((block) => block.text).join('\n');
 
 describe('protein_find_similar — by:sequence', () => {
   it('searches a directly-supplied sequence and enriches hits with entry metadata', async () => {
@@ -704,6 +752,262 @@ describe('protein_find_similar — by:structure', () => {
   });
 });
 
+describe('protein_find_similar — query selection on multichain jobs (#63)', () => {
+  it('reads query 0 by default and discloses the other queries on both surfaces', async () => {
+    fetchTextMock.mockResolvedValue('data_4HHB');
+    foldseekSearch.mockResolvedValue(multichain());
+
+    const result = (await runToolContract(findSimilar, {
+      by: 'structure',
+      pdb_id: '4HHB',
+      limit: 1,
+    })) as StructureResult;
+
+    expect(foldseekSearch.mock.calls[0]?.[0]).toMatchObject({ query: 0 });
+    expect(result.structuredContent).toMatchObject({
+      query: 0,
+      queryCount: 4,
+      ticketId: 'tkt-4hhb',
+      totalCount: 1914,
+    });
+    const notice = String(result.structuredContent.notice);
+    expect(notice).toContain('This job holds 4 queries');
+    expect(notice).toContain('these hits are for query 0');
+    expect(notice).toContain('ticket_id "tkt-4hhb" and a different query (0–3)');
+    const text = renderedText(result);
+    expect(text).toContain('**Query:** 0 of 4 (0-based)');
+    expect(text).toContain('This job holds 4 queries');
+  });
+
+  it('forwards an explicit query and echoes it', async () => {
+    fetchTextMock.mockResolvedValue('data_4HHB');
+    foldseekSearch.mockResolvedValue(multichain({ query: 2 }));
+
+    const result = (await runToolContract(findSimilar, {
+      by: 'structure',
+      pdb_id: '4HHB',
+      query: 2,
+    })) as StructureResult;
+
+    expect(foldseekSearch.mock.calls[0]?.[0]).toMatchObject({ query: 2 });
+    expect(result.structuredContent).toMatchObject({ query: 2, queryCount: 4 });
+    expect(String(result.structuredContent.notice)).toContain('these hits are for query 2');
+    const text = renderedText(result);
+    expect(text).toContain('**Query:** 2 of 4 (0-based)');
+    expect(text).toContain('re-call with ticket_id and query 2 to resume or re-page');
+  });
+
+  it('keeps the query across a ticket_id resume at a different start', async () => {
+    foldseekResume.mockResolvedValue(multichain({ query: 1, total: 1863 }));
+    const c = ctx();
+
+    const out = await findSimilar.handler(
+      findSimilar.input.parse({
+        by: 'structure',
+        ticket_id: 'tkt-4hhb',
+        query: 1,
+        start: 25,
+        limit: 5,
+      }),
+      c,
+    );
+
+    expect(foldseekResume.mock.calls[0]?.[0]).toMatchObject({
+      ticketId: 'tkt-4hhb',
+      query: 1,
+      start: 25,
+      limit: 5,
+    });
+    expect(out).toMatchObject({ query: 1, queryCount: 4, ticketId: 'tkt-4hhb' });
+    expect(getEnrichment(c)).toMatchObject({ totalCount: 1863, start: 25, nextStart: 26 });
+    expect(foldseekSearch).not.toHaveBeenCalled();
+  });
+
+  it('adds no multi-query notice for a single-query job', async () => {
+    fetchTextMock.mockResolvedValue('data_1CRN');
+    foldseekSearch.mockResolvedValue(multichain({ queryCount: 1, total: 179 }));
+
+    const result = (await runToolContract(findSimilar, {
+      by: 'structure',
+      pdb_id: '1CRN',
+    })) as StructureResult;
+
+    expect(result.structuredContent).toMatchObject({ query: 0, queryCount: 1 });
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    expect(renderedText(result)).toContain('**Query:** 0 of 1 (0-based)');
+  });
+
+  it('keeps the past-end and multi-query notices together on an empty page', async () => {
+    fetchTextMock.mockResolvedValue('data_4HHB');
+    foldseekSearch.mockResolvedValue(multichain({ hits: [] }));
+
+    const result = (await runToolContract(findSimilar, {
+      by: 'structure',
+      pdb_id: '4HHB',
+      start: 5000,
+    })) as StructureResult;
+
+    const notice = String(result.structuredContent.notice);
+    expect(notice).toContain("start 5000 is past the end of this job's 1914 hits");
+    expect(notice).toContain('This job holds 4 queries');
+  });
+
+  it('keeps the no-hits and multi-query notices together when the selected query matched nothing', async () => {
+    fetchTextMock.mockResolvedValue('data_4HHB');
+    foldseekSearch.mockResolvedValue(multichain({ total: 0, hits: [] }));
+    const c = ctx();
+    await findSimilar.handler(findSimilar.input.parse({ by: 'structure', pdb_id: '4HHB' }), c);
+    const notice = String(getEnrichment(c).notice);
+    expect(notice).toContain('no fold-similar hits in the selected databases');
+    expect(notice).toContain('This job holds 4 queries');
+  });
+
+  it('names the query in the resume instruction while a non-zero-query job is computing', async () => {
+    fetchTextMock.mockResolvedValue('data_4HHB');
+    foldseekSearch.mockResolvedValue({ status: 'computing', ticketId: 'slow' });
+    const c = ctx();
+    const out = await findSimilar.handler(
+      findSimilar.input.parse({ by: 'structure', pdb_id: '4HHB', query: 2 }),
+      c,
+    );
+    expect(out).toMatchObject({ status: 'computing', ticketId: 'slow', query: 2 });
+    expect(String(getEnrichment(c).notice)).toContain('ticket_id set to "slow" and query 2');
+  });
+
+  it('rejects a negative or fractional query at the schema', () => {
+    for (const query of [-1, 1.5]) {
+      expect(findSimilar.input.safeParse({ by: 'structure', pdb_id: '4HHB', query }).success).toBe(
+        false,
+      );
+    }
+  });
+
+  it('throws query_out_of_range with the ticket and valid range when the index is past the last query', async () => {
+    fetchTextMock.mockResolvedValue('data_4HHB');
+    foldseekSearch.mockResolvedValue({
+      status: 'query_out_of_range',
+      ticketId: 'tkt-4hhb',
+      query: 4,
+      queryCount: 4,
+    });
+
+    await expect(
+      findSimilar.handler(
+        findSimilar.input.parse({ by: 'structure', pdb_id: '4HHB', query: 4 }),
+        ctx(),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      message: expect.stringContaining('query 4 is out of range'),
+      data: {
+        reason: 'query_out_of_range',
+        recovery: {
+          hint: expect.stringContaining('ticket_id "tkt-4hhb" and query between 0 and 3'),
+        },
+      },
+    });
+  });
+});
+
+describe('protein_find_similar — combined ranking through the real Foldseek service (#64)', () => {
+  /** Route the real service's upstream calls by URL; unknown query indices answer empty. */
+  const routeFoldseek = (queries: unknown, results: Record<number, unknown>) =>
+    fetchJsonMock.mockImplementation(async (url: string) => {
+      if (url === 'https://foldseek.test/api/ticket') return { id: 'live-shaped' };
+      if (url.includes('/api/ticket/')) return { status: 'COMPLETE' };
+      if (url.includes('/api/result/queries/')) return queries;
+      const perQuery = /\/api\/result\/[^/]+\/(\d+)$/.exec(url);
+      if (perQuery) return results[Number(perQuery[1])] ?? RESULT_EMPTY_QUERY;
+      throw new Error(`unexpected Foldseek URL ${url}`);
+    });
+
+  beforeEach(() => {
+    foldseekImpl = new FoldseekService(
+      {} as never,
+      {} as never,
+      { foldseekBaseUrl: 'https://foldseek.test' } as never,
+    );
+    fetchTextMock.mockResolvedValue('data_1CRN');
+  });
+
+  it('returns the two globally highest-scoring hits for limit 2, regardless of database', async () => {
+    routeFoldseek(QUERIES_1CRN, { 0: RESULT_1CRN_Q0 });
+
+    const result = (await runToolContract(findSimilar, {
+      by: 'structure',
+      pdb_id: '1CRN',
+      limit: 2,
+    })) as StructureResult;
+
+    expect(result.structuredContent.hits).toMatchObject([
+      { id: '1CRN', score: 357, database: 'pdb100' },
+      { id: '1EJG', score: 352, database: 'pdb100' },
+    ]);
+    expect(result.structuredContent).toMatchObject({
+      totalCount: 6,
+      start: 0,
+      nextStart: 2,
+      query: 0,
+      queryCount: 1,
+    });
+    const text = renderedText(result);
+    expect(text.indexOf('### 1CRN')).toBeGreaterThan(-1);
+    expect(text.indexOf('### 1CRN')).toBeLessThan(text.indexOf('### 1EJG'));
+    expect(text).not.toContain('P01541');
+  });
+
+  it('never repeats a hit across pages of the same ticket', async () => {
+    routeFoldseek(QUERIES_1CRN, { 0: RESULT_1CRN_Q0 });
+    const ids: string[] = [];
+    for (const start of [0, 2, 4]) {
+      const out = await findSimilar.handler(
+        findSimilar.input.parse({ by: 'structure', ticket_id: 'live-shaped', start, limit: 2 }),
+        ctx(),
+      );
+      ids.push(...out.hits.map((h) => h.id));
+    }
+    expect(ids).toEqual(['1CRN', '1EJG', '3NIR', 'P01541', 'A0A1J3H3C1', 'A0A7J6GU35']);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('ranks within the selected query only and reports the ticket query count', async () => {
+    routeFoldseek(QUERIES_4HHB, { 0: RESULT_4HHB_Q0, 1: RESULT_4HHB_Q1 });
+
+    const result = (await runToolContract(findSimilar, {
+      by: 'structure',
+      pdb_id: '4HHB',
+      query: 1,
+    })) as StructureResult;
+
+    expect(result.structuredContent.hits.map((h) => h.id)).toEqual([
+      '1O1K',
+      '2DN2',
+      'A0A8D8CFN8',
+      'A0A1K0GGI2',
+    ]);
+    expect(result.structuredContent).toMatchObject({ query: 1, queryCount: 4, totalCount: 4 });
+  });
+
+  it('surfaces an out-of-range query as a typed error instead of an empty result', async () => {
+    routeFoldseek(QUERIES_4HHB, { 0: RESULT_4HHB_Q0 });
+
+    const result = (await runToolContract(findSimilar, {
+      by: 'structure',
+      pdb_id: '4HHB',
+      query: 4,
+    })) as {
+      isError?: boolean;
+      structuredContent: { error: { code: number; data: { reason: string } } };
+    };
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({
+      code: JsonRpcErrorCode.InvalidParams,
+      data: { reason: 'query_out_of_range' },
+    });
+  });
+});
+
 describe('protein_find_similar — per-mode field rejection (#57)', () => {
   it.each([
     ['sequence', { sequence: 'MVLS' }],
@@ -730,6 +1034,8 @@ describe('protein_find_similar — per-mode field rejection (#57)', () => {
   it.each([
     ['ticket_id', { ticket_id: 'tkt-1' }],
     ['databases', { databases: ['afdb-swissprot'] }],
+    ['query', { query: 1 }],
+    ['query (zero)', { query: 0 }],
   ])('rejects %s under by:"sequence", naming the accepting mode', async (_field, extra) => {
     await expect(
       findSimilar.handler(
@@ -902,6 +1208,21 @@ describe('protein_find_similar — error envelope on both client surfaces', () =
       reason: 'ticket_not_found',
       hint: declaredRecovery('ticket_not_found'),
       terms: '(reason ticket_not_found)',
+    },
+    {
+      name: 'query_out_of_range',
+      input: { by: 'structure', ticket_id: 'tkt-4hhb', query: 9 },
+      setup: () =>
+        foldseekResume.mockResolvedValue({
+          status: 'query_out_of_range',
+          ticketId: 'tkt-4hhb',
+          query: 9,
+          queryCount: 4,
+        }),
+      code: JsonRpcErrorCode.InvalidParams,
+      reason: 'query_out_of_range',
+      hint: expect.stringContaining('query between 0 and 3'),
+      terms: '(reason query_out_of_range)',
     },
   ])('$name carries reason and recovery hint on structuredContent and content[]', async (c) => {
     c.setup?.();

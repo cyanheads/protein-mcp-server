@@ -1,6 +1,6 @@
 # protein-mcp-server - Directory Structure
 
-Generated on: 2026-09-22 19:17:44
+Generated on: 2026-09-22 20:15:59
 
 ```text
 protein-mcp-server/
@@ -185,6 +185,8 @@ protein-mcp-server/
 ├── tests/
 │   ├── config/
 │   │   └── server-config.test.ts
+│   ├── fixtures/
+│   │   └── foldseek-captures.ts
 │   ├── resources/
 │   │   ├── af-summary.resource.test.ts
 │   │   └── pdb-summary.resource.test.ts
