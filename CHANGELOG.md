@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.5](changelog/0.8.x/0.8.5.md) — 2026-09-22
+
+protein_track_ligands find_ligand reports candidate-pool totals, binding_site adds author residue numbering and pages ligand instances.
+
 ## [0.8.4](changelog/0.8.x/0.8.4.md) — 2026-09-22
 
 Fixes protein_find_similar by:structure exposing only Foldseek's first chain query and ranking hits per-database instead of by combined score.
