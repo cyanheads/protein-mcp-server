@@ -92,9 +92,11 @@ All resource data is also reachable via tools — `pdb://{entry_id}` mirrors `pr
 ### `protein_track_ligands` <sub>tool</sub>
 
 - `mode: find_ligand` resolves a name or formula to chemical component IDs with formula, weight, SMILES, and InChIKey — ranked by deposition frequency, most-common match first
+- `totalCount` and `candidatesConsidered` report how many components matched and how many were ranked; a broad name whose matches exceed the candidate pool gets a `notice` to narrow the query
 - A formula-shaped `query` matches on exact composition, spaced (`C29 H31 N7 O`) or unspaced; anything else (a component ID included) matches on name and synonyms
 - `mode: structures_with_ligand` returns PDB entries containing a ligand by exact component ID, with `start`/`limit` paging and `nextStart` while another page remains; a page past the end names the offset in `notice` instead of reporting no entries
-- `mode: binding_site` returns the protein residues lining a ligand's pocket in a structure, with contact distances
+- `mode: binding_site` returns the protein residues lining a ligand's pocket in a structure, with contact distances; ligand instances page with `start`/`limit` like `structures_with_ligand`
+- Pocket residues carry both mmCIF label numbering (`asymId`, `seqId`) and author numbering (`authAsymId`, `authSeqId`) — 1IEP's imatinib pocket lists label THR93 as author THR315; the ligand instance reports its own author chain and residue number
 - Binding sites are experimental-only — computed from deposited coordinates; predicted models carry no bound ligands
 
 ---

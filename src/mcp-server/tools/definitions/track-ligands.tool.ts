@@ -33,17 +33,47 @@ const chemCompSchema = z
 const bindingSiteSchema = z
   .object({
     ligandCompId: z.string().describe('Bound ligand chemical component ID.'),
-    ligandAsymId: z.string().optional().describe('Ligand instance chain (asym) ID.'),
+    ligandAsymId: z
+      .string()
+      .optional()
+      .describe(
+        'Author chain ID (auth_asym_id) of the ligand instance — the author namespace, unlike residues[].asymId.',
+      ),
+    ligandAuthSeqId: z
+      .number()
+      .optional()
+      .describe('Author residue number (auth_seq_id) of the ligand instance.'),
     residues: z
       .array(
         z
           .object({
             residueCompId: z.string().describe('Interacting residue type (e.g. ASP).'),
-            asymId: z.string().describe('Chain ID the residue belongs to.'),
-            seqId: z.number().optional().describe('Residue sequence position.'),
+            asymId: z
+              .string()
+              .describe(
+                "mmCIF label_asym_id of the residue's chain (label namespace, paired with seqId). Can differ from authAsymId.",
+              ),
+            seqId: z
+              .number()
+              .optional()
+              .describe(
+                'mmCIF label_seq_id: position in the entity sequence (label namespace). Not the deposited residue number; see authSeqId.',
+              ),
+            authAsymId: z
+              .string()
+              .optional()
+              .describe(
+                "Author chain ID (auth_asym_id) of the residue's chain, as deposited and as most structure viewers label it.",
+              ),
+            authSeqId: z
+              .number()
+              .optional()
+              .describe(
+                'Author residue number (auth_seq_id), as deposited and as most literature and viewers number it. Related to seqId by no fixed offset; insertion codes are not reported.',
+              ),
             distance: z.number().optional().describe('Contact distance to the ligand in Å.'),
           })
-          .describe('A pocket residue in contact with the ligand.'),
+          .describe('A pocket residue in contact with the ligand, in both numbering namespaces.'),
       )
       .describe('Protein residues lining the pocket, nearest first.'),
   })
@@ -51,7 +81,7 @@ const bindingSiteSchema = z
 
 export const trackLigands = tool('protein_track_ligands', {
   title: 'protein-mcp-server: track ligands',
-  description: `Ligand discovery and binding-site analysis across the PDB. mode "find_ligand" resolves a name or formula to chemical component IDs with metadata (formula, weight, SMILES), ranked by deposition frequency — most-deposited component first, so the top hit is the most common match for the name, not necessarily an exact name-string match. mode "structures_with_ligand" returns PDB entries containing a ligand (by exact component ID — get the ID from find_ligand first), highest-resolution first, each with its resolution in Å. mode "binding_site" returns the protein residues lining a ligand's pocket in a given structure, with contact distances. Binding sites are experimental-only (computed from deposited coordinates; predicted models carry no bound ligands).`,
+  description: `Ligand discovery and binding-site analysis across the PDB. mode "find_ligand" resolves a name or formula to chemical component IDs with metadata (formula, weight, SMILES), ranked by deposition frequency — most-deposited component first, so the top hit is the most common match for the name, not necessarily an exact name-string match. The ranking covers a bounded candidate pool; totalCount and candidatesConsidered report how many components matched and how many were ranked. mode "structures_with_ligand" returns PDB entries containing a ligand (by exact component ID — get the ID from find_ligand first), highest-resolution first, each with its resolution in Å. mode "binding_site" returns the protein residues lining a ligand's pocket in a given structure, with contact distances, each numbered in both the mmCIF label namespace (asymId, seqId) and the author namespace (authAsymId, authSeqId) used by deposited coordinates and most literature. Binding sites are experimental-only (computed from deposited coordinates; predicted models carry no bound ligands).`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   errors: [
@@ -95,7 +125,9 @@ export const trackLigands = tool('protein_track_ligands', {
       .int()
       .min(0)
       .default(0)
-      .describe('Zero-based result offset (mode structures_with_ligand only).'),
+      .describe(
+        'Zero-based result offset (modes structures_with_ligand and binding_site; binding_site pages ligand instances).',
+      ),
   }),
 
   output: z.object({
@@ -134,23 +166,31 @@ export const trackLigands = tool('protein_track_ligands', {
     totalCount: z
       .number()
       .optional()
-      .describe('Total upstream matches before pagination (structures_with_ligand).'),
+      .describe(
+        'Total upstream matches before any local narrowing: PDB entries containing the component (structures_with_ligand), chemical components matching the query (find_ligand), or ligand instances with pocket contacts (binding_site).',
+      ),
+    candidatesConsidered: z
+      .number()
+      .optional()
+      .describe(
+        'Chemical components pulled into the deposition-frequency ranking (find_ligand). Below totalCount when the candidate pool was truncated; the ranking then covers only these candidates.',
+      ),
     start: z
       .number()
       .optional()
-      .describe('Zero-based offset of the structures_with_ligand result page.'),
+      .describe('Zero-based offset of the structures_with_ligand or binding_site result page.'),
     nextStart: z
       .number()
       .optional()
       .describe(
-        'Offset for the next structures_with_ligand page; absent on the final or past-end page.',
+        'Offset for the next structures_with_ligand or binding_site page; absent on the final or past-end page.',
       ),
     resolvedCompId: z.string().optional().describe('The chemical component ID used to query.'),
     notice: z
       .string()
       .optional()
       .describe(
-        'Advisory note: a structures_with_ligand page that is empty because no entry contains the component or because start is past the end, or binding-site instances beyond limit that were left out.',
+        'Advisory note: a find_ligand candidate pool smaller than the upstream match count, a structures_with_ligand page that is empty because no entry contains the component or because start is past the end, or a binding_site page that leaves instances for a later start or starts past the last instance.',
       ),
   },
 
@@ -167,10 +207,20 @@ export const trackLigands = tool('protein_track_ligands', {
       // deposition frequency and slice to the limit. The canonical component (e.g.
       // HEM for "heme") is the most-deposited but RCSB name-ranks it low, so a small
       // `limit` would never fetch it — the count re-rank can only reorder what it
-      // pulls. Re-rank, never filter. RCSB returns a bounded candidate set per name,
-      // so a pool of ~25 stays cheap while still covering low-name-ranked canonicals.
+      // pulls. Re-rank, never filter. Specific names match a handful of components
+      // ("ATP": 7), which a pool of ~25 covers cheaply; broad words match far more
+      // ("iron": 119), so the pool can truncate.
       const candidatePool = Math.max(input.limit, 25);
-      const ids = await rcsb.findChemComps(input.query, candidatePool, ctx);
+      const { ids, total } = await rcsb.findChemComps(input.query, candidatePool, ctx);
+      // A name with more matches than the pool holds ranks only the pool, so a
+      // more-deposited match beyond it can be missing — disclose that.
+      ctx.enrich.total(total);
+      ctx.enrich({ candidatesConsidered: ids.length });
+      if (ids.length < total) {
+        ctx.enrich.notice(
+          `${ids.length} of ${total} components matching "${input.query}" were ranked by deposition frequency; the ranking covers only those ${ids.length}, so a more-deposited match can be missing. Narrow the query (a more specific name, a synonym, or a formula) to rank the full match set.`,
+        );
+      }
       const resolved = await mapWithConcurrency(ids, cfg.fanoutConcurrency, async (id) => {
         const [chem, depositionCount] = await Promise.all([
           rcsb.getChemComp(id, ctx),
@@ -256,15 +306,27 @@ export const trackLigands = tool('protein_track_ligands', {
         },
       );
     }
-    // Cap binding-site INSTANCES to the shared limit (mode-consistent top-N; the
-    // other two modes already bound their results). Disclose the drop via notice.
-    const bindingSites = sites.slice(0, input.limit);
-    if (sites.length > input.limit) {
+    // Page binding-site INSTANCES with the shared start/limit. An entry can hold
+    // more instances of one ligand than the limit ceiling (6QNR: 994 MG), so start
+    // is the only way to reach the tail.
+    const bindingSites = sites.slice(input.start, input.start + input.limit);
+    const nextStart = input.start + bindingSites.length;
+    const where = `${input.pdb_id.toUpperCase()}${compId ? ` for ${compId}` : ''}`;
+    ctx.enrich.total(sites.length);
+    ctx.enrich({
+      start: input.start,
+      ...(nextStart < sites.length ? { nextStart } : {}),
+      ...(compId ? { resolvedCompId: compId } : {}),
+    });
+    if (bindingSites.length === 0) {
       ctx.enrich.notice(
-        `Showing ${input.limit} of ${sites.length} binding-site instances in ${input.pdb_id.toUpperCase()}${compId ? ` for ${compId}` : ''}; raise limit to see more.`,
+        `start ${input.start} is past the end of the ${sites.length} binding-site instances in ${where}. Re-call with a lower start to read a populated page.`,
+      );
+    } else if (nextStart < sites.length) {
+      ctx.enrich.notice(
+        `Showing ${bindingSites.length} of ${sites.length} binding-site instances in ${where}; re-call with start ${nextStart} for the next page.`,
       );
     }
-    if (compId) ctx.enrich({ resolvedCompId: compId });
     return { mode: input.mode, bindingSites };
   },
 
@@ -290,14 +352,29 @@ export const trackLigands = tool('protein_track_ligands', {
           lines.push(`- ${s.id} — ${s.resolution.toFixed(2)} Å`);
       }
     }
-    for (const site of result.bindingSites ?? []) {
+    if (result.bindingSites?.length) {
       lines.push(
-        `\n### Ligand ${site.ligandCompId}${site.ligandAsymId ? ` (chain ${site.ligandAsymId})` : ''}`,
+        '\nResidues are numbered as label_seq_id (chain = label_asym_id); the author numbering follows as auth_seq_id (chain = auth_asym_id) where reported.',
+      );
+    }
+    for (const site of result.bindingSites ?? []) {
+      const ligandIds = [
+        site.ligandAsymId ? `author chain ${site.ligandAsymId}` : null,
+        site.ligandAuthSeqId != null ? `residue ${site.ligandAuthSeqId}` : null,
+      ].filter(Boolean);
+      lines.push(
+        `\n### Ligand ${site.ligandCompId}${ligandIds.length > 0 ? ` (${ligandIds.join(', ')})` : ''}`,
       );
       for (const r of site.residues) {
         const pos = r.seqId != null ? `${r.residueCompId}${r.seqId}` : r.residueCompId;
+        const author = [
+          r.authSeqId != null ? `author ${r.residueCompId}${r.authSeqId}` : null,
+          r.authAsymId ? `${r.authSeqId != null ? '' : 'author '}chain ${r.authAsymId}` : null,
+        ].filter(Boolean);
         const dist = r.distance != null ? ` — ${r.distance.toFixed(2)} Å` : '';
-        lines.push(`- ${pos} (chain ${r.asymId})${dist}`);
+        lines.push(
+          `- ${pos} (chain ${r.asymId}${author.length > 0 ? `; ${author.join(', ')}` : ''})${dist}`,
+        );
       }
     }
     return [{ type: 'text', text: lines.join('\n') }];

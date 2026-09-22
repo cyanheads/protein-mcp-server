@@ -160,26 +160,45 @@ export interface CoordinateUrls {
   pdb?: string;
 }
 
-/** One protein residue lining a ligand's binding pocket. */
+/**
+ * One protein residue lining a ligand's binding pocket, in both numbering
+ * namespaces. `asymId`/`seqId` are mmCIF label identifiers; `authAsymId`/
+ * `authSeqId` are the depositor's (author) identifiers. The two are related by
+ * no fixed offset — 1IEP label THR93 is author THR315.
+ */
 export interface BindingResidue {
-  /** Author/asym chain ID the residue belongs to. */
+  /** mmCIF `label_asym_id` of the residue's chain. */
   asymId: string;
+  /** Author chain ID (`auth_asym_id`), from the entry's per-instance chain pairs. */
+  authAsymId?: string;
+  /** Author residue number (`auth_seq_id`). */
+  authSeqId?: number;
   /** Contact distance to the ligand in Å. */
   distance?: number;
   /** Residue chemical component ID (e.g. `ASP`). */
   residueCompId: string;
-  /** Sequence position of the residue. */
+  /** mmCIF `label_seq_id` — position in the entity sequence. */
   seqId?: number;
 }
 
 /** A ligand instance and the residues lining its pocket. */
 export interface BindingSite {
-  /** Ligand instance chain (asym) ID. */
+  /** Ligand instance author chain ID (`auth_asym_id`). */
   ligandAsymId?: string;
+  /** Ligand instance author residue number (`auth_seq_id`). */
+  ligandAuthSeqId?: number;
   /** Ligand chemical component ID. */
   ligandCompId: string;
   /** Interacting protein residues, nearest first. */
   residues: BindingResidue[];
+}
+
+/** Candidate chemical components for a name or formula search. */
+export interface ChemCompMatches {
+  /** Candidate component IDs pulled from the search, in upstream order. */
+  ids: string[];
+  /** Total components upstream matched, which can exceed `ids.length`. */
+  total: number;
 }
 
 /** Chemical-component metadata for a ligand. */

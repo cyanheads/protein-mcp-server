@@ -1,7 +1,8 @@
 /**
  * @fileoverview Tests for the RCSB service GraphQL/REST methods exercised through
  * realistic upstream payloads (HTTP mocked): entry-metadata normalization, UniProt
- * xref resolution, sequence extraction, binding-site assembly with distance sort,
+ * xref resolution, sequence extraction, binding-site assembly with distance sort
+ * and label/author residue numbering (per-instance chain pairing),
  * chem-comp normalization (SMILES/InChIKey fallback chain) with the 404 → null
  * branch, sequence/ligand/chem-comp search hit normalization, the
  * `results_content_type` scope emitted on every search path, and the GraphQL
@@ -471,6 +472,265 @@ describe('RcsbService.getBindingSites', () => {
     );
     expect(await service().getBindingSites('4HHB', undefined, createMockContext())).toEqual([]);
   });
+
+  /**
+   * Live 1IEP binding-site payload, trimmed to the STI instance in chain A and
+   * three of its 23 contacts. Label and author chain IDs coincide here; the
+   * residue numbering does not (label THR93 is author THR315).
+   */
+  const BINDING_1IEP = {
+    entry: {
+      polymer_entities: [
+        {
+          polymer_entity_instances: [
+            {
+              rcsb_polymer_entity_instance_container_identifiers: {
+                asym_id: 'A',
+                auth_asym_id: 'A',
+              },
+            },
+            {
+              rcsb_polymer_entity_instance_container_identifiers: {
+                asym_id: 'B',
+                auth_asym_id: 'B',
+              },
+            },
+          ],
+        },
+      ],
+      nonpolymer_entities: [
+        {
+          rcsb_nonpolymer_entity_container_identifiers: { nonpolymer_comp_id: 'STI' },
+          nonpolymer_entity_instances: [
+            {
+              rcsb_nonpolymer_entity_instance_container_identifiers: {
+                asym_id: 'G',
+                auth_asym_id: 'A',
+                auth_seq_id: '201',
+              },
+              rcsb_target_neighbors: [
+                {
+                  target_asym_id: 'A',
+                  target_comp_id: 'THR',
+                  target_seq_id: 93,
+                  target_auth_seq_id: 315,
+                  distance: 2.883,
+                },
+                {
+                  target_asym_id: 'A',
+                  target_comp_id: 'ILE',
+                  target_seq_id: 138,
+                  target_auth_seq_id: 360,
+                  distance: 2.668,
+                },
+                {
+                  target_asym_id: 'A',
+                  target_comp_id: 'MET',
+                  target_seq_id: 96,
+                  target_auth_seq_id: 318,
+                  distance: 2.899,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  };
+
+  it('carries author residue numbering beside the label numbering (1IEP STI, #69)', async () => {
+    fetchJsonMock.mockResolvedValue(gql(BINDING_1IEP));
+    const [site] = await service().getBindingSites('1IEP', 'STI', createMockContext());
+
+    expect(site).toMatchObject({ ligandCompId: 'STI', ligandAsymId: 'A', ligandAuthSeqId: 201 });
+    expect(site?.residues).toEqual([
+      {
+        residueCompId: 'ILE',
+        asymId: 'A',
+        seqId: 138,
+        authAsymId: 'A',
+        authSeqId: 360,
+        distance: 2.668,
+      },
+      {
+        residueCompId: 'THR',
+        asymId: 'A',
+        seqId: 93,
+        authAsymId: 'A',
+        authSeqId: 315,
+        distance: 2.883,
+      },
+      {
+        residueCompId: 'MET',
+        asymId: 'A',
+        seqId: 96,
+        authAsymId: 'A',
+        authSeqId: 318,
+        distance: 2.899,
+      },
+    ]);
+  });
+
+  it('maps a divergent label chain to its author chain per instance, not by container-array index (6QNR, #69)', async () => {
+    // Live 6QNR: entity 9's container arrays are each sorted on their own —
+    // asym_ids ["I","OB"], auth_asym_ids ["82","8E"] — so pairing them by index
+    // would map label I to author 82. The per-instance identifiers say I is 8E.
+    fetchJsonMock.mockResolvedValue(
+      gql({
+        entry: {
+          polymer_entities: [
+            {
+              rcsb_polymer_entity_container_identifiers: {
+                asym_ids: ['I', 'OB'],
+                auth_asym_ids: ['82', '8E'],
+              },
+              polymer_entity_instances: [
+                {
+                  rcsb_polymer_entity_instance_container_identifiers: {
+                    asym_id: 'I',
+                    auth_asym_id: '8E',
+                  },
+                },
+                {
+                  rcsb_polymer_entity_instance_container_identifiers: {
+                    asym_id: 'OB',
+                    auth_asym_id: '82',
+                  },
+                },
+              ],
+            },
+            {
+              polymer_entity_instances: [
+                {
+                  rcsb_polymer_entity_instance_container_identifiers: {
+                    asym_id: 'A',
+                    auth_asym_id: '13',
+                  },
+                },
+                {
+                  rcsb_polymer_entity_instance_container_identifiers: {
+                    asym_id: 'GB',
+                    auth_asym_id: '1G',
+                  },
+                },
+              ],
+            },
+          ],
+          nonpolymer_entities: [
+            {
+              rcsb_nonpolymer_entity_container_identifiers: { nonpolymer_comp_id: 'MG' },
+              nonpolymer_entity_instances: [
+                {
+                  rcsb_nonpolymer_entity_instance_container_identifiers: {
+                    asym_id: 'SG',
+                    auth_asym_id: '13',
+                    auth_seq_id: '1687',
+                  },
+                  rcsb_target_neighbors: [
+                    {
+                      target_asym_id: 'A',
+                      target_comp_id: 'G',
+                      target_seq_id: 1353,
+                      target_auth_seq_id: 1370,
+                      distance: 2.627,
+                    },
+                    {
+                      target_asym_id: 'I',
+                      target_comp_id: 'VAL',
+                      target_seq_id: 109,
+                      target_auth_seq_id: 109,
+                      distance: 4.124,
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    const [site] = await service().getBindingSites('6QNR', 'MG', createMockContext());
+
+    expect(site).toMatchObject({ ligandAsymId: '13', ligandAuthSeqId: 1687 });
+    expect(site?.residues).toEqual([
+      {
+        residueCompId: 'G',
+        asymId: 'A',
+        seqId: 1353,
+        authAsymId: '13',
+        authSeqId: 1370,
+        distance: 2.627,
+      },
+      {
+        residueCompId: 'VAL',
+        asymId: 'I',
+        seqId: 109,
+        authAsymId: '8E',
+        authSeqId: 109,
+        distance: 4.124,
+      },
+    ]);
+  });
+
+  it('omits author identifiers upstream does not report instead of guessing them (#69)', async () => {
+    fetchJsonMock.mockResolvedValue(
+      gql({
+        entry: {
+          polymer_entities: [
+            {
+              polymer_entity_instances: [
+                {
+                  rcsb_polymer_entity_instance_container_identifiers: {
+                    asym_id: 'A',
+                    auth_asym_id: 'A',
+                  },
+                },
+              ],
+            },
+          ],
+          nonpolymer_entities: [
+            {
+              rcsb_nonpolymer_entity_container_identifiers: { nonpolymer_comp_id: 'HEM' },
+              nonpolymer_entity_instances: [
+                {
+                  rcsb_nonpolymer_entity_instance_container_identifiers: { auth_asym_id: 'A' },
+                  rcsb_target_neighbors: [
+                    // Label chain Z has no polymer instance in the payload; no author seq either.
+                    {
+                      target_asym_id: 'Z',
+                      target_comp_id: 'HIS',
+                      target_seq_id: 87,
+                      distance: 2.1,
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    const [site] = await service().getBindingSites('4HHB', undefined, createMockContext());
+    expect(site).not.toHaveProperty('ligandAuthSeqId');
+    expect(site?.residues[0]).toEqual({
+      residueCompId: 'HIS',
+      asymId: 'Z',
+      seqId: 87,
+      distance: 2.1,
+    });
+  });
+
+  it('selects the author numbering and per-instance chain pairs in the binding-site query (#69)', async () => {
+    fetchJsonMock.mockResolvedValue(gql({ entry: null }));
+    await service().getBindingSites('1IEP', undefined, createMockContext());
+    const opts = fetchJsonMock.mock.calls[0]?.[2] as unknown as { body: string };
+    const query = JSON.parse(opts.body).query as string;
+    expect(query).toContain('target_auth_seq_id');
+    expect(query).toContain('auth_seq_id');
+    expect(query).toMatch(
+      /polymer_entity_instances\s*\{\s*rcsb_polymer_entity_instance_container_identifiers\s*\{\s*asym_id\s+auth_asym_id\s*\}/,
+    );
+  });
 });
 
 describe('RcsbService.getChemComp', () => {
@@ -595,15 +855,39 @@ describe('RcsbService search helpers', () => {
     expect(body.request_options.sort).toBeUndefined();
   });
 
-  it('findChemComps returns only the hit identifiers', async () => {
+  it('findChemComps returns the hit identifiers with the upstream total (#67)', async () => {
+    // Live "ATP" name/synonym search: seven components, all within one page.
     fetchJsonMock.mockResolvedValue({
+      result_type: 'mol_definition',
+      total_count: 7,
       result_set: [
-        { identifier: 'HEM', score: 1 },
-        { identifier: 'HEC', score: 0.8 },
+        { identifier: 'PRT', score: 1 },
+        { identifier: 'JSQ', score: 0.936 },
+        { identifier: 'AGS', score: 0.509 },
+        { identifier: 'ATP', score: 0.345 },
+        { identifier: 'DDS', score: 0.338 },
+        { identifier: 'APC', score: 0.287 },
+        { identifier: 'A1L15', score: 0.185 },
       ],
     });
-    const out = await service().findChemComps('heme', 25, createMockContext());
-    expect(out).toEqual(['HEM', 'HEC']);
+    const out = await service().findChemComps('ATP', 25, createMockContext());
+    expect(out).toEqual({
+      ids: ['PRT', 'JSQ', 'AGS', 'ATP', 'DDS', 'APC', 'A1L15'],
+      total: 7,
+    });
+  });
+
+  it('findChemComps keeps an upstream total larger than the page it pulled (#67)', async () => {
+    // "iron" matches 119 components upstream; a two-row page still reports all 119.
+    fetchJsonMock.mockResolvedValue({
+      total_count: 119,
+      result_set: [
+        { identifier: 'FE', score: 1 },
+        { identifier: 'FE2', score: 0.9 },
+      ],
+    });
+    const out = await service().findChemComps('iron', 2, createMockContext());
+    expect(out).toEqual({ ids: ['FE', 'FE2'], total: 119 });
   });
 
   it('search returns total 0 and [] hits when upstream omits counts', async () => {
@@ -808,7 +1092,7 @@ describe('RcsbService.findChemComps — formula vs name routing (#50)', () => {
 
   it('routes a spaced Hill-notation formula to the chemical/formula terminal', async () => {
     const out = await service().findChemComps('C29 H31 N7 O', 25, createMockContext());
-    expect(out).toEqual(['STI']);
+    expect(out).toEqual({ ids: ['STI'], total: 1 });
     expect(postedQuery()).toEqual({
       type: 'terminal',
       service: 'chemical',
@@ -820,7 +1104,7 @@ describe('RcsbService.findChemComps — formula vs name routing (#50)', () => {
 
   it('routes an unspaced formula to the same terminal without client-side normalization', async () => {
     const out = await service().findChemComps('C29H31N7O', 25, createMockContext());
-    expect(out).toEqual(['STI']);
+    expect(out).toEqual({ ids: ['STI'], total: 1 });
     expect(postedQuery()).toMatchObject({
       service: 'chemical',
       parameters: { type: 'formula', value: 'C29H31N7O' },
@@ -845,7 +1129,10 @@ describe('RcsbService.findChemComps — formula vs name routing (#50)', () => {
     // postSearch's onEmptyBody already turns RCSB's 204 into an empty result set;
     // the tool's existing not_found branch takes it from there.
     fetchJsonMock.mockResolvedValue({ total_count: 0, result_set: [], facets: [] });
-    expect(await service().findChemComps('C99 H99 N99 O99', 25, createMockContext())).toEqual([]);
+    expect(await service().findChemComps('C99 H99 N99 O99', 25, createMockContext())).toEqual({
+      ids: [],
+      total: 0,
+    });
   });
 
   it.each(['SF4', 'H4B', 'BU1'])(
@@ -858,7 +1145,10 @@ describe('RcsbService.findChemComps — formula vs name routing (#50)', () => {
         .mockResolvedValueOnce({ total_count: 0, result_set: [] })
         .mockResolvedValueOnce({ total_count: 1, result_set: [{ identifier: '6ML', score: 1 }] });
 
-      expect(await service().findChemComps(query, 25, createMockContext())).toEqual(['6ML']);
+      expect(await service().findChemComps(query, 25, createMockContext())).toEqual({
+        ids: ['6ML'],
+        total: 1,
+      });
       expect(fetchJsonMock).toHaveBeenCalledTimes(2);
       const queries = fetchJsonMock.mock.calls.map((call) => {
         const opts = call[2] as unknown as { body: string };

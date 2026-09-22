@@ -18,6 +18,7 @@ import type {
   BindingResidue,
   BindingSite,
   ChemComp,
+  ChemCompMatches,
   ContentType,
   CoordinateUrls,
   EntryMeta,
@@ -199,9 +200,13 @@ export class RcsbService {
    * match therefore falls through to the name/synonym search rather than ending
    * the resolution, which keeps those IDs reaching the path that can resolve
    * them. The extra call happens only when the formula terminal matched nothing.
+   *
+   * Returns the first `limit` candidate IDs in RCSB's order alongside the
+   * upstream `total` for the search that produced them, so a caller can tell a
+   * complete match set from a truncated one.
    */
-  async findChemComps(query: string, limit: number, ctx: Context): Promise<string[]> {
-    const search = async (query_: unknown) => {
+  async findChemComps(query: string, limit: number, ctx: Context): Promise<ChemCompMatches> {
+    const search = async (query_: unknown): Promise<ChemCompMatches> => {
       const raw = await this.postSearch(
         {
           query: query_,
@@ -211,12 +216,12 @@ export class RcsbService {
         ctx,
         'RcsbService.findChemComps',
       );
-      return normalizeHits(raw.result_set).map((h) => h.id);
+      return { ids: normalizeHits(raw.result_set).map((h) => h.id), total: raw.total_count ?? 0 };
     };
 
     if (!isChemicalFormula(query)) return search(chemNameQuery(query));
     const byFormula = await search(formulaQuery(query));
-    return byFormula.length > 0 ? byFormula : search(chemNameQuery(query));
+    return byFormula.ids.length > 0 ? byFormula : search(chemNameQuery(query));
   }
 
   /** Facet-only aggregation over an optional scoping query (no row pull). */
@@ -303,7 +308,13 @@ export class RcsbService {
     return { entityId: entity.rcsb_id ?? pdbId, sequence: seq.replace(/\s+/g, '') };
   }
 
-  /** Ligand binding-site residues for an entry, optionally filtered to one ligand. */
+  /**
+   * Ligand binding-site residues for an entry, optionally filtered to one ligand.
+   * Each pocket residue carries both numbering namespaces: `rcsb_target_neighbors`
+   * reports the mmCIF label chain and position plus the author residue number,
+   * and the author chain comes from the entry's own per-instance
+   * `asym_id`/`auth_asym_id` pairs.
+   */
   async getBindingSites(
     pdbId: string,
     compId: string | undefined,
@@ -315,6 +326,16 @@ export class RcsbService {
       ctx,
       'RcsbService.getBindingSites',
     );
+    // Label → author chain, one pair per polymer instance. The entity-level
+    // `asym_ids`/`auth_asym_ids` arrays are each sorted independently (6QNR_9:
+    // ["I","OB"] vs ["82","8E"], where I is 8E), so they cannot be zipped.
+    const authChainByLabel = new Map<string, string>();
+    for (const poly of data.entry?.polymer_entities ?? []) {
+      for (const inst of poly.polymer_entity_instances ?? []) {
+        const ids = inst.rcsb_polymer_entity_instance_container_identifiers;
+        if (ids?.asym_id && ids.auth_asym_id) authChainByLabel.set(ids.asym_id, ids.auth_asym_id);
+      }
+    }
     const sites: BindingSite[] = [];
     const want = compId?.toUpperCase();
     for (const nonpoly of data.entry?.nonpolymer_entities ?? []) {
@@ -323,16 +344,14 @@ export class RcsbService {
       for (const inst of nonpoly.nonpolymer_entity_instances ?? []) {
         const neighbors = inst.rcsb_target_neighbors ?? [];
         if (neighbors.length === 0) continue;
+        const ids = inst.rcsb_nonpolymer_entity_instance_container_identifiers;
+        const ligandAuthSeqId = parseAuthSeqId(ids?.auth_seq_id);
         sites.push({
           ligandCompId: ligand,
-          ...(inst.rcsb_nonpolymer_entity_instance_container_identifiers?.auth_asym_id
-            ? {
-                ligandAsymId:
-                  inst.rcsb_nonpolymer_entity_instance_container_identifiers.auth_asym_id,
-              }
-            : {}),
+          ...(ids?.auth_asym_id ? { ligandAsymId: ids.auth_asym_id } : {}),
+          ...(ligandAuthSeqId !== undefined ? { ligandAuthSeqId } : {}),
           residues: neighbors
-            .map(normalizeNeighbor)
+            .map((n) => normalizeNeighbor(n, authChainByLabel))
             .filter((r): r is BindingResidue => r != null)
             .sort((a, b) => (a.distance ?? Infinity) - (b.distance ?? Infinity)),
         });
@@ -778,14 +797,30 @@ function normalizeLigand(raw: RawNonpolymerEntity): LigandMeta | undefined {
   };
 }
 
-function normalizeNeighbor(raw: RawTargetNeighbor): BindingResidue | undefined {
+function normalizeNeighbor(
+  raw: RawTargetNeighbor,
+  authChainByLabel: ReadonlyMap<string, string>,
+): BindingResidue | undefined {
   if (!raw.target_comp_id || !raw.target_asym_id) return;
+  const authAsymId = authChainByLabel.get(raw.target_asym_id);
   return {
     residueCompId: raw.target_comp_id,
     asymId: raw.target_asym_id,
     ...(typeof raw.target_seq_id === 'number' ? { seqId: raw.target_seq_id } : {}),
+    ...(authAsymId ? { authAsymId } : {}),
+    ...(typeof raw.target_auth_seq_id === 'number' ? { authSeqId: raw.target_auth_seq_id } : {}),
     ...(typeof raw.distance === 'number' ? { distance: raw.distance } : {}),
   };
+}
+
+/**
+ * The instance container reports `auth_seq_id` as a string ("201"); keep it only
+ * when it is an integer, the form every author residue number in the archive takes.
+ */
+function parseAuthSeqId(raw: string | undefined): number | undefined {
+  if (!raw?.trim()) return;
+  const n = Number(raw);
+  return Number.isInteger(n) ? n : undefined;
 }
 
 function normalizeChemComp(id: string, raw: RawChemComp): ChemComp {
@@ -864,8 +899,19 @@ interface RawBindingEntry {
   nonpolymer_entities?: Array<{
     rcsb_nonpolymer_entity_container_identifiers?: { nonpolymer_comp_id?: string };
     nonpolymer_entity_instances?: Array<{
-      rcsb_nonpolymer_entity_instance_container_identifiers?: { auth_asym_id?: string };
+      rcsb_nonpolymer_entity_instance_container_identifiers?: {
+        auth_asym_id?: string;
+        auth_seq_id?: string;
+      };
       rcsb_target_neighbors?: RawTargetNeighbor[];
+    }>;
+  }>;
+  polymer_entities?: Array<{
+    polymer_entity_instances?: Array<{
+      rcsb_polymer_entity_instance_container_identifiers?: {
+        asym_id?: string;
+        auth_asym_id?: string;
+      };
     }>;
   }>;
 }
@@ -873,6 +919,7 @@ interface RawBindingEntry {
 interface RawTargetNeighbor {
   distance?: number;
   target_asym_id?: string;
+  target_auth_seq_id?: number;
   target_comp_id?: string;
   target_seq_id?: number;
 }
@@ -931,11 +978,16 @@ const SEQUENCE_QUERY = `query Sequence($id: String!) {
 
 const BINDING_SITE_QUERY = `query BindingSite($id: String!) {
   entry(entry_id: $id) {
+    polymer_entities {
+      polymer_entity_instances {
+        rcsb_polymer_entity_instance_container_identifiers { asym_id auth_asym_id }
+      }
+    }
     nonpolymer_entities {
       rcsb_nonpolymer_entity_container_identifiers { nonpolymer_comp_id }
       nonpolymer_entity_instances {
-        rcsb_nonpolymer_entity_instance_container_identifiers { auth_asym_id }
-        rcsb_target_neighbors { target_asym_id target_comp_id target_seq_id distance }
+        rcsb_nonpolymer_entity_instance_container_identifiers { auth_asym_id auth_seq_id }
+        rcsb_target_neighbors { target_asym_id target_comp_id target_seq_id target_auth_seq_id distance }
       }
     }
   }
