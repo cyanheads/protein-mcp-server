@@ -4,11 +4,13 @@
  * notice; no_sequence failure), the by:structure path (Foldseek complete /
  * computing / failed, predicted-source mapping, completed-job paging via
  * totalCount / start / nextStart and a re-usable ticketId), the missing_query
- * guard, the per-mode field rejection, and format(). Services and the
+ * guard, the per-mode field rejection, the error envelope each declared reason
+ * produces on both client surfaces, and format(). Services and the
  * coordinate-file fetch are mocked.
  * @module tests/tools/find-similar.tool.test
  */
 
+import type { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -745,6 +747,103 @@ describe('protein_find_similar — per-mode field rejection (#57)', () => {
       ctx(),
     );
     expect(foldseekSearch.mock.calls[0]?.[0]).toMatchObject({ limit: 7 });
+  });
+});
+
+describe('protein_find_similar — error envelope on both client surfaces', () => {
+  /** The contract's declared recovery for a reason — what `ctx.recoveryFor` forwards. */
+  const declaredRecovery = (reason: string) =>
+    findSimilar.errors?.find((e) => e.reason === reason)?.recovery;
+
+  type ErrorResult = {
+    isError?: boolean;
+    structuredContent: {
+      error: { code: number; data: { reason: string; recovery: { hint: string } } };
+    };
+    content: Array<{ text: string }>;
+  };
+
+  interface ErrorCase {
+    code: JsonRpcErrorCode;
+    /** Declared recovery text, or an asymmetric matcher for a runtime-built hint. */
+    hint: unknown;
+    input: z.input<typeof findSimilar.input>;
+    name: string;
+    reason: string;
+    setup?: () => void;
+    /** The closing reason/retryable term line of the content[] text. */
+    terms: string;
+  }
+
+  it.each<ErrorCase>([
+    {
+      name: 'missing_query (by:sequence, no source)',
+      input: { by: 'sequence' },
+      code: JsonRpcErrorCode.InvalidParams,
+      reason: 'missing_query',
+      hint: declaredRecovery('missing_query'),
+      terms: '(reason missing_query)',
+    },
+    {
+      name: 'missing_query (by:structure, no identifier)',
+      input: { by: 'structure' },
+      code: JsonRpcErrorCode.InvalidParams,
+      reason: 'missing_query',
+      hint: expect.stringContaining('Provide pdb_id (e.g. 1CRN) or uniprot'),
+      terms: '(reason missing_query)',
+    },
+    {
+      name: 'mode_mismatched_field',
+      input: { by: 'structure', pdb_id: '4HHB', sequence: 'MVLS' },
+      code: JsonRpcErrorCode.InvalidParams,
+      reason: 'mode_mismatched_field',
+      hint: expect.stringContaining('only read under by:"sequence"'),
+      terms: '(reason mode_mismatched_field)',
+    },
+    {
+      name: 'no_sequence',
+      input: { by: 'sequence', pdb_id: '1ABC' },
+      setup: () => getSequence.mockResolvedValue(null),
+      code: JsonRpcErrorCode.NotFound,
+      reason: 'no_sequence',
+      hint: declaredRecovery('no_sequence'),
+      terms: '(reason no_sequence)',
+    },
+    {
+      name: 'search_failed',
+      input: { by: 'structure', pdb_id: '4HHB' },
+      setup: () => {
+        fetchTextMock.mockResolvedValue('ATOM ...');
+        foldseekSearch.mockResolvedValue({ status: 'failed', error: 'bad coordinates' });
+      },
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      reason: 'search_failed',
+      hint: expect.stringContaining('Retry shortly'),
+      terms: '(reason search_failed · retryable)',
+    },
+    {
+      name: 'ticket_not_found',
+      input: { by: 'structure', ticket_id: 'bogus' },
+      setup: () => foldseekResume.mockResolvedValue({ status: 'not_found', ticketId: 'bogus' }),
+      code: JsonRpcErrorCode.NotFound,
+      reason: 'ticket_not_found',
+      hint: declaredRecovery('ticket_not_found'),
+      terms: '(reason ticket_not_found)',
+    },
+  ])('$name carries reason and recovery hint on structuredContent and content[]', async (c) => {
+    c.setup?.();
+    const result = (await runToolContract(findSimilar, c.input)) as ErrorResult;
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({
+      code: c.code,
+      data: { reason: c.reason, recovery: { hint: c.hint } },
+    });
+    const hint = result.structuredContent.error.data.recovery.hint;
+    expect(hint).toBeTruthy();
+    const text = result.content.map((block) => block.text).join('\n');
+    expect(text).toContain(`Recovery: ${hint}`);
+    expect(text).toContain(c.terms);
   });
 });
 

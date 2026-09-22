@@ -142,12 +142,14 @@ export const findSimilar = tool('protein_find_similar', {
   description: `Find structurally or evolutionarily related proteins. by:"sequence" runs an RCSB mmseqs2 sequence-similarity search (synchronous) over a sequence — supplied directly, or pulled from a PDB ID or UniProt accession. by:"structure" runs a Foldseek fold-similarity search (asynchronous) against experimental and predicted databases; if the job is still computing when the poll budget elapses, the response reports status "computing" with a ticket — re-call with ticket_id set to that value to resume the same job instead of resubmitting, and a complete response carries the same ticket so a finished job can be re-paged with a different start. Each mode reads only its own controls: sequence, max_evalue and min_identity belong to by:"sequence"; ticket_id and databases belong to by:"structure"; pdb_id, uniprot, start and limit are shared. A field the selected mode cannot consume is rejected rather than silently ignored. Output names the engine and database each hit came from.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
+  // Every reason is thrown by a helper below the handler, hence thrownBy on each entry.
   errors: [
     {
       reason: 'missing_query',
       code: JsonRpcErrorCode.InvalidParams,
       when: 'None of sequence, pdb_id, or uniprot was provided.',
       recovery: 'Provide a raw sequence, a PDB entry ID, or a UniProt accession to search from.',
+      thrownBy: 'service',
     },
     {
       reason: 'mode_mismatched_field',
@@ -155,6 +157,7 @@ export const findSimilar = tool('protein_find_similar', {
       when: 'An input field only the other by mode consumes was supplied: sequence, max_evalue or min_identity under by:"structure"; ticket_id or a non-empty databases list under by:"sequence".',
       recovery:
         'Drop the field, or switch by to the mode that reads it — sequence, max_evalue and min_identity apply to by:"sequence"; ticket_id and databases apply to by:"structure".',
+      thrownBy: 'service',
     },
     {
       reason: 'no_sequence',
@@ -162,6 +165,7 @@ export const findSimilar = tool('protein_find_similar', {
       when: 'A sequence could not be resolved from the given PDB ID or UniProt accession.',
       recovery:
         'Verify the identifier, or pass a raw one-letter sequence directly via the sequence parameter.',
+      thrownBy: 'service',
     },
     {
       reason: 'search_failed',
@@ -170,6 +174,7 @@ export const findSimilar = tool('protein_find_similar', {
       retryable: true,
       recovery:
         'Retry shortly; if it persists, verify the source structure has coordinates via protein_get_structure.',
+      thrownBy: 'service',
     },
     {
       reason: 'ticket_not_found',
@@ -177,6 +182,7 @@ export const findSimilar = tool('protein_find_similar', {
       when: 'The supplied ticket_id was rejected by Foldseek as an invalid or expired ticket.',
       recovery:
         'Tickets expire once results age out; drop ticket_id and re-run the by:structure search from pdb_id or uniprot to get a fresh one.',
+      thrownBy: 'service',
     },
   ],
 
