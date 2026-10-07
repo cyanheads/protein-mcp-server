@@ -21,6 +21,19 @@ import { getServerConfig } from '@/config/server-config.js';
 import { compareStructures } from '@/mcp-server/tools/definitions/compare-structures.tool.js';
 
 const ctx = () => createMockContext({ errors: compareStructures.errors });
+
+/** A `runToolContract` failure — the envelope that carries the declared recovery fill. */
+type ContractError = {
+  isError?: boolean;
+  structuredContent: {
+    error: {
+      code: number;
+      message: string;
+      data: { reason: string; recovery?: { hint: string } };
+    };
+  };
+};
+
 const three = [{ pdb_id: '4HHB' }, { pdb_id: '2HHB' }, { pdb_id: '1A3N' }];
 /** The real, default configured cap (2–25, default 10) the handler slices to. */
 const CAP = getServerConfig().maxCompareStructures;
@@ -93,12 +106,13 @@ describe('protein_compare_structures', () => {
   });
 
   it('throws resume_pair_unmatched when a resume entry matches no generated pair', async () => {
-    const input = compareStructures.input.parse({
+    const result = (await runToolContract(compareStructures, {
       structures: [{ pdb_id: '4HHB' }, { pdb_id: '2HHB' }],
       reference: 'first',
       resume: [{ a: '9XXX', b: '8YYY', uuid: 'u' }],
-    });
-    await expect(compareStructures.handler(input, ctx())).rejects.toMatchObject({
+    })) as ContractError;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({
       data: {
         reason: 'resume_pair_unmatched',
         recovery: { hint: expect.stringContaining('verbatim') },
@@ -269,12 +283,11 @@ describe('protein_compare_structures repeated structures (#33)', () => {
   });
 
   it('fails when every structure denotes the same one', async () => {
-    await expect(
-      compareStructures.handler(
-        compareStructures.input.parse({ structures: [{ pdb_id: '4HHB' }, { pdb_id: '4hhb' }] }),
-        ctx(),
-      ),
-    ).rejects.toMatchObject({
+    const result = (await runToolContract(compareStructures, {
+      structures: [{ pdb_id: '4HHB' }, { pdb_id: '4hhb' }],
+    })) as ContractError;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({
       data: {
         reason: 'no_distinct_pair',
         recovery: { hint: expect.stringContaining('two different structures') },
@@ -555,16 +568,13 @@ describe('protein_compare_structures resume keeps the job orientation (#62)', ()
 
   it('rejects a resumed job that ran a different method than this call', async () => {
     resumePair.mockResolvedValue(JOB);
-    await expect(
-      compareStructures.handler(
-        compareStructures.input.parse({
-          structures: reversed,
-          method: 'fatcat-rigid',
-          resume: [ticket],
-        }),
-        ctx(),
-      ),
-    ).rejects.toMatchObject({
+    const result = (await runToolContract(compareStructures, {
+      structures: reversed,
+      method: 'fatcat-rigid',
+      resume: [ticket],
+    })) as ContractError;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({
       message: expect.stringContaining('tm-align'),
       data: {
         reason: 'resume_method_mismatch',
@@ -584,12 +594,12 @@ describe('protein_compare_structures resume keeps the job orientation (#62)', ()
         ],
       },
     });
-    await expect(
-      compareStructures.handler(
-        compareStructures.input.parse({ structures: forward, resume: [ticket] }),
-        ctx(),
-      ),
-    ).rejects.toMatchObject({
+    const result = (await runToolContract(compareStructures, {
+      structures: forward,
+      resume: [ticket],
+    })) as ContractError;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({
       message: expect.stringContaining('2HHB.A'),
       data: {
         reason: 'resume_job_mismatch',

@@ -55,6 +55,15 @@ import { fetchText } from '@/services/shared/http.js';
 const fetchTextMock = vi.mocked(fetchText);
 
 const ctx = () => createMockContext({ errors: getStructure.errors });
+
+/** A `runToolContract` failure — the envelope that carries the declared recovery fill. */
+type ContractError = {
+  isError?: boolean;
+  structuredContent: {
+    error: { code: number; data: { reason: string; recovery?: { hint: string } } };
+  };
+};
+
 const experimentalMeta = (id: string) => ({
   id,
   title: `${id} structure`,
@@ -77,8 +86,12 @@ describe('protein_get_structure', () => {
 
   it('throws all_failed (with its declared recovery hint) when no experimental ID resolves', async () => {
     getEntries.mockResolvedValue([]);
-    const input = getStructure.input.parse({ ids: ['4HHB'], source: 'experimental' });
-    await expect(getStructure.handler(input, ctx())).rejects.toMatchObject({
+    const result = (await runToolContract(getStructure, {
+      ids: ['4HHB'],
+      source: 'experimental',
+    })) as ContractError;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({
       data: {
         reason: 'all_failed',
         recovery: { hint: expect.stringContaining('Verify ID formats') },
@@ -181,8 +194,12 @@ describe('protein_get_structure', () => {
   it('a well-formed but unknown accession still reports the upstream-miss reason', async () => {
     // A9ZZZ9 is shape-valid: it reaches AlphaFold, 404s, and degrades per-ID.
     getPrediction.mockResolvedValue(null);
-    const input = getStructure.input.parse({ ids: ['A9ZZZ9'], source: 'predicted' });
-    await expect(getStructure.handler(input, ctx())).rejects.toMatchObject({
+    const result = (await runToolContract(getStructure, {
+      ids: ['A9ZZZ9'],
+      source: 'predicted',
+    })) as ContractError;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({
       data: {
         reason: 'all_failed',
         recovery: { hint: expect.stringContaining('Verify ID formats') },

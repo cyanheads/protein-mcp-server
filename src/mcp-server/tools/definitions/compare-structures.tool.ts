@@ -196,7 +196,6 @@ export const compareStructures = tool('protein_compare_structures', {
       throw ctx.fail(
         'no_distinct_pair',
         `Every entry in structures[] denotes ${only ? label(only) : 'one structure'}; there is no second structure to align it against.`,
-        { ...ctx.recoveryFor('no_distinct_pair') },
       );
     }
     const structures = unique.slice(0, cfg.maxCompareStructures);
@@ -222,7 +221,6 @@ export const compareStructures = tool('protein_compare_structures', {
           throw ctx.fail(
             'resume_pair_unmatched',
             `Resume entry ${r.a} ↔ ${r.b} matches no pair in the current structures/reference set.`,
-            { ...ctx.recoveryFor('resume_pair_unmatched') },
           );
         }
         resumeByPair.set(key, r.uuid);
@@ -270,9 +268,7 @@ export const compareStructures = tool('protein_compare_structures', {
     });
 
     if (rejection) {
-      throw ctx.fail(rejection.reason, rejection.message, {
-        ...ctx.recoveryFor(rejection.reason),
-      });
+      throw ctx.fail(rejection.reason, rejection.message);
     }
 
     const computing = rows.filter((r) => r.status === 'computing').length;

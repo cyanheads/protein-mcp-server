@@ -168,7 +168,6 @@ export const analyzeCollection = tool('protein_analyze_collection', {
       throw ctx.fail(
         'duplicate_dimension',
         `group_by lists "${duplicate}" twice; a cross-tab needs two distinct dimensions.`,
-        { ...ctx.recoveryFor('duplicate_dimension') },
       );
     // An override no requested position can consume would reach RCSB as nothing at
     // all — the call would succeed with default bins, looking like a filtered result.
@@ -176,7 +175,6 @@ export const analyzeCollection = tool('protein_analyze_collection', {
       throw ctx.fail(
         'interval_not_applicable',
         `interval ${input.interval} does not apply to ${input.group_by.join(' or ')}; only ${INTERVAL_DIMENSION_NAMES.join(', ')} bin by an interval, and a numeric width needs resolution or molecular_weight while "year" needs release_year.`,
-        { ...ctx.recoveryFor('interval_not_applicable') },
       );
     const spec = buildFacetSpec(primary, input.interval, secondary);
 

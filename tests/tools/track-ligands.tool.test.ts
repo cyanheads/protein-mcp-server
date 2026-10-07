@@ -35,6 +35,14 @@ import { trackLigands } from '@/mcp-server/tools/definitions/track-ligands.tool.
 
 const ctx = () => createMockContext({ errors: trackLigands.errors });
 
+/** A `runToolContract` failure — the envelope that carries the declared recovery fill. */
+type ContractError = {
+  isError?: boolean;
+  structuredContent: {
+    error: { code: number; data: { reason: string; recovery?: { hint: string } } };
+  };
+};
+
 beforeEach(() => vi.clearAllMocks());
 
 describe('protein_track_ligands — find_ligand', () => {
@@ -297,9 +305,9 @@ describe('protein_track_ligands — find_ligand', () => {
   });
 
   it('carries the declared recovery hint on the missing_param error (#10)', async () => {
-    await expect(
-      trackLigands.handler(trackLigands.input.parse({ mode: 'find_ligand' }), ctx()),
-    ).rejects.toMatchObject({
+    const result = (await runToolContract(trackLigands, { mode: 'find_ligand' })) as ContractError;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({
       data: {
         reason: 'missing_param',
         recovery: {

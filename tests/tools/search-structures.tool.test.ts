@@ -26,12 +26,21 @@ import { searchStructures } from '@/mcp-server/tools/definitions/search-structur
 const ctx = () => createMockContext({ errors: searchStructures.errors });
 const FACET_CAP = getServerConfig().facetBucketCap;
 
+/** A `runToolContract` failure — the envelope that carries the declared recovery fill. */
+type ContractError = {
+  isError?: boolean;
+  structuredContent: {
+    error: { code: number; data: { reason: string; recovery?: { hint: string } } };
+  };
+};
+
 beforeEach(() => vi.clearAllMocks());
 
 describe('protein_search_structures', () => {
   it('throws no_criteria (with its declared recovery hint) when nothing to search on', async () => {
-    const input = searchStructures.input.parse({});
-    await expect(searchStructures.handler(input, ctx())).rejects.toMatchObject({
+    const result = (await runToolContract(searchStructures, {})) as ContractError;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({
       data: {
         reason: 'no_criteria',
         recovery: { hint: expect.stringContaining('free-text query') },
@@ -95,9 +104,9 @@ describe('protein_search_structures', () => {
   ] as const)(
     'rejects a sequence-search threshold sent without a sequence: %s (#56)',
     async (_label, input) => {
-      await expect(
-        searchStructures.handler(searchStructures.input.parse(input), ctx()),
-      ).rejects.toMatchObject({
+      const result = (await runToolContract(searchStructures, input)) as ContractError;
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent.error).toMatchObject({
         code: -32602,
         data: {
           reason: 'sequence_modifier_without_sequence',
@@ -197,12 +206,12 @@ describe('protein_search_structures', () => {
   });
 
   it('rejects a repeated facets dimension before any upstream call (#35)', async () => {
-    await expect(
-      searchStructures.handler(
-        searchStructures.input.parse({ query: 'hemoglobin', facets: ['method', 'method'] }),
-        ctx(),
-      ),
-    ).rejects.toMatchObject({
+    const result = (await runToolContract(searchStructures, {
+      query: 'hemoglobin',
+      facets: ['method', 'method'],
+    })) as ContractError;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({
       data: {
         reason: 'duplicate_dimension',
         recovery: { hint: expect.stringContaining('at most once') },

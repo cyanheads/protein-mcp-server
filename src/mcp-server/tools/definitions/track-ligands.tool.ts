@@ -200,9 +200,7 @@ export const trackLigands = tool('protein_track_ligands', {
 
     if (input.mode === 'find_ligand') {
       if (!input.query)
-        throw ctx.fail('missing_param', 'mode find_ligand requires a name or formula in "query".', {
-          ...ctx.recoveryFor('missing_param'),
-        });
+        throw ctx.fail('missing_param', 'mode find_ligand requires a name or formula in "query".');
       // Over-fetch a candidate pool larger than the display limit, then re-rank by
       // deposition frequency and slice to the limit. The canonical component (e.g.
       // HEM for "heme") is the most-deposited but RCSB name-ranks it low, so a small
@@ -245,9 +243,7 @@ export const trackLigands = tool('protein_track_ligands', {
     if (input.mode === 'structures_with_ligand') {
       const compId = input.comp_id?.toUpperCase();
       if (!compId)
-        throw ctx.fail('missing_param', 'mode structures_with_ligand requires a "comp_id".', {
-          ...ctx.recoveryFor('missing_param'),
-        });
+        throw ctx.fail('missing_param', 'mode structures_with_ligand requires a "comp_id".');
       const result = await rcsb.searchByLigand(
         compId,
         { limit: input.limit, start: input.start },
@@ -290,10 +286,7 @@ export const trackLigands = tool('protein_track_ligands', {
 
     // binding_site
     const compId = input.comp_id?.toUpperCase();
-    if (!input.pdb_id)
-      throw ctx.fail('missing_param', 'mode binding_site requires a "pdb_id".', {
-        ...ctx.recoveryFor('missing_param'),
-      });
+    if (!input.pdb_id) throw ctx.fail('missing_param', 'mode binding_site requires a "pdb_id".');
     const sites = await rcsb.getBindingSites(input.pdb_id, compId, ctx);
     if (sites.length === 0) {
       throw ctx.fail(

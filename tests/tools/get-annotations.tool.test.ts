@@ -12,7 +12,7 @@
  */
 
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
+import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const getEntry = vi.fn();
@@ -29,6 +29,14 @@ vi.mock('@/services/rcsb/rcsb-service.js', () => ({
 import { getAnnotations } from '@/mcp-server/tools/definitions/get-annotations.tool.js';
 
 const ctx = () => createMockContext({ errors: getAnnotations.errors });
+
+/** A `runToolContract` failure — the envelope that carries the declared recovery fill. */
+type ContractError = {
+  isError?: boolean;
+  structuredContent: {
+    error: { code: number; data: { reason: string; recovery?: { hint: string } } };
+  };
+};
 
 const entry = (over: Record<string, unknown> = {}) => ({
   accession: 'P69905',
@@ -109,9 +117,9 @@ describe('protein_get_annotations', () => {
   });
 
   it('throws missing_identifier (InvalidParams) naming both parameters when neither is given (#46)', async () => {
-    await expect(
-      getAnnotations.handler(getAnnotations.input.parse({}), ctx()),
-    ).rejects.toMatchObject({
+    const result = (await runToolContract(getAnnotations, {})) as ContractError;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({
       code: JsonRpcErrorCode.InvalidParams,
       data: {
         reason: 'missing_identifier',
@@ -136,9 +144,11 @@ describe('protein_get_annotations', () => {
   });
 
   it('throws invalid_accession (InvalidParams) describing the format for a malformed uniprot (#46)', async () => {
-    await expect(
-      getAnnotations.handler(getAnnotations.input.parse({ uniprot: 'NOTANACC' }), ctx()),
-    ).rejects.toMatchObject({
+    const result = (await runToolContract(getAnnotations, {
+      uniprot: 'NOTANACC',
+    })) as ContractError;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({
       code: JsonRpcErrorCode.InvalidParams,
       data: {
         reason: 'invalid_accession',

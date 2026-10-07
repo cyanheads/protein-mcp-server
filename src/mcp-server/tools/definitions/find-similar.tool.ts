@@ -379,7 +379,6 @@ async function runStructure(
     throw ctx.fail(
       'ticket_not_found',
       `Foldseek ticket ${outcome.ticketId} is invalid or expired.`,
-      { ...ctx.recoveryFor('ticket_not_found') },
     );
   }
   if (outcome.status === 'failed') {
@@ -500,7 +499,6 @@ async function resolveSequence(input: FindSimilarInput, ctx: Ctx): Promise<strin
       throw ctx.fail(
         'no_sequence',
         `No protein sequence found for PDB entry ${input.pdb_id.toUpperCase()}.`,
-        { ...ctx.recoveryFor('no_sequence') },
       );
     return seq.sequence;
   }
@@ -510,13 +508,10 @@ async function resolveSequence(input: FindSimilarInput, ctx: Ctx): Promise<strin
       throw ctx.fail(
         'no_sequence',
         `No sequence found for UniProt accession ${input.uniprot.toUpperCase()}.`,
-        { ...ctx.recoveryFor('no_sequence') },
       );
     return seq;
   }
-  throw ctx.fail('missing_query', 'Provide a sequence, pdb_id, or uniprot to search from.', {
-    ...ctx.recoveryFor('missing_query'),
-  });
+  throw ctx.fail('missing_query', 'Provide a sequence, pdb_id, or uniprot to search from.');
 }
 
 /** Resolve a query coordinate file (mmCIF or PDB-format text) from a PDB ID or UniProt accession. */
@@ -537,7 +532,6 @@ async function resolveCoordinateFile(
       throw ctx.fail(
         'no_sequence',
         `No predicted model with coordinates found for ${input.uniprot.toUpperCase()}.`,
-        { ...ctx.recoveryFor('no_sequence') },
       );
     }
     return {

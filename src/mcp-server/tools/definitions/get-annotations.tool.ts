@@ -199,14 +199,10 @@ export const getAnnotations = tool('protein_get_annotations', {
     // here rather than by a Zod refine so the rejection carries `data.reason` and
     // the declared recovery hint.
     if (!input.uniprot && !input.pdb_id) {
-      throw ctx.fail('missing_identifier', 'Provide uniprot (e.g. P69905) or pdb_id (e.g. 4HHB).', {
-        ...ctx.recoveryFor('missing_identifier'),
-      });
+      throw ctx.fail('missing_identifier', 'Provide uniprot (e.g. P69905) or pdb_id (e.g. 4HHB).');
     }
     if (input.uniprot && !isUniProtAccession(input.uniprot)) {
-      throw ctx.fail('invalid_accession', `"${input.uniprot}" is not a valid UniProt accession.`, {
-        ...ctx.recoveryFor('invalid_accession'),
-      });
+      throw ctx.fail('invalid_accession', `"${input.uniprot}" is not a valid UniProt accession.`);
     }
 
     let accession = input.uniprot?.toUpperCase();
@@ -255,13 +251,10 @@ export const getAnnotations = tool('protein_get_annotations', {
       throw ctx.fail(
         'no_uniprot_mapping',
         'The supplied PDB ID carries no UniProt-mapped protein chain.',
-        { ...ctx.recoveryFor('no_uniprot_mapping') },
       );
     }
     if (!isUniProtAccession(accession)) {
-      throw ctx.fail('no_uniprot_mapping', `"${accession}" is not a valid UniProt accession.`, {
-        ...ctx.recoveryFor('no_uniprot_mapping'),
-      });
+      throw ctx.fail('no_uniprot_mapping', `"${accession}" is not a valid UniProt accession.`);
     }
 
     const include = input.include as AnnotationInclude;

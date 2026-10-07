@@ -390,9 +390,12 @@ describe('protein_find_similar — by:sequence', () => {
   });
 
   it('throws missing_query (with its declared recovery hint) when no sequence source is provided', async () => {
-    await expect(
-      findSimilar.handler(findSimilar.input.parse({ by: 'sequence' }), ctx()),
-    ).rejects.toMatchObject({
+    const result = (await runToolContract(findSimilar, { by: 'sequence' })) as {
+      isError?: boolean;
+      structuredContent: { error: { data: { reason: string; recovery?: { hint: string } } } };
+    };
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({
       data: {
         reason: 'missing_query',
         recovery: { hint: expect.stringContaining('raw sequence') },
@@ -1130,7 +1133,7 @@ describe('protein_find_similar — per-mode field rejection (#57)', () => {
 });
 
 describe('protein_find_similar — error envelope on both client surfaces', () => {
-  /** The contract's declared recovery for a reason — what `ctx.recoveryFor` forwards. */
+  /** The contract's declared recovery for a reason — what the framework fills on the envelope. */
   const declaredRecovery = (reason: string) =>
     findSimilar.errors?.find((e) => e.reason === reason)?.recovery;
 

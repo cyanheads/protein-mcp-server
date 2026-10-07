@@ -219,9 +219,6 @@ export const searchStructures = tool('protein_search_structures', {
       throw ctx.fail(
         'no_criteria',
         'Provide a query, sequence, organism, method, or maximum resolution to search on.',
-        {
-          ...ctx.recoveryFor('no_criteria'),
-        },
       );
     }
     // buildQuery() reads these two only inside its sequence branch, so without a
@@ -237,7 +234,6 @@ export const searchStructures = tool('protein_search_structures', {
       throw ctx.fail(
         'sequence_modifier_without_sequence',
         `${sequenceModifiers.join(' and ')} ${many ? 'are sequence-search thresholds' : 'is a sequence-search threshold'}, but this request has no sequence — ${many ? 'they' : 'it'} would never reach RCSB.`,
-        { ...ctx.recoveryFor('sequence_modifier_without_sequence') },
       );
     }
     // RCSB collapses two identically-named facet requests into one raw facet, and
@@ -248,7 +244,6 @@ export const searchStructures = tool('protein_search_structures', {
       throw ctx.fail(
         'duplicate_dimension',
         `facets lists "${duplicate}" more than once; each dimension is summarized once.`,
-        { ...ctx.recoveryFor('duplicate_dimension') },
       );
     const cfg = getServerConfig();
     const rcsb = getRcsbService();

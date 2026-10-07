@@ -27,6 +27,14 @@ import { analyzeCollection } from '@/mcp-server/tools/definitions/analyze-collec
 
 const ctx = () => createMockContext({ errors: analyzeCollection.errors });
 
+/** A `runToolContract` failure — the envelope that carries the declared recovery fill. */
+type ContractError = {
+  isError?: boolean;
+  structuredContent: {
+    error: { code: number; data: { reason: string; recovery?: { hint: string } } };
+  };
+};
+
 const methodFacet = (buckets: FacetDimension['buckets']): FacetDimension => ({
   dimension: 'method',
   attribute: 'exptl.method',
@@ -397,12 +405,11 @@ describe('protein_analyze_collection', () => {
   });
 
   it('rejects a repeated group_by dimension before any upstream call (#30)', async () => {
-    await expect(
-      analyzeCollection.handler(
-        analyzeCollection.input.parse({ group_by: ['method', 'method'] }),
-        ctx(),
-      ),
-    ).rejects.toMatchObject({
+    const result = (await runToolContract(analyzeCollection, {
+      group_by: ['method', 'method'],
+    })) as ContractError;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({
       data: {
         reason: 'duplicate_dimension',
         recovery: { hint: expect.stringContaining('at most once') },
@@ -1130,12 +1137,12 @@ describe('protein_analyze_collection', () => {
   it('rejects an interval no requested dimension can consume (#51)', async () => {
     for (const group_by of [['method'], ['method', 'organism']] as const) {
       analyzeFacets.mockClear();
-      await expect(
-        analyzeCollection.handler(
-          analyzeCollection.input.parse({ group_by: [...group_by], interval: 100 }),
-          ctx(),
-        ),
-      ).rejects.toMatchObject({
+      const result = (await runToolContract(analyzeCollection, {
+        group_by: [...group_by],
+        interval: 100,
+      })) as ContractError;
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent.error).toMatchObject({
         code: -32602,
         data: {
           reason: 'interval_not_applicable',
