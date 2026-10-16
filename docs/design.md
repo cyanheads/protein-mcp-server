@@ -140,6 +140,12 @@ Single-pair request body (verified): `{"context":{"mode":"pairwise","method":{"n
 
 **`protein_analyze_collection`** is a single RCSB Search POST with `request_options.facets` and `paginate.rows:0` — no fan-out, no row pull. The `group_by` dimensions map to RCSB facet attributes server-side (see Decision 6).
 
+**RCSB sequence input.** Both sequence-search paths remove whitespace and uppercase only ASCII residues before validating a minimum of 10 residues in `[A-IK-Z]`. This retains B/O/U/X/Z while rejecting J and punctuation before search. Raw sequences and identifier-resolved sequences share the rule; mode guards run first, and an empty raw string retains identifier fallback.
+
+**Annotation pages and source fidelity.** `protein_get_annotations` slices each requested class with its own zero-based `features_offset`, `variants_offset`, or `domains_offset` (default 0), keeping `limit` at 1–200/default 50. Requested classes return their fetched `featuresTotal`, `variantsTotal`, or `domainsTotal`, including zero; omitted classes omit totals. A notice composes next offsets for remaining records and lower-offset advice for exhausted populated classes, separately from genuine absence. Offsets page freshly fetched arrays, not a stable snapshot. Variant `featureId`, `originalSequence`, and `alternativeSequences` relay source presence, including empty values; missing alternatives never imply deletion. InterPro `locations[].fragments[]` retain only the requested protein's locations, with optional `start`, `end`, and `dcStatus` (from `dc-status`), preserving separate locations, gaps, order, and qualifiers in UniProt numbering.
+
+**Optional comparison scores.** Numeric `similarity-score` and `sequence-similarity` entries are matched independently by type and relayed as optional `pairs[].similarityScore` (raw method-specific score) and `sequenceSimilarity` (0–1 fraction), including zero. Their text columns appear independently when any pair has the field; absent values remain unknown. Every metric stays attached to the job's original orientation on resume. Raw scores are not normalized across methods.
+
 ## Design Decisions
 
 The five open decisions from `idea.md`, resolved against live probes, plus the DataCanvas evaluation (Decision 6).
@@ -183,6 +189,7 @@ Typed contracts (`errors: [{ reason, code, when, recovery }]`) for the domain fa
 
 | Tool | reason | code | when | recovery |
 |:-----|:-------|:-----|:-----|:---------|
+| `search_structures`, `find_similar` (sequence) | `invalid_sequence` | `InvalidParams` | The normalized protein sequence is shorter than 10 residues or contains characters outside A–I/K–Z. The error names the length or offending characters before search. | Supply at least 10 residues A–I or K–Z, excluding J; remove invalid characters. Whitespace and ASCII lowercase are accepted. |
 | `get_structure` | `not_found` | `NotFound` | Valid-format ID with no entry/model. RCSB Data API → `404 {status,message}`; AlphaFold bad-format → `400 {error}`. In a batch, a missed ID lands in `failed[]` (partial success), not a thrown error. | Verify the ID format (PDB IDs are 4-char alphanumeric; UniProt accessions match `[OPQ][0-9][A-Z0-9]{3}[0-9]` or `[A-NR-Z][0-9][A-Z][A-Z0-9]{2}[0-9]`). Use `protein_search_structures` to locate the correct identifier. |
 | `get_structure` | `mixed_id_types` | `InvalidParams` | Batch mixes PDB IDs and UniProt accessions under a single `source` that can't serve both. | Split the call by source: one call for PDB IDs with `source: experimental`, another for UniProt accessions with `source: predicted`. |
 | `search_structures` | `no_results` | (success, empty) | Empty `result_set`. Disclosed via `ctx.enrich` notice, not an error. | Broaden the query (fewer filters, shorter sequence), or switch `content_type` between `experimental`/`predicted`/`all`. |

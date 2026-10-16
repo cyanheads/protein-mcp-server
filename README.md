@@ -7,7 +7,7 @@
 
 <div align="center">
 
-[![Version](https://img.shields.io/badge/Version-0.8.6-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.2.0-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.2%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
+[![Version](https://img.shields.io/badge/Version-0.8.6-blue.svg?style=flat-square)](./CHANGELOG.md) [![License](https://img.shields.io/badge/License-Apache%202.0-orange.svg?style=flat-square)](./LICENSE) [![Docker](https://img.shields.io/badge/Docker-ghcr.io-2496ED?style=flat-square&logo=docker&logoColor=white)](https://github.com/users/cyanheads/packages/container/package/protein-mcp-server) [![MCP SDK](https://img.shields.io/badge/MCP%20SDK-^2.3.1-green.svg?style=flat-square)](https://modelcontextprotocol.io/) [![npm](https://img.shields.io/npm/v/@cyanheads/protein-mcp-server?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/@cyanheads/protein-mcp-server) [![TypeScript](https://img.shields.io/badge/TypeScript-^7.0.2-3178C6.svg?style=flat-square)](https://www.typescriptlang.org/) [![Bun](https://img.shields.io/badge/Bun-v1.4.3%2B-blueviolet.svg?style=flat-square)](https://bun.sh/)
 
 </div>
 
@@ -57,6 +57,7 @@ Both resources are also reachable through `protein_get_structure`, for clients t
 ### `protein_search_structures` <sub>tool</sub>
 
 - At least one of `query`, `sequence` (an mmseqs2 search; `min_identity` / `max_evalue` apply only with it), `organism`, `method`, or `max_resolution`; `content_type` is `experimental`, `predicted`, or `all` (default); up to 100 hits per page (default 25) via `limit` / `start`
+- Protein sequences require at least 10 residues from A–I or K–Z (J excluded; B/O/U/X/Z accepted). Whitespace is removed and ASCII lowercase normalized; invalid sequences return `invalid_sequence` before search
 - Each hit names its `source` and a chainable entry `id` (sequence hits add `entityId`); experimental hits carry title, method, resolution, and organism, AlphaFold models their `uniprotAccession`
 - Optional `facets` (`method`, `organism`, `polymer_type`, `resolution`, `release_year`, `molecular_weight`) add a flat breakdown capped at `PROTEIN_FACET_BUCKET_CAP` buckets per dimension; for non-sequence searches, `protein_analyze_collection` reaches the long tail
 
@@ -73,6 +74,7 @@ Both resources are also reachable through `protein_get_structure`, for clients t
 ### `protein_find_similar` <sub>tool</sub>
 
 - `by: sequence` runs a synchronous RCSB mmseqs2 search from `sequence`, `pdb_id`, or `uniprot`, filtered by `max_evalue` / `min_identity`; `by: structure` runs an async Foldseek search from `pdb_id` or `uniprot` against `pdb100` + `afdb50` unless `databases` says otherwise. A field only the other mode reads fails as `mode_mismatched_field`; up to 100 hits per page (default 25)
+- Raw and resolved sequences use the same 10-residue minimum, A–I/K–Z alphabet, whitespace removal, and ASCII case normalization as `protein_search_structures`; direct `sequence` takes precedence over identifiers
 - Hits name their `source` and, for structure hits, the `database`, ranked by `score` across all searched databases; responses report `totalCount` and `nextStart`
 - A structure job still running at the poll budget returns `status: computing` with a `ticketId`; re-call with `ticket_id` to resume it or re-page a finished job. A multichain structure is one query per chain: each response covers `query` (0-based, default 0) out of `queryCount`
 
@@ -90,6 +92,7 @@ Both resources are also reachable through `protein_get_structure`, for clients t
 
 - 2 structures up to `PROTEIN_MAX_COMPARE_STRUCTURES` (default 10, max 25), each a `pdb_id` with an optional label-namespace `chain`; `method` is `tm-align` (default), `fatcat-rigid`, or `fatcat-flexible`; `reference` is `first` (default) or `all_pairs`; `timeout_s` (5–120) sets the per-pair poll budget
 - Each pair row has a `status` (`complete`, `computing`, `failed`), `tmScore`, `rmsd`, `alignedResidues`, and `[a, b]`-ordered `modeledResidues` and `coverage`; TM-score is normalized by `a`'s length, so reversing a pair changes it
+- When supplied upstream, `similarityScore` relays the raw method-specific alignment score and `sequenceSimilarity` the 0–1 fraction. Each gets a text column only when present in at least one pair; missing values remain unknown. Raw scores are not normalized across methods
 - A computing pair returns its job `uuid`; re-call with `{ a, b, uuid }` in `resume[]` to poll it instead of resubmitting. A resume under a different `method` or for another pair fails as `resume_method_mismatch` or `resume_job_mismatch`
 
 ---
@@ -104,9 +107,11 @@ Both resources are also reachable through `protein_get_structure`, for clients t
 
 ### `protein_get_annotations` <sub>tool</sub>
 
-- A `uniprot` accession, or a `pdb_id` resolved through its UniProt cross-reference (author `chain` picks one accession); `include` is `features`, `domains`, `variants`, or `all` (default); `limit` caps each class separately (1–200, default 50)
+- A `uniprot` accession, or a `pdb_id` resolved through its UniProt cross-reference (author `chain` picks one accession); `include` is `features`, `domains`, `variants`, or `all` (default); `limit` pages each class separately (1–200, default 50), with independent zero-based `features_offset`, `variants_offset`, and `domains_offset` (default 0)
 - Returns UniProt features and natural variants plus InterPro domains with GO terms; a PDB entry mapping to several accessions defaults to the lowest author chain and lists the rest in `ambiguity`
-- Capped classes set `truncated` and are named in `notice`; failures are typed as `missing_identifier`, `invalid_accession`, `no_uniprot_mapping`, or `chain_not_found`
+- Requested classes carry `featuresTotal`, `variantsTotal`, or `domainsTotal`; omitted classes omit their totals. A page with more records sets `truncated` and names its next offset in `notice`; an exhausted offset advises lowering it, distinct from genuine absence. Each call refreshes upstream data, so pages are not snapshot-stable
+- Variants preserve source-provided `featureId`, `originalSequence`, and `alternativeSequences`; missing changes do not imply deletion. Domains retain the requested protein's separate `locations[].fragments[]` with `start`, `end`, and `dcStatus`, in UniProt residue numbering, preserving gaps and qualifiers
+- Failures are typed as `missing_identifier`, `invalid_accession`, `no_uniprot_mapping`, or `chain_not_found`
 
 ---
 

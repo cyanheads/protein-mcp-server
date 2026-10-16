@@ -1,6 +1,6 @@
 # protein-mcp-server - Directory Structure
 
-Generated on: 2026-10-07 11:20:56
+Generated on: 2026-10-16 15:32:24
 
 ```text
 protein-mcp-server/
@@ -180,7 +180,8 @@ protein-mcp-server/
 │   │   │   ├── async.ts
 │   │   │   ├── attribution.ts
 │   │   │   ├── http.ts
-│   │   │   └── identifiers.ts
+│   │   │   ├── identifiers.ts
+│   │   │   └── protein-sequence.ts
 │   │   └── uniprot/
 │   │       └── uniprot-service.ts
 │   └── index.ts
