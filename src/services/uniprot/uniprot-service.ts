@@ -18,12 +18,15 @@ export type AnnotationInclude = 'features' | 'domains' | 'variants' | 'all';
 
 /** A positional sequence feature (domain, binding site, PTM, or variant). */
 export interface SequenceFeature {
+  alternativeSequences?: string[];
   /** `feature` (structural/functional) or `variant`. */
   category: 'feature' | 'variant';
   /** Free-text description. */
   description?: string;
   /** End residue (1-based). */
   end?: number;
+  featureId?: string;
+  originalSequence?: string;
   /** Start residue (1-based). */
   start?: number;
   /** UniProt feature type (e.g. "Domain", "Binding site", "Natural variant"). */
@@ -53,6 +56,7 @@ export interface GoTerm {
 export interface InterProEntry {
   accession: string;
   goTerms: GoTerm[];
+  locations?: Array<{ fragments?: Array<{ start?: number; end?: number; dcStatus?: string }> }>;
   memberDatabases: string[];
   name: string;
   type: string;
@@ -135,10 +139,34 @@ export class UniProtService {
       if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) return [];
       throw err;
     }
-    return (raw.results ?? [])
-      .map((r) => r.metadata)
-      .filter((m): m is RawInterProMetadata => m != null && !!m.accession)
-      .map(normalizeInterPro);
+    return (raw.results ?? []).flatMap((r) => {
+      if (!r.metadata?.accession) return [];
+      const locations = r.proteins?.find(
+        (p) => p.accession?.toUpperCase() === accession.toUpperCase(),
+      )?.entry_protein_locations;
+      return [
+        {
+          ...normalizeInterPro(r.metadata),
+          ...(locations !== undefined
+            ? {
+                locations: locations.map((location) => ({
+                  ...(location.fragments !== undefined
+                    ? {
+                        fragments: location.fragments.map((fragment) => ({
+                          ...(fragment.start !== undefined ? { start: fragment.start } : {}),
+                          ...(fragment.end !== undefined ? { end: fragment.end } : {}),
+                          ...(fragment['dc-status'] !== undefined
+                            ? { dcStatus: fragment['dc-status'] }
+                            : {}),
+                        })),
+                      }
+                    : {}),
+                })),
+              }
+            : {}),
+        },
+      ];
+    });
   }
 }
 
@@ -173,6 +201,13 @@ function normalizeFeature(raw: RawFeature): SequenceFeature {
     ...(raw.description ? { description: raw.description } : {}),
     ...(typeof raw.location?.start?.value === 'number' ? { start: raw.location.start.value } : {}),
     ...(typeof raw.location?.end?.value === 'number' ? { end: raw.location.end.value } : {}),
+    ...(raw.featureId !== undefined ? { featureId: raw.featureId } : {}),
+    ...(raw.alternativeSequence?.originalSequence !== undefined
+      ? { originalSequence: raw.alternativeSequence.originalSequence }
+      : {}),
+    ...(raw.alternativeSequence?.alternativeSequences !== undefined
+      ? { alternativeSequences: raw.alternativeSequence.alternativeSequences }
+      : {}),
   };
 }
 
@@ -211,14 +246,24 @@ interface RawUniProtEntry {
 }
 
 interface RawFeature {
+  alternativeSequence?: { originalSequence?: string; alternativeSequences?: string[] };
   description?: string;
+  featureId?: string;
   location?: { start?: { value?: number }; end?: { value?: number } };
   type?: string;
 }
 
 interface RawInterProResponse {
   count?: number;
-  results?: Array<{ metadata?: RawInterProMetadata }>;
+  results?: Array<{
+    metadata?: RawInterProMetadata;
+    proteins?: Array<{
+      accession?: string;
+      entry_protein_locations?: Array<{
+        fragments?: Array<{ start?: number; end?: number; 'dc-status'?: string }>;
+      }>;
+    }>;
+  }>;
 }
 
 interface RawInterProMetadata {

@@ -27,6 +27,19 @@ const featureSchema = z
     description: z.string().optional().describe('Feature description.'),
     start: z.number().optional().describe('Start residue (1-based).'),
     end: z.number().optional().describe('End residue (1-based).'),
+    featureId: z.string().optional().describe('Stable UniProt feature identifier when supplied.'),
+    originalSequence: z
+      .string()
+      .optional()
+      .describe(
+        'Source-provided original amino-acid sequence; empty and absent values remain distinct.',
+      ),
+    alternativeSequences: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Source-provided alternatives, preserving order and empty values; absence does not assert a deletion.',
+      ),
   })
   .describe('A sequence feature or natural variant over a residue range.');
 
@@ -35,6 +48,38 @@ const domainSchema = z
     accession: z.string().describe('InterPro accession (e.g. IPR000001).'),
     name: z.string().describe('Domain/family name.'),
     type: z.string().describe('Entry type (e.g. domain, family, homologous_superfamily).'),
+    locations: z
+      .array(
+        z
+          .object({
+            fragments: z
+              .array(
+                z
+                  .object({
+                    start: z
+                      .number()
+                      .optional()
+                      .describe('Fragment start residue (1-based, UniProt numbering).'),
+                    end: z
+                      .number()
+                      .optional()
+                      .describe('Fragment end residue (1-based, UniProt numbering).'),
+                    dcStatus: z
+                      .string()
+                      .optional()
+                      .describe('InterPro discontinuity qualifier, as supplied.'),
+                  })
+                  .describe(
+                    'One domain fragment; gaps between fragments are not part of the domain.',
+                  ),
+              )
+              .optional()
+              .describe('Ordered fragments within this location, when supplied.'),
+          })
+          .describe('One InterPro location on the requested protein.'),
+      )
+      .optional()
+      .describe('Separate locations for this membership on the requested UniProt protein.'),
     memberDatabases: z
       .array(z.string())
       .describe('Contributing member databases (e.g. pfam, profile).'),
@@ -144,7 +189,27 @@ export const getAnnotations = tool('protein_get_annotations', {
       .max(200)
       .default(50)
       .describe(
-        'Per-class cap (1–200): features, natural variants, and InterPro domains are each independently truncated to at most this many records. The default keeps a typical annotation set intact while bounding a densely-annotated protein (a well-studied protein can carry 150+ natural variants); a truncated class is disclosed in the response notice — raise it to retrieve more.',
+        'Per-class page size (1–200, default 50). Continue each class independently with features_offset, variants_offset, or domains_offset; the notice gives the next offset.',
+      ),
+    features_offset: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe('Zero-based offset into functional features; independent of variants and domains.'),
+    variants_offset: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe('Zero-based offset into natural variants; independent of features and domains.'),
+    domains_offset: z
+      .number()
+      .int()
+      .min(0)
+      .default(0)
+      .describe(
+        'Zero-based offset into InterPro memberships; independent of features and variants.',
       ),
   }),
 
@@ -158,6 +223,18 @@ export const getAnnotations = tool('protein_get_annotations', {
     features: z.array(featureSchema).optional().describe('Structural/functional features.'),
     variants: z.array(featureSchema).optional().describe('Natural sequence variants.'),
     domains: z.array(domainSchema).optional().describe('InterPro domain/family memberships.'),
+    featuresTotal: z
+      .number()
+      .optional()
+      .describe('Total fetched functional features; present only when requested.'),
+    variantsTotal: z
+      .number()
+      .optional()
+      .describe('Total fetched natural variants; present only when requested.'),
+    domainsTotal: z
+      .number()
+      .optional()
+      .describe('Total fetched InterPro memberships; present only when requested.'),
     ambiguity: ambiguitySchema
       .optional()
       .describe(
@@ -179,13 +256,13 @@ export const getAnnotations = tool('protein_get_annotations', {
       .boolean()
       .optional()
       .describe(
-        'True when at least one annotation class hit the per-class limit and was capped; the notice names each capped class with its pre-cap count.',
+        'True when at least one requested class has records after its returned page; the notice gives its next offset.',
       ),
     notice: z
       .string()
       .optional()
       .describe(
-        'Advisory note: a per-class "showing N of M" line for each capped class and a no-data note for any requested-but-empty class.',
+        'Per-class totals and next offsets, or advice to lower an exhausted offset; genuine absence is reported separately.',
       ),
   },
 
@@ -269,26 +346,42 @@ export const getAnnotations = tool('protein_get_annotations', {
     const wantFeatures = include === 'features' || include === 'all';
     const wantVariants = include === 'variants' || include === 'all';
 
-    // Cap each annotation class independently to the per-class limit, so one dense
-    // class (e.g. a protein's 150+ natural variants) can't dominate the payload.
-    // Collect every advisory fragment — a "showing N of M" line per truncated class
-    // plus a "no <class> present" note per requested-but-empty class — and emit them
-    // as ONE notice: ctx.enrich.notice is last-wins, so a second call would silently
-    // drop the first fragment.
+    /** Each class pages independently. Compose once because enrichment notices are last-wins. */
     const { limit } = input;
     const notices: string[] = [];
     let truncated = false;
     for (const cls of [
-      { want: wantFeatures, count: features.length, label: 'features' },
-      { want: wantVariants, count: variants.length, label: 'variants' },
-      { want: wantInterPro, count: interpro.length, label: 'domains' },
+      {
+        want: wantFeatures,
+        count: features.length,
+        label: 'features',
+        offset: input.features_offset,
+      },
+      {
+        want: wantVariants,
+        count: variants.length,
+        label: 'variants',
+        offset: input.variants_offset,
+      },
+      {
+        want: wantInterPro,
+        count: interpro.length,
+        label: 'domains',
+        offset: input.domains_offset,
+      },
     ]) {
       if (!cls.want) continue;
-      if (cls.count > limit) {
-        truncated = true;
-        notices.push(`Showing ${limit} of ${cls.count} ${cls.label}; raise limit to see more.`);
-      } else if (cls.count === 0) {
+      if (cls.count === 0) {
         notices.push(`No ${cls.label} present.`);
+      } else if (cls.offset >= cls.count) {
+        notices.push(
+          `No ${cls.label} at offset ${cls.offset} (total ${cls.count}); use a lower ${cls.label}_offset, such as 0.`,
+        );
+      } else if (cls.offset + limit < cls.count) {
+        truncated = true;
+        notices.push(
+          `Showing ${limit} of ${cls.count} ${cls.label} at offset ${cls.offset}; continue with ${cls.label}_offset: ${cls.offset + limit}.`,
+        );
       }
     }
 
@@ -311,9 +404,28 @@ export const getAnnotations = tool('protein_get_annotations', {
       ...(entry.organism ? { organism: entry.organism } : {}),
       ...(entry.function ? { function: entry.function } : {}),
       ...(typeof entry.sequenceLength === 'number' ? { sequenceLength: entry.sequenceLength } : {}),
-      ...(wantFeatures ? { features: toFeatureOutput(features.slice(0, limit)) } : {}),
-      ...(wantVariants ? { variants: toFeatureOutput(variants.slice(0, limit)) } : {}),
-      ...(wantInterPro ? { domains: interpro.slice(0, limit) } : {}),
+      ...(wantFeatures
+        ? {
+            features: toFeatureOutput(
+              features.slice(input.features_offset, input.features_offset + limit),
+            ),
+            featuresTotal: features.length,
+          }
+        : {}),
+      ...(wantVariants
+        ? {
+            variants: toFeatureOutput(
+              variants.slice(input.variants_offset, input.variants_offset + limit),
+            ),
+            variantsTotal: variants.length,
+          }
+        : {}),
+      ...(wantInterPro
+        ? {
+            domains: interpro.slice(input.domains_offset, input.domains_offset + limit),
+            domainsTotal: interpro.length,
+          }
+        : {}),
       ...(ambiguity ? { ambiguity } : {}),
       attribution: attributionsFor(sources),
     };
@@ -341,22 +453,36 @@ export const getAnnotations = tool('protein_get_annotations', {
       }
     }
 
-    if (result.features && result.features.length > 0) {
-      lines.push(`\n### Features (${result.features.length})`);
+    if (result.features) {
+      lines.push(
+        `\n### Features (${result.features.length}${result.featuresTotal !== undefined ? ` of ${result.featuresTotal}` : ''})`,
+      );
       for (const f of result.features) lines.push(`- ${renderFeature(f)}`);
     }
-    if (result.variants && result.variants.length > 0) {
-      lines.push(`\n### Variants (${result.variants.length})`);
+    if (result.variants) {
+      lines.push(
+        `\n### Variants (${result.variants.length}${result.variantsTotal !== undefined ? ` of ${result.variantsTotal}` : ''})`,
+      );
       for (const v of result.variants) lines.push(`- ${renderFeature(v)}`);
     }
-    if (result.domains && result.domains.length > 0) {
-      lines.push(`\n### InterPro domains (${result.domains.length})`);
+    if (result.domains) {
+      lines.push(
+        `\n### InterPro domains (${result.domains.length}${result.domainsTotal !== undefined ? ` of ${result.domainsTotal}` : ''})`,
+      );
       for (const d of result.domains) {
         lines.push(
           `- **${d.accession}** ${d.name} _(${d.type})_ — ${d.memberDatabases.join(', ') || 'no member DBs'}`,
         );
         for (const g of d.goTerms)
           lines.push(`  - ${g.id} ${g.name}${g.category ? ` [${g.category}]` : ''}`);
+        if (d.locations !== undefined) {
+          lines.push(`  - Locations: ${d.locations.length}`);
+          for (const [index, location] of d.locations.entries()) {
+            lines.push(
+              `    - Location ${index + 1}: ${location.fragments === undefined ? 'fragments unknown' : location.fragments.length === 0 ? 'no fragments' : location.fragments.map((f) => `${f.start ?? '?'}–${f.end ?? '?'}${f.dcStatus !== undefined ? ` [${JSON.stringify(f.dcStatus)}]` : ''}`).join(', ')}`,
+            );
+          }
+        }
       }
     }
     if (result.attribution.length > 0) {
@@ -403,6 +529,11 @@ function toFeatureOutput(features: SequenceFeature[]) {
     ...(f.description ? { description: f.description } : {}),
     ...(typeof f.start === 'number' ? { start: f.start } : {}),
     ...(typeof f.end === 'number' ? { end: f.end } : {}),
+    ...(f.featureId !== undefined ? { featureId: f.featureId } : {}),
+    ...(f.originalSequence !== undefined ? { originalSequence: f.originalSequence } : {}),
+    ...(f.alternativeSequences !== undefined
+      ? { alternativeSequences: f.alternativeSequences }
+      : {}),
   }));
 }
 
@@ -411,6 +542,9 @@ function renderFeature(f: {
   description?: string | undefined;
   start?: number | undefined;
   end?: number | undefined;
+  featureId?: string | undefined;
+  originalSequence?: string | undefined;
+  alternativeSequences?: string[] | undefined;
 }): string {
   const range =
     f.start != null
@@ -418,5 +552,9 @@ function renderFeature(f: {
         ? `${f.start}–${f.end}`
         : `${f.start}`
       : '';
-  return `**${f.type}**${range ? ` [${range}]` : ''}${f.description ? `: ${f.description}` : ''}`;
+  const change =
+    f.originalSequence !== undefined || f.alternativeSequences !== undefined
+      ? ` (${f.originalSequence === undefined ? '?' : JSON.stringify(f.originalSequence)} → ${f.alternativeSequences === undefined ? '?' : JSON.stringify(f.alternativeSequences)})`
+      : '';
+  return `**${f.type}**${range ? ` [${range}]` : ''}${f.featureId !== undefined ? ` ID ${JSON.stringify(f.featureId)}` : ''}${change}${f.description ? `: ${f.description}` : ''}`;
 }

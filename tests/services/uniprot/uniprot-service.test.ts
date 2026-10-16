@@ -62,6 +62,42 @@ const ENTRY = {
 beforeEach(() => vi.clearAllMocks());
 
 describe('UniProtService.getEntry', () => {
+  it('retains present variant IDs and changes, including empty values, without inventing missing fields (#68)', async () => {
+    fetchJsonMock.mockResolvedValue({
+      features: [
+        {
+          type: 'Natural variant',
+          featureId: 'VAR_002856',
+          alternativeSequence: { originalSequence: 'V', alternativeSequences: ['A', 'G'] },
+        },
+        {
+          type: 'Natural variant',
+          featureId: '',
+          alternativeSequence: { originalSequence: '', alternativeSequences: [] },
+        },
+        { type: 'Natural variant', alternativeSequence: {} },
+        { type: 'Natural variant' },
+      ],
+    });
+    expect((await service().getEntry('P68871', 'variants', createMockContext())).features).toEqual([
+      {
+        category: 'variant',
+        type: 'Natural variant',
+        featureId: 'VAR_002856',
+        originalSequence: 'V',
+        alternativeSequences: ['A', 'G'],
+      },
+      {
+        category: 'variant',
+        type: 'Natural variant',
+        featureId: '',
+        originalSequence: '',
+        alternativeSequences: [],
+      },
+      { category: 'variant', type: 'Natural variant' },
+      { category: 'variant', type: 'Natural variant' },
+    ]);
+  });
   it('normalizes name, gene names, joined FUNCTION text, organism, and length', async () => {
     fetchJsonMock.mockResolvedValue(ENTRY);
     const out = await service().getEntry('p69905', 'all', createMockContext());
@@ -131,6 +167,52 @@ describe('UniProtService.getSequence', () => {
 });
 
 describe('UniProtService.getInterPro', () => {
+  it('preserves only the requested protein locations, all fragment boundaries and sparse fields (#68)', async () => {
+    const locations = [
+      {
+        fragments: [
+          { start: 2, end: 9, 'dc-status': 'N_TERMINAL_DISC' },
+          { start: 20, end: 30, 'dc-status': '' },
+        ],
+      },
+      { fragments: [] },
+      {},
+      { fragments: [{ end: 42 }] },
+    ];
+    fetchJsonMock.mockResolvedValue({
+      results: [
+        {
+          metadata: { accession: 'IPR000033' },
+          proteins: [
+            { accession: 'OTHER', entry_protein_locations: [{ fragments: [{ start: 999 }] }] },
+            { accession: 'q07954', entry_protein_locations: locations },
+          ],
+        },
+        {
+          metadata: { accession: 'IPR000034' },
+          proteins: [{ accession: 'Q07954', entry_protein_locations: [] }],
+        },
+        {
+          metadata: { accession: 'IPR000035' },
+          proteins: [{ accession: 'OTHER', entry_protein_locations: [] }],
+        },
+      ],
+    });
+    const out = await service().getInterPro('Q07954', createMockContext());
+    expect(out[0]?.locations).toEqual([
+      {
+        fragments: [
+          { start: 2, end: 9, dcStatus: 'N_TERMINAL_DISC' },
+          { start: 20, end: 30, dcStatus: '' },
+        ],
+      },
+      { fragments: [] },
+      {},
+      { fragments: [{ end: 42 }] },
+    ]);
+    expect(out[1]?.locations).toEqual([]);
+    expect(out[2]).not.toHaveProperty('locations');
+  });
   it('normalizes member databases and GO terms, dropping incomplete GO entries', async () => {
     fetchJsonMock.mockResolvedValue({
       results: [

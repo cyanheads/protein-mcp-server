@@ -225,6 +225,163 @@ describe('protein_get_annotations', () => {
 });
 
 describe('protein_get_annotations per-class limit', () => {
+  it('walks each class without overlaps, stops on final pages, and reports empty totals (#65)', async () => {
+    getEntry.mockResolvedValue(entry({ features: [...many('feature', 5), ...many('variant', 3)] }));
+    getInterPro.mockResolvedValue([]);
+    const starts: number[] = [];
+    for (const features_offset of [0, 2, 4]) {
+      const result = await runToolContract(getAnnotations, {
+        uniprot: 'P69905',
+        include: 'features',
+        limit: 2,
+        features_offset,
+      });
+      const output = result.structuredContent as {
+        features: Array<{ start: number }>;
+        truncated?: boolean;
+      };
+      starts.push(...output.features.map((f) => f.start));
+      expect(output.truncated).toBe(features_offset === 4 ? undefined : true);
+      if (features_offset === 4)
+        expect(JSON.stringify(result.content)).not.toContain('continue with');
+    }
+    expect(starts).toEqual([1, 2, 3, 4, 5]);
+    const empty = await runToolContract(getAnnotations, {
+      uniprot: 'P69905',
+      include: 'domains',
+      domains_offset: 9,
+    });
+    expect(empty.structuredContent).toMatchObject({ domains: [], domainsTotal: 0 });
+    expect(JSON.stringify(empty.content)).toContain('No domains present.');
+    for (const key of ['features_offset', 'variants_offset', 'domains_offset']) {
+      for (const value of [-1, 0.5])
+        expect(getAnnotations.input.safeParse({ uniprot: 'P69905', [key]: value }).success).toBe(
+          false,
+        );
+    }
+    expect(getAnnotations.input.safeParse({ limit: 201 }).success).toBe(false);
+  });
+
+  it('carries variant changes and separate domain fragments through both response surfaces (#68)', async () => {
+    getEntry.mockResolvedValue(
+      entry({
+        features: [
+          {
+            category: 'variant',
+            type: 'Natural variant',
+            featureId: 'VAR_002856',
+            start: 2,
+            originalSequence: 'V',
+            alternativeSequences: ['A', 'G'],
+          },
+          {
+            category: 'variant',
+            type: 'Natural variant',
+            originalSequence: '',
+            alternativeSequences: [],
+          },
+          { category: 'variant', type: 'Natural variant' },
+        ],
+      }),
+    );
+    const domain = {
+      ...interProDomain(),
+      locations: [
+        {
+          fragments: [
+            { start: 2, end: 9, dcStatus: 'N_TERMINAL_DISC' },
+            { start: 20, end: 30, dcStatus: '' },
+          ],
+        },
+        { fragments: [] },
+        {},
+      ],
+    };
+    getInterPro.mockResolvedValue([domain]);
+    const result = await runToolContract(getAnnotations, { uniprot: 'P68871' });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      variants: [
+        {
+          type: 'Natural variant',
+          featureId: 'VAR_002856',
+          start: 2,
+          originalSequence: 'V',
+          alternativeSequences: ['A', 'G'],
+        },
+        { type: 'Natural variant', originalSequence: '', alternativeSequences: [] },
+        { type: 'Natural variant' },
+      ],
+      domains: [domain],
+    });
+    const text = result.content
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+    expect(text).toContain('ID "VAR_002856" ("V" → ["A","G"])');
+    expect(text).toContain('("" → [])');
+    expect(text).toContain('Location 1: 2–9 ["N_TERMINAL_DISC"], 20–30 [""]');
+    expect(text).toContain('Location 2: no fragments');
+    expect(text).toContain('Location 3: fragments unknown');
+    expect(text).not.toContain('deletion');
+  });
+  it('continues independent annotation pages with totals and executable recovery (#65)', async () => {
+    getEntry.mockResolvedValue(entry({ features: [...many('feature', 5), ...many('variant', 4)] }));
+    getInterPro.mockResolvedValue([
+      interProDomain(),
+      { ...interProDomain(), accession: 'IPR000002' },
+    ]);
+    const result = await runToolContract(getAnnotations, {
+      uniprot: 'P69905',
+      limit: 2,
+      features_offset: 2,
+      variants_offset: 3,
+      domains_offset: 1,
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      features: [{ start: 3 }, { start: 4 }],
+      variants: [{ start: 4 }],
+      domains: [{ accession: 'IPR000002' }],
+      featuresTotal: 5,
+      variantsTotal: 4,
+      domainsTotal: 2,
+    });
+    expect(JSON.stringify(result.content)).toContain('features_offset: 4');
+    expect(JSON.stringify(result.content)).toContain('Features (2 of 5)');
+  });
+
+  it.each([4, 9])(
+    'distinguishes exhausted variants at offset %i from absent classes (#65)',
+    async (variants_offset) => {
+      getEntry.mockResolvedValue(entry({ features: many('variant', 4) }));
+      const result = await runToolContract(getAnnotations, {
+        uniprot: 'P69905',
+        include: 'variants',
+        variants_offset,
+        limit: 2,
+      });
+      expect(result.structuredContent).toMatchObject({ variants: [], variantsTotal: 4 });
+      expect(result.structuredContent).not.toHaveProperty('featuresTotal');
+      expect(result.structuredContent).not.toHaveProperty('truncated');
+      const text = JSON.stringify(result.content);
+      expect(text).toContain(`offset ${variants_offset}`);
+      expect(text).toContain('total 4');
+      expect(text).toContain('lower variants_offset');
+      expect(text).not.toContain('No variants present');
+    },
+  );
+  it('preserves explicit first-page contents and independent caps', async () => {
+    getEntry.mockResolvedValue(entry({ features: [...many('feature', 3), ...many('variant', 4)] }));
+    getInterPro.mockResolvedValue([interProDomain()]);
+    const out = await getAnnotations.handler(
+      getAnnotations.input.parse({ uniprot: 'P69905', limit: 2 }),
+      ctx(),
+    );
+    expect(out.features?.map((f) => f.start)).toEqual([1, 2]);
+    expect(out.variants?.map((f) => f.start)).toEqual([1, 2]);
+    expect(out.domains).toHaveLength(1);
+  });
   it('caps a dense variant class to the limit and discloses it in one notice (151-variant shape)', async () => {
     getEntry.mockResolvedValue(entry({ features: many('variant', 151) }));
     const c = ctx();
