@@ -43,16 +43,18 @@ describe('buildQuery', () => {
   });
 
   it('emits a sequence terminal with identity and e-value cutoffs', () => {
-    expect(buildQuery({ sequence: 'MVLS', minIdentity: 0.5, maxEvalue: 0.01 })).toMatchObject({
-      type: 'terminal',
-      service: 'sequence',
-      parameters: {
-        identity_cutoff: 0.5,
-        evalue_cutoff: 0.01,
-        sequence_type: 'protein',
-        value: 'MVLS',
+    expect(buildQuery({ sequence: 'MVLSPADKTN', minIdentity: 0.5, maxEvalue: 0.01 })).toMatchObject(
+      {
+        type: 'terminal',
+        service: 'sequence',
+        parameters: {
+          identity_cutoff: 0.5,
+          evalue_cutoff: 0.01,
+          sequence_type: 'protein',
+          value: 'MVLSPADKTN',
+        },
       },
-    });
+    );
   });
 
   it('adds a resolution ceiling as a less_or_equal text node', () => {
@@ -161,6 +163,49 @@ describe('RcsbService search — 204 / empty body (issue #4 regression)', () => 
     // A zero-result 204 must not burn the retry budget.
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
+
+  it.each(['combined', 'sequence'])(
+    'normalizes the %s RCSB sequence path and retains empty successes (#77)',
+    async (strategy) => {
+      const spy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response(null, { status: 204 }));
+      const svc = service();
+      const result =
+        strategy === 'combined'
+          ? await svc.search(
+              { sequence: ' a b o u x z c d e f \n', start: 9, limit: 2 },
+              createMockContext(),
+            )
+          : await svc.searchSequence(
+              ' a b o u x z c d e f \n',
+              { start: 9, limit: 2 },
+              createMockContext(),
+            );
+      expect(result).toEqual({ total: 0, hits: [] });
+      const request = JSON.parse(String(spy.mock.calls[0]?.[1]?.body));
+      expect(request.query.parameters.value).toBe('ABOUXZCDEF');
+      expect(request.request_options.paginate).toEqual({ start: 9, rows: 2 });
+      expect(spy).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each([' ', 'ACDEFGHIK', 'ACDEFGHIKJ', 'ACDEFGHIK*', 'ACDEFGHIKL'])(
+    'rejects invalid sequence %j before either upstream request (#77)',
+    async (sequence) => {
+      const spy = vi
+        .spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response(null, { status: 204 }));
+      await expect(service().search({ sequence }, createMockContext())).rejects.toMatchObject({
+        code: -32602,
+        data: { reason: 'invalid_sequence' },
+      });
+      await expect(
+        service().searchSequence(sequence, {}, createMockContext()),
+      ).rejects.toMatchObject({ code: -32602, data: { reason: 'invalid_sequence' } });
+      expect(spy).not.toHaveBeenCalled();
+    },
+  );
 
   it('returns total 0 with empty buckets for a faceted zero-result query', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 204 }));

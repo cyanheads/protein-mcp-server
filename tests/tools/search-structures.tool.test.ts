@@ -37,6 +37,48 @@ type ContractError = {
 beforeEach(() => vi.clearAllMocks());
 
 describe('protein_search_structures', () => {
+  it('normalizes sequences while preserving filters, thresholds and offsets (#77)', async () => {
+    search.mockResolvedValue({ total: 0, hits: [] });
+    const result = await runToolContract(searchStructures, {
+      sequence: ' abou xzcdef\n',
+      query: 'globin',
+      organism: 'Homo sapiens',
+      min_identity: 0.8,
+      start: 5,
+      limit: 1,
+    });
+    expect(result.isError).not.toBe(true);
+    expect(search.mock.calls[0]?.[0]).toMatchObject({
+      sequence: 'ABOUXZCDEF',
+      text: 'globin',
+      organism: 'Homo sapiens',
+      minIdentity: 0.8,
+      start: 5,
+      limit: 1,
+    });
+    expect(result.structuredContent).toMatchObject({ hits: [], totalCount: 0 });
+    expect(JSON.stringify(result.content)).toContain('No structures matched');
+  });
+  it.each([' ', 'ACDEFGHIK', 'ACDEFGHIKJ', 'ACDEFGHIK*'])(
+    'rejects %j with typed recovery on both surfaces (#77)',
+    async (sequence) => {
+      const result = await runToolContract(searchStructures, { sequence });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: -32602,
+          data: {
+            reason: 'invalid_sequence',
+            recovery: { hint: expect.stringContaining('at least 10') },
+          },
+        },
+      });
+      const text = JSON.stringify(result.content);
+      expect(text).toContain('invalid_sequence');
+      expect(text).toContain('length');
+      expect(search).not.toHaveBeenCalled();
+    },
+  );
   it('throws no_criteria (with its declared recovery hint) when nothing to search on', async () => {
     const result = (await runToolContract(searchStructures, {})) as ContractError;
     expect(result.isError).toBe(true);
@@ -148,14 +190,14 @@ describe('protein_search_structures', () => {
     getEntries.mockResolvedValue([]);
     await searchStructures.handler(
       searchStructures.input.parse({
-        sequence: 'MVLSPADK',
+        sequence: 'MVLSPADKTN',
         min_identity: 0.9,
         max_evalue: 0.001,
       }),
       ctx(),
     );
     expect(search.mock.calls[0]?.[0]).toMatchObject({
-      sequence: 'MVLSPADK',
+      sequence: 'MVLSPADKTN',
       minIdentity: 0.9,
       maxEvalue: 0.001,
     });
@@ -166,7 +208,7 @@ describe('protein_search_structures', () => {
     getEntries.mockResolvedValue([]);
     await searchStructures.handler(
       searchStructures.input.parse({
-        sequence: 'MVLSPADK',
+        sequence: 'MVLSPADKTN',
         organism: 'Homo sapiens',
         method: 'X-RAY DIFFRACTION',
         max_resolution: 2.5,
@@ -411,7 +453,7 @@ describe('protein_search_structures', () => {
     });
     getEntries.mockResolvedValue([]);
     const out = await searchStructures.handler(
-      searchStructures.input.parse({ sequence: 'MVLSPADK' }),
+      searchStructures.input.parse({ sequence: 'MVLSPADKTN' }),
       ctx(),
     );
 
@@ -463,7 +505,7 @@ describe('protein_search_structures', () => {
     search.mockResolvedValue({ total: 1, hits: [{ id: '1A00_1', score: 1 }] });
     getEntries.mockResolvedValue([]);
 
-    await searchStructures.handler(searchStructures.input.parse({ sequence: 'MVLSPADK' }), ctx());
+    await searchStructures.handler(searchStructures.input.parse({ sequence: 'MVLSPADKTN' }), ctx());
 
     expect(getEntries).toHaveBeenCalledWith(['1A00'], expect.anything());
   });
@@ -473,7 +515,7 @@ describe('protein_search_structures', () => {
     getEntries.mockResolvedValue([]);
 
     const result = (await runToolContract(searchStructures, {
-      sequence: 'MVLSPADK',
+      sequence: 'MVLSPADKTN',
       limit: 1,
     })) as {
       structuredContent: { hits: Array<{ id: string; entityId?: string }> };
@@ -731,7 +773,7 @@ describe('protein_search_structures', () => {
     getEntries.mockResolvedValue([]);
     const c = ctx();
     await searchStructures.handler(
-      searchStructures.input.parse({ sequence: 'MVLSPADK', facets: ['organism'] }),
+      searchStructures.input.parse({ sequence: 'MVLSPADKTN', facets: ['organism'] }),
       c,
     );
     const notice = String(getEnrichment(c).notice);

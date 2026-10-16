@@ -798,7 +798,7 @@ describe('RcsbService search helpers', () => {
         { identifier: '2HHB_1', score: 0.9 },
       ],
     });
-    const out = await service().searchSequence('MVLS', { limit: 5 }, createMockContext());
+    const out = await service().searchSequence('MVLSPADKTN', { limit: 5 }, createMockContext());
     expect(out.total).toBe(12);
     expect(out.hits).toEqual([
       { id: '4HHB_1', score: 1 },
@@ -810,9 +810,9 @@ describe('RcsbService search helpers', () => {
     fetchJsonMock.mockResolvedValue({ total_count: 0, result_set: [] });
 
     await service().search({ text: 'kinase', start: 7, limit: 3 }, createMockContext());
-    await service().searchSequence('MVLS', { start: 8, limit: 4 }, createMockContext());
+    await service().searchSequence('MVLSPADKTN', { start: 8, limit: 4 }, createMockContext());
     await service().searchByLigand('HEM', { start: 9, limit: 5 }, createMockContext());
-    await service().searchSequence('MVLS', {}, createMockContext());
+    await service().searchSequence('MVLSPADKTN', {}, createMockContext());
     await service().searchByLigand('HEM', {}, createMockContext());
 
     const pages = fetchJsonMock.mock.calls.map((call) => {
@@ -1226,7 +1226,7 @@ describe('RcsbService results_content_type emission (#29)', () => {
 
   it('scopes a sequence search to the requested universes', async () => {
     await service().searchSequence(
-      'MVLS',
+      'MVLSPADKTN',
       { contentType: ['experimental', 'computational'] },
       createMockContext(),
     );

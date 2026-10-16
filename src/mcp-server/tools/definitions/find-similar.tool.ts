@@ -20,6 +20,7 @@ import { getRcsbService } from '@/services/rcsb/rcsb-service.js';
 import type { EntryMeta } from '@/services/rcsb/types.js';
 import { fetchText } from '@/services/shared/http.js';
 import { entryIdOf, isPdbId, isUniProtAccession } from '@/services/shared/identifiers.js';
+import { normalizeProteinSequence } from '@/services/shared/protein-sequence.js';
 import { getUniProtService } from '@/services/uniprot/uniprot-service.js';
 
 const DEFAULT_FOLDSEEK_DBS = ['pdb100', 'afdb50'];
@@ -32,7 +33,9 @@ const inputSchema = z.object({
   sequence: z
     .string()
     .optional()
-    .describe('One-letter amino-acid sequence to search from (by:sequence).'),
+    .describe(
+      'Protein sequence for by:sequence: at least 10 residues in A–I or K–Z (J excluded; B/O/U/X/Z accepted). Whitespace is removed and ASCII lowercase normalized.',
+    ),
   pdb_id: z.string().optional().describe('PDB entry ID to derive the query from.'),
   uniprot: z.string().optional().describe('UniProt accession to derive the query from.'),
   ticket_id: z
@@ -176,6 +179,14 @@ export const findSimilar = tool('protein_find_similar', {
   // Every reason is thrown by a helper below the handler, hence thrownBy on each entry.
   errors: [
     {
+      reason: 'invalid_sequence',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'A raw or identifier-resolved RCSB protein sequence contains invalid residues or has fewer than 10 residues after whitespace removal.',
+      recovery:
+        'Supply at least 10 one-letter residues A–I or K–Z (J excluded); remove punctuation or other invalid characters. Whitespace and ASCII lowercase are accepted.',
+      thrownBy: 'service',
+    },
+    {
       reason: 'missing_query',
       code: JsonRpcErrorCode.InvalidParams,
       when: 'None of sequence, pdb_id, or uniprot was provided.',
@@ -270,7 +281,7 @@ export const findSimilar = tool('protein_find_similar', {
 
 async function runSequence(input: FindSimilarInput, ctx: Ctx): Promise<FindSimilarOutput> {
   const rcsb = getRcsbService();
-  const sequence = await resolveSequence(input, ctx);
+  const sequence = normalizeProteinSequence(await resolveSequence(input, ctx));
 
   const result = await rcsb.searchSequence(
     sequence,
@@ -492,7 +503,7 @@ function rejectModeMismatchedFields(input: FindSimilarInput, ctx: Ctx): void {
 
 /** Resolve a query sequence from a direct sequence, PDB ID, or UniProt accession. */
 async function resolveSequence(input: FindSimilarInput, ctx: Ctx): Promise<string> {
-  if (input.sequence) return input.sequence.replace(/\s+/g, '');
+  if (input.sequence) return input.sequence;
   if (input.pdb_id) {
     const seq = await getRcsbService().getSequence(input.pdb_id, ctx);
     if (!seq)

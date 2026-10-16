@@ -13,6 +13,7 @@ import { buildFacetSpec, FACET_DIMENSION_NAMES } from '@/services/rcsb/facets.js
 import { getRcsbService } from '@/services/rcsb/rcsb-service.js';
 import type { EntryMeta, SearchHit } from '@/services/rcsb/types.js';
 import { entryIdOf, isComputedModelId } from '@/services/shared/identifiers.js';
+import { normalizeProteinSequence } from '@/services/shared/protein-sequence.js';
 import {
   CONTENT_TYPE_SCOPES,
   coverageNotices,
@@ -66,6 +67,14 @@ export const searchStructures = tool('protein_search_structures', {
 
   errors: [
     {
+      reason: 'invalid_sequence',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'The RCSB protein sequence contains invalid residues or has fewer than 10 residues after whitespace removal.',
+      recovery:
+        'Supply at least 10 one-letter residues A–I or K–Z (J excluded); remove punctuation or other invalid characters. Whitespace and ASCII lowercase are accepted.',
+      thrownBy: 'service',
+    },
+    {
       reason: 'no_criteria',
       code: JsonRpcErrorCode.InvalidParams,
       when: 'No query, sequence, organism, method, or maximum resolution was provided — nothing to search on.',
@@ -96,7 +105,7 @@ export const searchStructures = tool('protein_search_structures', {
       .string()
       .optional()
       .describe(
-        'One-letter amino-acid sequence; triggers an RCSB mmseqs2 sequence-similarity search.',
+        'Protein sequence for RCSB mmseqs2: at least 10 residues in A–I or K–Z (J excluded; B/O/U/X/Z accepted). Whitespace is removed and ASCII lowercase normalized.',
       ),
     organism: z
       .string()
@@ -252,7 +261,7 @@ export const searchStructures = tool('protein_search_structures', {
     const result = await rcsb.search(
       {
         ...(input.query ? { text: input.query } : {}),
-        ...(input.sequence ? { sequence: input.sequence } : {}),
+        ...(input.sequence ? { sequence: normalizeProteinSequence(input.sequence) } : {}),
         ...(input.organism ? { organism: input.organism } : {}),
         ...(input.method ? { method: input.method } : {}),
         ...(typeof input.max_resolution === 'number'

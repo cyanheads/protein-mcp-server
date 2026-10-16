@@ -125,6 +125,47 @@ const renderedText = (result: StructureResult) =>
   result.content.map((block) => block.text).join('\n');
 
 describe('protein_find_similar — by:sequence', () => {
+  it.each(['direct', 'pdb', 'uniprot'])(
+    'normalizes the %s sequence source and preserves precedence/fallback (#77)',
+    async (source) => {
+      searchSequence.mockResolvedValue({ total: 0, hits: [] });
+      getSequence.mockResolvedValue({ entityId: '4HHB_1', sequence: ' abou xzcdef\n' });
+      getUniProtSequence.mockResolvedValue(' abou xzcdef\n');
+      const input =
+        source === 'direct'
+          ? { sequence: ' abou xzcdef\n', pdb_id: '4HHB', uniprot: 'P69905' }
+          : source === 'pdb'
+            ? { sequence: '', pdb_id: '4HHB', uniprot: 'P69905' }
+            : { uniprot: 'P69905' };
+      const result = await runToolContract(findSimilar, { by: 'sequence', ...input });
+      expect(result.isError).not.toBe(true);
+      expect(searchSequence.mock.calls[0]?.[0]).toBe('ABOUXZCDEF');
+      if (source === 'direct') expect(getSequence).not.toHaveBeenCalled();
+      if (source !== 'uniprot') expect(getUniProtSequence).not.toHaveBeenCalled();
+      expect(result.structuredContent).toMatchObject({ hits: [], status: 'complete' });
+      expect(JSON.stringify(result.content)).toContain('No sequence-similar entries found');
+    },
+  );
+
+  it.each([' ', 'ACDEFGHIK', 'ACDEFGHIKJ', 'ACDEFGHIK*'])(
+    'declares actionable invalid-sequence errors on both surfaces for %j (#77)',
+    async (sequence) => {
+      const result = await runToolContract(findSimilar, { by: 'sequence', sequence });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        error: {
+          code: -32602,
+          data: {
+            reason: 'invalid_sequence',
+            recovery: { hint: expect.stringContaining('at least 10') },
+          },
+        },
+      });
+      expect(JSON.stringify(result.content)).toContain('invalid_sequence');
+      expect(JSON.stringify(result.content)).toMatch(/normalized length/i);
+      expect(searchSequence).not.toHaveBeenCalled();
+    },
+  );
   it('searches a directly-supplied sequence and enriches hits with entry metadata', async () => {
     searchSequence.mockResolvedValue({ total: 42, hits: [{ id: '4HHB_1', score: 1 }] });
     getEntries.mockResolvedValue([
@@ -138,7 +179,7 @@ describe('protein_find_similar — by:sequence', () => {
     ]);
     const c = ctx();
     const out = await findSimilar.handler(
-      findSimilar.input.parse({ by: 'sequence', sequence: 'MVL SPA DK' }),
+      findSimilar.input.parse({ by: 'sequence', sequence: 'MVL SPA DKTN' }),
       c,
     );
 
@@ -156,7 +197,7 @@ describe('protein_find_similar — by:sequence', () => {
     // input filter there, not a per-hit score.
     expect(out.hits[0]).not.toHaveProperty('identity');
     // Whitespace is stripped before the sequence search.
-    expect(searchSequence.mock.calls[0]?.[0]).toBe('MVLSPADK');
+    expect(searchSequence.mock.calls[0]?.[0]).toBe('MVLSPADKTN');
     expect(getEnrichment(c)).toMatchObject({ totalCount: 42 });
   });
 
@@ -170,7 +211,7 @@ describe('protein_find_similar — by:sequence', () => {
     });
     getEntries.mockResolvedValue([]);
     const out = await findSimilar.handler(
-      findSimilar.input.parse({ by: 'sequence', sequence: 'MVLSPADK' }),
+      findSimilar.input.parse({ by: 'sequence', sequence: 'MVLSPADKTN' }),
       ctx(),
     );
     // id is exactly what entryIdOf produces from the polymer-entity ID; entityId keeps the raw form.
@@ -198,7 +239,7 @@ describe('protein_find_similar — by:sequence', () => {
     ]);
 
     const out = await findSimilar.handler(
-      findSimilar.input.parse({ by: 'sequence', sequence: 'MVLSPADK' }),
+      findSimilar.input.parse({ by: 'sequence', sequence: 'MVLSPADKTN' }),
       ctx(),
     );
 
@@ -223,7 +264,7 @@ describe('protein_find_similar — by:sequence', () => {
     );
 
     const out = await findSimilar.handler(
-      findSimilar.input.parse({ by: 'sequence', sequence: 'MVLSPADK', limit: count }),
+      findSimilar.input.parse({ by: 'sequence', sequence: 'MVLSPADKTN', limit: count }),
       ctx(),
     );
 
@@ -238,7 +279,7 @@ describe('protein_find_similar — by:sequence', () => {
     searchSequence.mockResolvedValue({ total: 1, hits: [{ id: '1A00_1', score: 1 }] });
     getEntries.mockResolvedValue([{ id: '1A00', organisms: [], polymerEntities: [], ligands: [] }]);
     const sparse = await findSimilar.handler(
-      findSimilar.input.parse({ by: 'sequence', sequence: 'MVLSPADK' }),
+      findSimilar.input.parse({ by: 'sequence', sequence: 'MVLSPADKTN' }),
       ctx(),
     );
     expect(sparse.hits[0]).not.toHaveProperty('title');
@@ -246,7 +287,10 @@ describe('protein_find_similar — by:sequence', () => {
 
     getEntries.mockRejectedValue(new Error('metadata unavailable'));
     await expect(
-      findSimilar.handler(findSimilar.input.parse({ by: 'sequence', sequence: 'MVLSPADK' }), ctx()),
+      findSimilar.handler(
+        findSimilar.input.parse({ by: 'sequence', sequence: 'MVLSPADKTN' }),
+        ctx(),
+      ),
     ).rejects.toThrow('metadata unavailable');
   });
 
@@ -262,7 +306,7 @@ describe('protein_find_similar — by:sequence', () => {
 
     const result = (await runToolContract(findSimilar, {
       by: 'sequence',
-      sequence: 'MVLSPADK',
+      sequence: 'MVLSPADKTN',
       start: 25,
       limit: 2,
     })) as {
@@ -287,7 +331,7 @@ describe('protein_find_similar — by:sequence', () => {
       getEntries.mockResolvedValue([]);
       const c = ctx();
       await findSimilar.handler(
-        findSimilar.input.parse({ by: 'sequence', sequence: 'MVLSPADK', start, limit: 5 }),
+        findSimilar.input.parse({ by: 'sequence', sequence: 'MVLSPADKTN', start, limit: 5 }),
         c,
       );
       expect(getEnrichment(c)).toMatchObject({ totalCount: total, start });
@@ -305,24 +349,24 @@ describe('protein_find_similar — by:sequence', () => {
   });
 
   it('derives the query sequence from a PDB ID', async () => {
-    getSequence.mockResolvedValue({ entityId: '4HHB_1', sequence: 'MVLSPADK' });
+    getSequence.mockResolvedValue({ entityId: '4HHB_1', sequence: 'MVLSPADKTN' });
     // An empty first page means the search matched nothing, so the upstream total is 0.
     searchSequence.mockResolvedValue({ total: 0, hits: [] });
     getEntries.mockResolvedValue([]);
     const c = ctx();
     await findSimilar.handler(findSimilar.input.parse({ by: 'sequence', pdb_id: '4hhb' }), c);
     expect(getSequence).toHaveBeenCalledWith('4hhb', expect.anything());
-    expect(searchSequence.mock.calls[0]?.[0]).toBe('MVLSPADK');
+    expect(searchSequence.mock.calls[0]?.[0]).toBe('MVLSPADKTN');
     expect(String(getEnrichment(c).notice)).toMatch(/^No sequence-similar entries found/);
   });
 
   it('derives the query sequence from a UniProt accession', async () => {
-    getUniProtSequence.mockResolvedValue('MKTAYIAK');
+    getUniProtSequence.mockResolvedValue('MKTAYIAKQR');
     searchSequence.mockResolvedValue({ total: 0, hits: [] });
     getEntries.mockResolvedValue([]);
     const c = ctx();
     await findSimilar.handler(findSimilar.input.parse({ by: 'sequence', uniprot: 'P69905' }), c);
-    expect(searchSequence.mock.calls[0]?.[0]).toBe('MKTAYIAK');
+    expect(searchSequence.mock.calls[0]?.[0]).toBe('MKTAYIAKQR');
     expect(String(getEnrichment(c).notice)).toMatch(/^No sequence-similar entries found/);
   });
 
@@ -331,7 +375,7 @@ describe('protein_find_similar — by:sequence', () => {
     getEntries.mockResolvedValue([]);
     const c = ctx();
     const out = await findSimilar.handler(
-      findSimilar.input.parse({ by: 'sequence', sequence: 'XXXX' }),
+      findSimilar.input.parse({ by: 'sequence', sequence: 'XXXXXXXXXX' }),
       c,
     );
     expect(out.hits).toEqual([]);
@@ -339,7 +383,7 @@ describe('protein_find_similar — by:sequence', () => {
   });
 
   it('names the offset on a past-end sequence page instead of claiming no matches, on both surfaces (#66)', async () => {
-    getUniProtSequence.mockResolvedValue('MVLSPADK');
+    getUniProtSequence.mockResolvedValue('MVLSPADKTN');
     searchSequence.mockResolvedValue({ total: 1376, hits: [] });
     getEntries.mockResolvedValue([]);
 
@@ -374,7 +418,7 @@ describe('protein_find_similar — by:sequence', () => {
     getEntries.mockResolvedValue([]);
     const c = ctx();
     await findSimilar.handler(
-      findSimilar.input.parse({ by: 'sequence', sequence: 'XXXX', start: 40 }),
+      findSimilar.input.parse({ by: 'sequence', sequence: 'XXXXXXXXXX', start: 40 }),
       c,
     );
     expect(String(getEnrichment(c).notice)).toBe(
@@ -409,7 +453,7 @@ describe('protein_find_similar — by:sequence', () => {
     await findSimilar.handler(
       findSimilar.input.parse({
         by: 'sequence',
-        sequence: 'MVLS',
+        sequence: 'MVLSPADKTN',
         max_evalue: 0.001,
         min_identity: 0.6,
       }),
@@ -1076,7 +1120,7 @@ describe('protein_find_similar — per-mode field rejection (#57)', () => {
     searchSequence.mockResolvedValue({ total: 0, hits: [] });
     getEntries.mockResolvedValue([]);
     await findSimilar.handler(
-      findSimilar.input.parse({ by: 'sequence', sequence: 'MVLS', databases: [] }),
+      findSimilar.input.parse({ by: 'sequence', sequence: 'MVLSPADKTN', databases: [] }),
       ctx(),
     );
     expect(searchSequence).toHaveBeenCalled();
@@ -1097,7 +1141,7 @@ describe('protein_find_similar — per-mode field rejection (#57)', () => {
     searchSequence.mockResolvedValue({ total: 0, hits: [] });
     getEntries.mockResolvedValue([]);
     await findSimilar.handler(
-      findSimilar.input.parse({ by: 'sequence', sequence: 'MVLS', start: 50 }),
+      findSimilar.input.parse({ by: 'sequence', sequence: 'MVLSPADKTN', start: 50 }),
       ctx(),
     );
     expect(searchSequence.mock.calls[0]?.[1]).toMatchObject({ start: 50 });
@@ -1112,7 +1156,7 @@ describe('protein_find_similar — per-mode field rejection (#57)', () => {
   });
 
   it('leaves the shared pdb_id / uniprot / limit fields unaffected in both modes', async () => {
-    getSequence.mockResolvedValue({ entityId: '4HHB_1', sequence: 'MVLSPADK' });
+    getSequence.mockResolvedValue({ entityId: '4HHB_1', sequence: 'MVLSPADKTN' });
     searchSequence.mockResolvedValue({ total: 0, hits: [] });
     getEntries.mockResolvedValue([]);
     await findSimilar.handler(

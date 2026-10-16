@@ -14,6 +14,7 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import type { ServerConfig } from '@/config/server-config.js';
 import { fetchJson } from '../shared/http.js';
+import { normalizeProteinSequence } from '../shared/protein-sequence.js';
 import type {
   BindingResidue,
   BindingSite,
@@ -139,7 +140,7 @@ export class RcsbService {
           evalue_cutoff: opts.maxEvalue ?? 1,
           identity_cutoff: opts.minIdentity ?? 0,
           sequence_type: 'protein',
-          value: sequence,
+          value: normalizeProteinSequence(sequence),
         },
       },
       return_type: 'polymer_entity' as const,
@@ -483,7 +484,7 @@ export function buildQuery(params: StructureSearchParams): unknown {
         evalue_cutoff: params.maxEvalue ?? 1,
         identity_cutoff: params.minIdentity ?? 0,
         sequence_type: 'protein',
-        value: params.sequence,
+        value: normalizeProteinSequence(params.sequence),
       },
     });
   }
