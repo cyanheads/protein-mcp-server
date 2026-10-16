@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.8.7](changelog/0.8.x/0.8.7.md) — 2026-10-16
+
+Reach the full annotation set with independent class paging and source-preserved variant and domain records.
+
 ## [0.8.6](changelog/0.8.x/0.8.6.md) — 2026-10-07
 
 Framework ^0.13.6 → ^0.13.13: tool errors carry a request ID, declared recovery hints are filled in by the framework, and error data no longer carries stacks or request context; Docker builds install in a build-platform deps stage, and the registry's npm entries launch through npx with the HTTP entry pinned to HTTP.
