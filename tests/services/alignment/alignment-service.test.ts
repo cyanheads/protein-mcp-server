@@ -50,6 +50,43 @@ const service = () =>
 beforeEach(() => vi.clearAllMocks());
 
 describe('AlignmentService.comparePair', () => {
+  it.each(['fatcat-rigid', 'fatcat-flexible'] as const)(
+    'relays optional %s scores by source type, preserving zero and sparse values (#72)',
+    async (method) => {
+      fetchTextMock.mockResolvedValue('"scores-job"');
+      for (const scores of [
+        [
+          { type: 'sequence-similarity', value: 0.27 },
+          { type: 'RMSD', value: 3.2 },
+          { type: 'similarity-score', value: 52.17 },
+        ],
+        [{ type: 'similarity-score', value: 0 }],
+        [{ type: 'sequence-similarity', value: 0 }],
+        [],
+      ]) {
+        fetchResponseMock.mockResolvedValue(
+          new Response(JSON.stringify({ results: [{ summary: { scores } }] })),
+        );
+        const out = await service().comparePair(
+          { entryId: '4HHB' },
+          { entryId: '1CRN' },
+          method,
+          1000,
+          createMockContext(),
+        );
+        expect(out.status).toBe('complete');
+        if (out.status !== 'complete') throw new Error('expected complete');
+        for (const [raw, key] of [
+          ['similarity-score', 'similarityScore'],
+          ['sequence-similarity', 'sequenceSimilarity'],
+        ] as const) {
+          const source = scores.find((s) => s.type === raw);
+          if (source) expect(out.scores[key]).toBe(source.value);
+          else expect(out.scores).not.toHaveProperty(key);
+        }
+      }
+    },
+  );
   it('unwraps the submit UUID and normalizes a completed result', async () => {
     fetchTextMock.mockResolvedValue('"abc-123"\n');
     fetchResponseMock.mockResolvedValue({

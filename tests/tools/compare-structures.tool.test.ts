@@ -41,6 +41,68 @@ const CAP = getServerConfig().maxCompareStructures;
 beforeEach(() => vi.clearAllMocks());
 
 describe('protein_compare_structures', () => {
+  it('keeps optional scores on the original resumed orientation and renders mixed rows (#72)', async () => {
+    resumePair.mockResolvedValue({
+      status: 'complete',
+      uuid: 'old',
+      job: { method: 'fatcat-flexible', structures: [{ entryId: '4HHB' }, { entryId: '2HHB' }] },
+      scores: {
+        similarityScore: 52.17,
+        sequenceSimilarity: 0.27,
+        modeledResidues: [141, 46],
+        coverage: [18, 57],
+      },
+    });
+    comparePair.mockResolvedValue({ status: 'computing', uuid: 'pending' });
+    const result = await runToolContract(compareStructures, {
+      structures: [{ pdb_id: '2HHB' }, { pdb_id: '4HHB' }, { pdb_id: '1CRN' }],
+      method: 'fatcat-flexible',
+      resume: [{ a: '4HHB', b: '2HHB', uuid: 'old' }],
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      pairs: [
+        {
+          a: '4HHB',
+          b: '2HHB',
+          similarityScore: 52.17,
+          sequenceSimilarity: 0.27,
+          modeledResidues: [141, 46],
+          coverage: [18, 57],
+        },
+        { status: 'computing' },
+      ],
+    });
+    const text = result.content
+      .filter((b) => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n');
+    expect(text).toContain('| Similarity score | Sequence similarity (0–1) |');
+    expect(text).toContain(
+      '| 4HHB ↔ 2HHB | complete | — | — | — | 141 / 46 | 18 / 57 | 52.17 | 0.27 |',
+    );
+    expect(text).toContain('| 2HHB ↔ 1CRN | computing | — | — | — | — | — | — | — |');
+  });
+
+  it.each([{ similarityScore: 0 }, { sequenceSimilarity: 0 }, {}])(
+    'shows optional score columns independently by presence: %j (#72)',
+    async (scores) => {
+      comparePair
+        .mockResolvedValueOnce({ status: 'complete', uuid: 'u', scores })
+        .mockResolvedValueOnce({ status: 'failed', error: 'unavailable' });
+      const result = await runToolContract(compareStructures, { structures: three });
+      expect(result.structuredContent).toMatchObject({
+        pairs: [{ ...scores }, { status: 'failed' }],
+      });
+      const text = result.content
+        .filter((b) => b.type === 'text')
+        .map((b) => b.text)
+        .join('\n');
+      expect(text.includes(' Similarity score |')).toBe('similarityScore' in scores);
+      expect(text.includes(' Sequence similarity (0–1) |')).toBe('sequenceSimilarity' in scores);
+      if (Object.keys(scores).length) expect(text).toContain('| 0 |');
+    },
+  );
   it('aligns every structure to the first under reference:first', async () => {
     comparePair.mockResolvedValue({ status: 'complete', uuid: 'u', scores: { tmScore: 0.9 } });
     const input = compareStructures.input.parse({ structures: three, reference: 'first' });

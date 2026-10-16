@@ -35,6 +35,10 @@ export interface PairScores {
   modeledResidues?: [number, number];
   rmsd?: number;
   sequenceIdentity?: number;
+  /** Sequence similarity as the upstream 0–1 fraction, when supplied. */
+  sequenceSimilarity?: number;
+  /** Raw method-specific alignment score, when supplied. */
+  similarityScore?: number;
   tmScore?: number;
 }
 
@@ -184,6 +188,8 @@ function normalizeScores(result: RawAlignmentResult): PairScores {
   const tm = byType(/tm[\s_-]?score/i);
   const rmsd = byType(/rmsd/i);
   const seqId = byType(/seq.*id|identity/i);
+  const similarity = scores.find((s) => s.type === 'similarity-score')?.value;
+  const sequenceSimilarity = scores.find((s) => s.type === 'sequence-similarity')?.value;
   const aligned =
     summary.n_aln_residue_pairs ??
     summary.aligned_residues ??
@@ -194,6 +200,8 @@ function normalizeScores(result: RawAlignmentResult): PairScores {
   if (typeof tm === 'number') out.tmScore = tm;
   if (typeof rmsd === 'number') out.rmsd = rmsd;
   if (typeof seqId === 'number') out.sequenceIdentity = seqId;
+  if (typeof similarity === 'number') out.similarityScore = similarity;
+  if (typeof sequenceSimilarity === 'number') out.sequenceSimilarity = sequenceSimilarity;
   if (typeof aligned === 'number') out.alignedResidues = aligned;
   if (modeled) out.modeledResidues = modeled;
   if (coverage) out.coverage = coverage;

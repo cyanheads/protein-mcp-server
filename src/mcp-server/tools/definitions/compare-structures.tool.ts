@@ -104,6 +104,16 @@ const outputSchema = z.object({
               "TM-score (0–1; higher is more similar). Length-normalized by structure a's modeled length, so the same pair aligned b-first can score very differently (0.17 vs 0.40 for a 141- vs a 46-residue chain). It can also be sensitive to terminal length differences between the two structures — a one-residue overhang can flip the greedy superposition into a worse local optimum, dropping the score sharply. Cross-check rmsd and alignedResidues to spot such cases.",
             ),
           rmsd: z.number().optional().describe('RMSD in Å over aligned residues.'),
+          similarityScore: z
+            .number()
+            .optional()
+            .describe(
+              'Raw method-specific alignment score when supplied by RCSB; not normalized across methods.',
+            ),
+          sequenceSimilarity: z
+            .number()
+            .optional()
+            .describe('Sequence similarity as the upstream 0–1 fraction, when supplied.'),
           alignedResidues: z.number().optional().describe('Number of aligned residue pairs.'),
           modeledResidues: z
             .array(z.number())
@@ -252,6 +262,12 @@ export const compareStructures = tool('protein_compare_structures', {
             ? { tmScore: outcome.scores.tmScore }
             : {}),
           ...(typeof outcome.scores.rmsd === 'number' ? { rmsd: outcome.scores.rmsd } : {}),
+          ...(typeof outcome.scores.similarityScore === 'number'
+            ? { similarityScore: outcome.scores.similarityScore }
+            : {}),
+          ...(typeof outcome.scores.sequenceSimilarity === 'number'
+            ? { sequenceSimilarity: outcome.scores.sequenceSimilarity }
+            : {}),
           ...(typeof outcome.scores.alignedResidues === 'number'
             ? { alignedResidues: outcome.scores.alignedResidues }
             : {}),
@@ -287,18 +303,24 @@ export const compareStructures = tool('protein_compare_structures', {
 
   format: (result) => {
     const lines: string[] = [`## Structure comparison (${result.method}, ${result.reference})`];
+    const similarity = result.pairs.some((p) => p.similarityScore !== undefined);
+    const sequenceSimilarity = result.pairs.some((p) => p.sequenceSimilarity !== undefined);
+    const extraHeaders = `${similarity ? ' Similarity score |' : ''}${sequenceSimilarity ? ' Sequence similarity (0–1) |' : ''}`;
     lines.push(
-      '\n| Pair | Status | TM-score | RMSD (Å) | Aligned | Modeled a / b | Coverage % a / b |',
+      `\n| Pair | Status | TM-score | RMSD (Å) | Aligned | Modeled a / b | Coverage % a / b |${extraHeaders}`,
     );
-    lines.push('|---|---|---|---|---|---|---|');
+    lines.push(
+      `|---|---|---|---|---|---|---|${similarity ? '---|' : ''}${sequenceSimilarity ? '---|' : ''}`,
+    );
     for (const p of result.pairs) {
       const tm = typeof p.tmScore === 'number' ? p.tmScore.toFixed(3) : '—';
       const rmsd = typeof p.rmsd === 'number' ? p.rmsd.toFixed(2) : '—';
       const aligned = typeof p.alignedResidues === 'number' ? String(p.alignedResidues) : '—';
       const modeled = p.modeledResidues ? p.modeledResidues.join(' / ') : '—';
       const coverage = p.coverage ? p.coverage.join(' / ') : '—';
+      const extras = `${similarity ? ` ${p.similarityScore ?? '—'} |` : ''}${sequenceSimilarity ? ` ${p.sequenceSimilarity ?? '—'} |` : ''}`;
       lines.push(
-        `| ${p.a} ↔ ${p.b} | ${p.status} | ${tm} | ${rmsd} | ${aligned} | ${modeled} | ${coverage} |`,
+        `| ${p.a} ↔ ${p.b} | ${p.status} | ${tm} | ${rmsd} | ${aligned} | ${modeled} | ${coverage} |${extras}`,
       );
     }
     const notes = result.pairs.filter((p) => p.error || p.uuid);
