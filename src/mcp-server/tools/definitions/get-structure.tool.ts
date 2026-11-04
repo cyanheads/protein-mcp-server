@@ -1243,49 +1243,62 @@ async function inlineWindow(
  * only while the running total fits and afterwards only counts, so the batch
  * never holds more than COORDS_WINDOW characters of file text while still
  * measuring every file for the outline. Targets carry distinct IDs
- * ({@link selectForInlining}), so each keys its own read.
+ * ({@link selectForInlining}), so each keys its own read. A read that fails
+ * partway can pass the budget before it fails, dropping the text the other
+ * reads held; when the files that did read fit together, they are read once
+ * more, so whether they inline never depends on when the failure arrived.
  */
 async function inlineBatch(
   targets: StructureRecord[],
   concurrency: number,
   ctx: Context,
 ): Promise<InlineResult> {
-  const budget = new TextBudget(COORDS_WINDOW);
-  const formats = await mapWithConcurrency(targets, concurrency, async (s) => {
-    const file = textCoordinateFile(s);
-    if (!file) return null;
-    try {
-      await streamText(file.url, ctx, COORDINATE_FETCH, (chunk) => {
-        budget.add(s.id, chunk);
-        return true;
-      });
-    } catch (err) {
-      onReadFailure(s, err, ctx);
-      budget.release(s.id);
-      return null;
-    }
-    return file.format;
-  });
-
-  const failures = targets.filter((_, i) => !formats[i]).map((s) => s.id);
-  if (!budget.overBudget) {
-    targets.forEach((s, i) => {
-      const format = formats[i];
-      if (!format) return;
-      s.coordinates = budget.text(s.id);
-      s.coordinateFormat = format;
-      s.coordinatesOffset = 0;
+  const failures: string[] = [];
+  let selected = targets;
+  for (;;) {
+    const budget = new TextBudget(COORDS_WINDOW);
+    const formats = await mapWithConcurrency(selected, concurrency, async (s) => {
+      const file = textCoordinateFile(s);
+      if (!file) return null;
+      try {
+        await streamText(file.url, ctx, COORDINATE_FETCH, (chunk) => {
+          budget.add(s.id, chunk);
+          return true;
+        });
+      } catch (err) {
+        onReadFailure(s, err, ctx);
+        budget.release(s.id);
+        return null;
+      }
+      return file.format;
     });
-    return { failures };
+    const read = selected.flatMap((s, i) => {
+      const format = formats[i];
+      return format ? [{ s, format }] : [];
+    });
+    failures.push(...selected.filter((_, i) => !formats[i]).map((s) => s.id));
+
+    if (!budget.overBudget) {
+      for (const { s, format } of read) {
+        s.coordinates = budget.text(s.id);
+        s.coordinateFormat = format;
+        s.coordinatesOffset = 0;
+      }
+      return { failures };
+    }
+    const sections = read.map(({ s }) => ({ id: s.id, bytes: budget.length(s.id) }));
+    const total = sections.reduce((n, x) => n + x.bytes, 0);
+    // Only a failed read can have passed the budget for files that fit; each
+    // pass reads fewer files, so this re-reads at most once per failure.
+    if (read.length < selected.length && total <= COORDS_WINDOW) {
+      selected = read.map(({ s }) => s);
+      continue;
+    }
+    const [first] = sections;
+    if (!first) return { failures };
+    // One string for `overflow.notice` and the enrichment accumulator, so the two
+    // surfaces cannot describe the withheld state differently.
+    const notice = `Coordinates for ${sections.length} structure${sections.length === 1 ? '' : 's'} (${total} characters) exceeded the ${COORDS_WINDOW}-character budget for one response, so none were inlined. Re-call with the same ids and source plus sections: ${JSON.stringify([first.id])} to page through one structure's file in ${COORDS_WINDOW}-character windows, or download each file from that structure's coordinateUrls.`;
+    return { failures, notice, overflow: { sections, notice } };
   }
-  const sections = targets.flatMap((s, i) =>
-    formats[i] ? [{ id: s.id, bytes: budget.length(s.id) }] : [],
-  );
-  const [first] = sections;
-  if (!first) return { failures };
-  const total = sections.reduce((n, x) => n + x.bytes, 0);
-  // One string for `overflow.notice` and the enrichment accumulator, so the two
-  // surfaces cannot describe the withheld state differently.
-  const notice = `Coordinates for ${sections.length} structure${sections.length === 1 ? '' : 's'} (${total} characters) exceeded the ${COORDS_WINDOW}-character budget for one response, so none were inlined. Re-call with the same ids and source plus sections: ${JSON.stringify([first.id])} to page through one structure's file in ${COORDS_WINDOW}-character windows, or download each file from that structure's coordinateUrls.`;
-  return { failures, notice, overflow: { sections, notice } };
 }

@@ -2653,6 +2653,47 @@ describe('protein_get_structure coordinate paging (#94)', () => {
     expect(text).toContain(`\`\`\`cif\n${b}\n\`\`\``);
   });
 
+  it('inlines the files that read whole when a failed read passed the budget before failing', async () => {
+    getEntries.mockResolvedValue([experimentalMeta('4HHB'), experimentalMeta('1CRN')]);
+    const crnText = coordinateText(11_000);
+    // 4HHB streams 30,000 characters, past one window, then the connection drops.
+    const encoder = new TextEncoder();
+    const droppedBody = () => {
+      let sent = 0;
+      return new ReadableStream<Uint8Array>(
+        {
+          pull(controller) {
+            if (sent >= 30_000) {
+              controller.error(new TypeError('connection reset'));
+              return;
+            }
+            sent += 1_000;
+            controller.enqueue(encoder.encode('A'.repeat(1_000)));
+          },
+        },
+        { highWaterMark: 0 },
+      );
+    };
+    files.route(
+      { match: (req) => req.url === CIF_4HHB, respond: () => new Response(droppedBody()) },
+      { match: (req) => req.url === CIF_1CRN, respond: () => new Response(crnText) },
+    );
+    const result = await call({
+      ids: ['4HHB', '1CRN'],
+      source: 'experimental',
+      include_coords: true,
+    });
+
+    const [four, crn] = result.structuredContent.structures;
+    expect(four).not.toHaveProperty('coordinates');
+    expect(crn).toMatchObject({ coordinates: crnText, coordinatesOffset: 0 });
+    expect(result.structuredContent.overflow).toBeUndefined();
+    expect(String(result.structuredContent.notice)).toContain(
+      'Coordinate inlining failed for 4HHB',
+    );
+    expect(textOf(result)).toContain(`\`\`\`cif\n${crnText}\n\`\`\``);
+  });
+
   it.each([
     ['no structure selected', { include_coords: false }],
     ['two structures selected', { include_coords: true }],
