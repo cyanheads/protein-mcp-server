@@ -39,6 +39,8 @@ await createApp({
   ],
   resources: [pdbSummaryResource, afSummaryResource],
   prompts: [],
+  // Serves root skills/ (protein-guide) over MCP, read once at startup from the application root.
+  skills: 'skills',
   // Public, keyless data server — serve the full inventory to unauthenticated callers.
   landing: { requireAuth: false },
   // No tool gates on ctx.requestInput, so HTTP serving needs no live session.
@@ -59,7 +61,7 @@ await createApp({
     'resources/read': { ttlMs: 3_600_000, cacheScope: 'public' },
   },
   instructions:
-    'Find structures with protein_search_structures, then pass the returned IDs to protein_get_structure for metadata and coordinate URLs, or pass UniProt accessions there for AlphaFold predictions and the best available model. A PDB ID also chains into protein_get_annotations, protein_track_ligands, protein_find_similar, and protein_compare_structures for annotations, binding sites, homologs, and structural alignment, while protein_analyze_collection profiles the whole PDB as aggregate counts. A Foldseek search or structural alignment still running when the poll budget elapses returns status "computing" with a ticket (protein_find_similar) or a job UUID (protein_compare_structures); re-call with it to resume that job rather than resubmitting.',
+    'Find structures with protein_search_structures, then pass the returned IDs to protein_get_structure for metadata and coordinate URLs, or pass UniProt accessions there for AlphaFold predictions and the best available model. A PDB ID also chains into protein_get_annotations, protein_track_ligands, protein_find_similar, and protein_compare_structures for annotations, binding sites, homologs, and structural alignment, while protein_analyze_collection profiles the whole PDB as aggregate counts. A Foldseek search or structural alignment still running when the poll budget elapses returns status "computing" with a ticket (protein_find_similar) or a job UUID (protein_compare_structures); re-call with it to resume that job rather than resubmitting. The protein-guide skill (skill://protein-guide/SKILL.md) carries the identifier forms each tool takes, author versus label chain IDs, residue numbering, and the gates for reading best_available picks, sequence and Foldseek hits, ligand counts, and PDB profiles.',
   setup(core) {
     const serverConfig = getServerConfig();
     initRcsbService(core.config, core.storage, serverConfig);
