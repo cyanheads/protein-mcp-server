@@ -8,22 +8,28 @@
  * schema-boundary rejection of an empty or out-of-enum group_by, interval
  * routing across the two group_by positions and its rejection when neither can
  * consume the value, the scope enrichment, the realized bucket total across both
- * dimension positions, scope-param forwarding to the facet engine, and format()
- * rendering. RCSB service mocked.
+ * dimension positions, scope-param forwarding to the facet engine, the
+ * unknown_method contract, the computed-model notice for a method or resolution
+ * scope under predicted content, and format() rendering. The RCSB service
+ * instance is mocked; its query builders run for real.
  * @module tests/tools/analyze-collection.tool.test
  */
 
+import type { z } from '@cyanheads/mcp-ts-core';
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { FACET_DIMENSION_NAMES } from '@/services/rcsb/facets.js';
-import type { FacetDimension } from '@/services/rcsb/types.js';
+import type { FacetDimension, StructureSearchParams } from '@/services/rcsb/types.js';
 
 const analyzeFacets = vi.fn();
-vi.mock('@/services/rcsb/rcsb-service.js', () => ({
+// Only the service instance is faked; the query builders run the real code.
+vi.mock('@/services/rcsb/rcsb-service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/rcsb/rcsb-service.js')>()),
   getRcsbService: () => ({ analyzeFacets }),
 }));
 
 import { analyzeCollection } from '@/mcp-server/tools/definitions/analyze-collection.tool.js';
+import { buildQuery } from '@/services/rcsb/rcsb-service.js';
 
 const ctx = () => createMockContext({ errors: analyzeCollection.errors });
 
@@ -1259,6 +1265,36 @@ describe('protein_analyze_collection', () => {
     expect(trailer.map((b) => b.text).join('\n')).toMatch(/matched this scope/);
   });
 
+  it('explains a one-word organism scope that matched nothing on both surfaces (#86)', async () => {
+    analyzeFacets.mockResolvedValue({ total: 0, facets: [methodFacet([])] });
+    const result = (await runToolContract(analyzeCollection, {
+      group_by: ['method'],
+      organism: 'Influenza',
+    })) as { structuredContent: { notice?: string }; content: Array<{ text: string }> };
+
+    const advice = 'organism "Influenza" matches only a taxon with exactly that name';
+    expect(String(result.structuredContent.notice)).toMatch(/^No experimental structures matched/);
+    expect(String(result.structuredContent.notice)).toContain(advice);
+    expect(result.content.map((b) => b.text).join('\n')).toContain(advice);
+  });
+
+  it.each([
+    [{ organism: 'Influenza A virus' }, 0],
+    [{ organism: '11320' }, 0],
+    [{ organism: 'Influenza' }, 12],
+  ])('adds no one-word organism advice for %j over %i entries', async (scope, total) => {
+    analyzeFacets.mockResolvedValue({
+      total,
+      facets: [methodFacet(total > 0 ? [{ label: 'X-RAY DIFFRACTION', count: total }] : [])],
+    });
+    const c = ctx();
+    await analyzeCollection.handler(
+      analyzeCollection.input.parse({ group_by: ['method'], ...scope }),
+      c,
+    );
+    expect(String(getEnrichment(c).notice)).not.toContain('matches only a taxon');
+  });
+
   it('adds no zero-match notice when the scope did match (#54)', async () => {
     analyzeFacets.mockResolvedValue({
       total: 1000,
@@ -1310,5 +1346,110 @@ describe('protein_analyze_collection', () => {
     expect(text).toContain('Collection profile — 1000 entries');
     expect(text).toContain('**method**');
     expect(text).toContain('- X-RAY DIFFRACTION: 800');
+  });
+});
+
+describe('protein_analyze_collection method and organism scope (#86)', () => {
+  type Result = {
+    isError?: boolean;
+    structuredContent: Partial<ContractError['structuredContent']> & { notice?: string };
+    content: Array<{ type: string; text: string }>;
+  };
+  const run = async (input: z.input<typeof analyzeCollection.input>) =>
+    (await runToolContract(analyzeCollection, input)) as Result;
+  const allText = (result: Result) => result.content.map((b) => b.text).join('\n');
+
+  /** Run the real query builder on the forwarded scope, as the real facet call does before posting. */
+  const buildThenReturn = (result: unknown) =>
+    analyzeFacets.mockImplementation(async (params: StructureSearchParams) => {
+      buildQuery(params);
+      return result;
+    });
+
+  it('rejects an unknown method with its declared recovery on both surfaces', async () => {
+    buildThenReturn({ total: 0, facets: [methodFacet([])] });
+    const result = await run({ group_by: ['method'], method: 'cryo-ET' });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({
+      code: -32602,
+      data: { reason: 'unknown_method', recovery: { hint: expect.stringMatching(/alias/) } },
+    });
+    const text = allText(result);
+    expect(text).toContain('unknown_method');
+    expect(text).toContain('"cryo-ET"');
+    expect(text).toContain('SOLID-STATE NMR');
+  });
+
+  it('passes a method alias through for the query builder to resolve', async () => {
+    buildThenReturn({ total: 14944, facets: [methodFacet([])] });
+    const result = await run({ group_by: ['method'], method: 'NMR' });
+    expect(result.isError).not.toBe(true);
+    expect(analyzeFacets.mock.calls[0]?.[0]).toMatchObject({ method: 'NMR' });
+  });
+
+  it('lists the accepted methods and organism forms in the input descriptions', () => {
+    const { method, organism } = analyzeCollection.input.shape;
+    for (const value of ['X-RAY DIFFRACTION', 'SOLID-STATE NMR', 'THEORETICAL MODEL', 'cryo-EM']) {
+      expect(method.description).toContain(value);
+    }
+    expect(organism.description).toMatch(/common name/);
+    expect(organism.description).toMatch(/taxon ID/);
+  });
+
+  it.each([
+    [{ method: 'X-RAY DIFFRACTION' }, 'experimental method', 'method matches'],
+    [{ max_resolution: 2 }, 'resolution', 'max_resolution matches'],
+    [
+      { method: 'cryo-EM', max_resolution: 3 },
+      'experimental method or resolution',
+      'method and max_resolution match',
+    ],
+  ] as const)(
+    'explains why a %o scope matches no computed model, on both surfaces',
+    async (filter, lacking, named) => {
+      buildThenReturn({ total: 0, facets: [methodFacet([])] });
+      const result = await run({ group_by: ['organism'], ...filter, content_type: 'predicted' });
+      const notice = String(result.structuredContent.notice);
+      expect(notice).toMatch(/^No predicted models matched this scope/);
+      expect(notice).toContain(`computed models carry no ${lacking}`);
+      expect(notice).toContain(`so ${named} nothing under content_type "predicted"`);
+      expect(notice).not.toMatch(/Broaden or drop the query/);
+      expect(allText(result)).toContain(`computed models carry no ${lacking}`);
+    },
+  );
+
+  it('keeps the predicted zero-match notice for a scope with no method or resolution', async () => {
+    analyzeFacets.mockResolvedValue({ total: 0, facets: [methodFacet([])] });
+    const result = await run({
+      group_by: ['organism'],
+      organism: 'zzzz',
+      content_type: 'predicted',
+    });
+    // The predicted scope advice leads; a one-word organism adds its own (#86).
+    expect(result.structuredContent.notice).toBe(
+      'No predicted models matched this scope, so every requested dimension aggregated to nothing. Broaden or drop the query, organism, method, and max_resolution filters, or widen content_type to "all" to include experimental structures. organism "zzzz" matches only a taxon with exactly that name, scientific or NCBI common (such as "human"), never a word inside a longer name; for a species, pass its full name (such as "Zika virus") or its NCBI taxon ID.',
+    );
+  });
+
+  it('keeps the experimental and all zero-match notices for the same scope', async () => {
+    for (const [content_type, expected] of [
+      [
+        'experimental',
+        'No experimental structures matched this scope, so every requested dimension aggregated to nothing. Broaden or drop the query, organism, method, and max_resolution filters, or widen content_type to "all" to include computed models.',
+      ],
+      [
+        'all',
+        'No structures matched this scope in either the experimental or computed-model universe — content_type "all" is already the widest scope. Broaden or drop the query, organism, method, and max_resolution filters.',
+      ],
+    ] as const) {
+      buildThenReturn({ total: 0, facets: [methodFacet([])] });
+      const result = await run({
+        group_by: ['organism'],
+        method: 'EPR',
+        max_resolution: 1,
+        content_type,
+      });
+      expect(result.structuredContent.notice).toBe(expected);
+    }
   });
 });

@@ -4,7 +4,9 @@
  * xref resolution, sequence extraction, binding-site assembly with distance sort
  * and label/author residue numbering (per-instance chain pairing),
  * chem-comp normalization (SMILES/InChIKey fallback chain) with the 404 → null
- * branch, sequence/ligand/chem-comp search hit normalization, the
+ * branch, sequence/ligand/chem-comp search hit normalization (each sequence
+ * hit's verbose match context and the query length, read from the sequence
+ * service entry wherever it sits), the
  * `results_content_type` scope emitted on every search path, and the GraphQL
  * errors → throw path.
  * @module tests/services/rcsb/rcsb-normalizers.test
@@ -96,11 +98,12 @@ describe('RcsbService.getEntries', () => {
     expect(meta?.polymerEntities[0]).toMatchObject({
       entityId: '4HHB_1',
       description: 'Hemoglobin subunit alpha',
-      organism: 'Homo sapiens',
+      organisms: ['Homo sapiens'],
       authAsymIds: ['A', 'C'],
       labelAsymIds: ['A', 'C'],
       sequenceLength: 141,
     });
+    expect(meta?.polymerEntities[0]).not.toHaveProperty('organism');
     expect(meta?.ligands).toEqual([
       { compId: 'HEM', name: 'PROTOPORPHYRIN IX CONTAINING FE', formula: 'C34 H32 Fe N4 O4' },
     ]);
@@ -296,6 +299,227 @@ describe('RcsbService.getEntries', () => {
     const [meta] = await service().getEntries(['4HHB'], createMockContext());
     expect(meta).toMatchObject({ id: '4HHB', resolution: 1.74 });
   });
+
+  /**
+   * Live 6M0J (SARS-CoV-2 RBD bound to ACE2), trimmed to the queried fields, in
+   * entity-number order. RCSB returns its entity arrays in an order fixed per
+   * upstream connection and varying between connections, so the reversed copy
+   * below is a shape the live API really serves.
+   */
+  const ENTRY_6M0J = {
+    rcsb_id: '6M0J',
+    struct: {
+      title: 'Crystal structure of SARS-CoV-2 spike receptor-binding domain bound with ACE2',
+    },
+    exptl: [{ method: 'X-RAY DIFFRACTION' }],
+    rcsb_entry_info: { resolution_combined: [2.45], molecular_weight: 97.14 },
+    polymer_entities: [
+      {
+        rcsb_id: '6M0J_1',
+        rcsb_polymer_entity: { pdbx_description: 'Angiotensin-converting enzyme 2' },
+        rcsb_polymer_entity_container_identifiers: { auth_asym_ids: ['A'], asym_ids: ['A'] },
+        rcsb_entity_source_organism: [{ ncbi_scientific_name: 'Homo sapiens' }],
+      },
+      {
+        rcsb_id: '6M0J_2',
+        rcsb_polymer_entity: { pdbx_description: 'Spike protein S1' },
+        rcsb_polymer_entity_container_identifiers: { auth_asym_ids: ['E'], asym_ids: ['B'] },
+        rcsb_entity_source_organism: [
+          { ncbi_scientific_name: 'Severe acute respiratory syndrome coronavirus 2' },
+        ],
+      },
+    ],
+    nonpolymer_entities: [
+      {
+        rcsb_id: '6M0J_3',
+        rcsb_nonpolymer_entity_container_identifiers: {
+          nonpolymer_comp_id: 'ZN',
+          auth_asym_ids: ['A'],
+        },
+        nonpolymer_comp: { chem_comp: { name: 'ZINC ION', formula: 'Zn' } },
+      },
+      {
+        rcsb_id: '6M0J_4',
+        rcsb_nonpolymer_entity_container_identifiers: {
+          nonpolymer_comp_id: 'CL',
+          auth_asym_ids: ['A'],
+        },
+        nonpolymer_comp: { chem_comp: { name: 'CHLORIDE ION', formula: 'Cl' } },
+      },
+      {
+        rcsb_id: '6M0J_5',
+        rcsb_nonpolymer_entity_container_identifiers: {
+          nonpolymer_comp_id: 'NAG',
+          auth_asym_ids: ['A', 'E'],
+        },
+        nonpolymer_comp: {
+          chem_comp: { name: '2-acetamido-2-deoxy-beta-D-glucopyranose', formula: 'C8 H15 N O6' },
+        },
+      },
+    ],
+  };
+
+  const reversedEntities = (entry: typeof ENTRY_6M0J) => ({
+    ...entry,
+    polymer_entities: entry.polymer_entities.toReversed(),
+    nonpolymer_entities: entry.nonpolymer_entities.toReversed(),
+  });
+
+  it('orders polymer entities and ligands by entity number whatever order upstream serves (6M0J, #85)', async () => {
+    fetchJsonMock.mockResolvedValueOnce(gql({ entries: [ENTRY_6M0J] }));
+    fetchJsonMock.mockResolvedValueOnce(gql({ entries: [reversedEntities(ENTRY_6M0J)] }));
+    const forward = await service().getEntries(['6M0J'], createMockContext());
+    const reversed = await service().getEntries(['6M0J'], createMockContext());
+
+    expect(reversed).toEqual(forward);
+    const [meta] = reversed;
+    expect(meta?.polymerEntities.map((e) => e.entityId)).toEqual(['6M0J_1', '6M0J_2']);
+    expect(meta?.ligands.map((l) => l.compId)).toEqual(['ZN', 'CL', 'NAG']);
+    expect(meta?.organisms).toEqual([
+      'Homo sapiens',
+      'Severe acute respiratory syndrome coronavirus 2',
+    ]);
+    expect(meta?.polymerEntities[1]?.organisms).toEqual([
+      'Severe acute respiratory syndrome coronavirus 2',
+    ]);
+  });
+
+  it('puts entity _10 after _9 and an unnumbered entity last, without throwing (#85)', async () => {
+    fetchJsonMock.mockResolvedValue(
+      gql({
+        entries: [
+          {
+            rcsb_id: '1ABC',
+            polymer_entities: [
+              { rcsb_id: '1ABC_10', rcsb_polymer_entity: { pdbx_description: 'ten' } },
+              { rcsb_polymer_entity: { pdbx_description: 'unnumbered' } },
+              { rcsb_id: '1ABC_9', rcsb_polymer_entity: { pdbx_description: 'nine' } },
+              { rcsb_id: '1ABC_2', rcsb_polymer_entity: { pdbx_description: 'two' } },
+            ],
+            nonpolymer_entities: [
+              {
+                rcsb_id: '1ABC_12',
+                rcsb_nonpolymer_entity_container_identifiers: { nonpolymer_comp_id: 'SO4' },
+              },
+              { rcsb_nonpolymer_entity_container_identifiers: { nonpolymer_comp_id: 'GOL' } },
+              {
+                rcsb_id: '1ABC_11',
+                rcsb_nonpolymer_entity_container_identifiers: { nonpolymer_comp_id: 'HEM' },
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const [meta] = await service().getEntries(['1ABC'], createMockContext());
+    expect(meta?.polymerEntities.map((e) => e.description)).toEqual([
+      'two',
+      'nine',
+      'ten',
+      'unnumbered',
+    ]);
+    expect(meta?.ligands.map((l) => l.compId)).toEqual(['HEM', 'SO4', 'GOL']);
+  });
+
+  it('keeps every distinct source organism of a chimeric entity (2RH1, #85)', async () => {
+    // Live 2RH1_1, the beta-2 adrenergic receptor with T4 lysozyme fused into a
+    // loop: three source segments, two of them human.
+    fetchJsonMock.mockResolvedValue(
+      gql({
+        entries: [
+          {
+            rcsb_id: '2RH1',
+            polymer_entities: [
+              {
+                rcsb_id: '2RH1_1',
+                rcsb_polymer_entity: {
+                  pdbx_description: 'beta-2-adrenergic receptor/T4-lysozyme chimera',
+                },
+                rcsb_entity_source_organism: [
+                  { ncbi_scientific_name: 'Homo sapiens' },
+                  { ncbi_scientific_name: 'Homo sapiens' },
+                  { ncbi_scientific_name: 'Tequatrovirus T4' },
+                  {}, // an unnamed source contributes nothing
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const [meta] = await service().getEntries(['2RH1'], createMockContext());
+    expect(meta?.polymerEntities[0]?.organisms).toEqual(['Homo sapiens', 'Tequatrovirus T4']);
+    expect(meta?.organisms).toEqual(['Homo sapiens', 'Tequatrovirus T4']);
+  });
+
+  it('collects entry organisms across entities in entity-number order, deduped (#85)', async () => {
+    fetchJsonMock.mockResolvedValue(
+      gql({
+        entries: [
+          {
+            rcsb_id: '7BZ5',
+            polymer_entities: [
+              {
+                rcsb_id: '7BZ5_3',
+                rcsb_entity_source_organism: [{ ncbi_scientific_name: 'Homo sapiens' }],
+              },
+              {
+                rcsb_id: '7BZ5_2',
+                rcsb_entity_source_organism: [{ ncbi_scientific_name: 'Homo sapiens' }],
+              },
+              {
+                rcsb_id: '7BZ5_1',
+                rcsb_entity_source_organism: [
+                  { ncbi_scientific_name: 'Severe acute respiratory syndrome coronavirus 2' },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const [meta] = await service().getEntries(['7BZ5'], createMockContext());
+    expect(meta?.organisms).toEqual([
+      'Severe acute respiratory syndrome coronavirus 2',
+      'Homo sapiens',
+    ]);
+  });
+
+  it('omits organisms on an entity whose sources name none (#85)', async () => {
+    fetchJsonMock.mockResolvedValue(
+      gql({
+        entries: [
+          {
+            rcsb_id: '1AOI',
+            polymer_entities: [{ rcsb_id: '1AOI_1', rcsb_entity_source_organism: [] }],
+          },
+        ],
+      }),
+    );
+    const [meta] = await service().getEntries(['1AOI'], createMockContext());
+    expect(meta?.polymerEntities[0]).toEqual({ entityId: '1AOI_1' });
+    expect(meta?.organisms).toEqual([]);
+  });
+
+  it("carries each ligand's author chains when upstream reports them (#92)", async () => {
+    fetchJsonMock.mockResolvedValue(gql({ entries: [ENTRY_6M0J, ENTRY_4HHB] }));
+    const [m6, m4] = await service().getEntries(['6M0J', '4HHB'], createMockContext());
+    expect(m6?.ligands.find((l) => l.compId === 'NAG')?.authAsymIds).toEqual(['A', 'E']);
+    // 4HHB's HEM fixture carries no author chains: unknown stays absent.
+    expect(m4?.ligands[0]).not.toHaveProperty('authAsymIds');
+  });
+
+  it('selects entity numbers on both entity arrays and ligand author chains (#85, #92)', async () => {
+    fetchJsonMock.mockResolvedValue(gql({ entries: [] }));
+    await service().getEntries(['6M0J'], createMockContext());
+    const opts = fetchJsonMock.mock.calls[0]?.[2] as unknown as { body: string };
+    const query = JSON.parse(opts.body).query as string;
+    expect(query).toMatch(/(?<!non)polymer_entities\s*\{\s*rcsb_id\b/);
+    expect(query).toMatch(/nonpolymer_entities\s*\{\s*rcsb_id\b/);
+    expect(query).toContain(
+      'rcsb_nonpolymer_entity_container_identifiers { nonpolymer_comp_id auth_asym_ids }',
+    );
+  });
 });
 
 describe('RcsbService.resolveUniprotEntities', () => {
@@ -370,6 +594,40 @@ describe('RcsbService.resolveUniprotEntities', () => {
     expect(await service().resolveUniprotEntities('1ABC', createMockContext())).toEqual([]);
   });
 
+  /** Live 1AOI (nucleosome core particle) xref shape: a DNA entity, then four histones. */
+  const XREF_1AOI = [
+    { rcsb_id: '1AOI_1', chains: ['I', 'J'], accession: undefined },
+    { rcsb_id: '1AOI_2', chains: ['A', 'E'], accession: 'P84233' },
+    { rcsb_id: '1AOI_3', chains: ['B', 'F'], accession: 'P62799' },
+    { rcsb_id: '1AOI_4', chains: ['C', 'G'], accession: 'P06897' },
+    { rcsb_id: '1AOI_5', chains: ['D', 'H'], accession: 'P02281' },
+  ].map(({ rcsb_id, chains, accession }) => ({
+    rcsb_id,
+    rcsb_polymer_entity_container_identifiers: {
+      auth_asym_ids: chains,
+      reference_sequence_identifiers: accession
+        ? [{ database_name: 'UniProt', database_accession: accession }]
+        : [],
+    },
+  }));
+
+  it('returns entities in entity-number order whatever order upstream serves (1AOI, #85)', async () => {
+    // Upstream served 1AOI as 5,4,3,2,1 on four of six fresh connections.
+    for (const polymer_entities of [XREF_1AOI, XREF_1AOI.toReversed()]) {
+      fetchJsonMock.mockResolvedValueOnce(gql({ entry: { polymer_entities } }));
+      const out = await service().resolveUniprotEntities('1AOI', createMockContext());
+      expect(out.map((e) => e.accession)).toEqual(['P84233', 'P62799', 'P06897', 'P02281']);
+      expect(out.flatMap((e) => e.chains)).toEqual(['A', 'E', 'B', 'F', 'C', 'G', 'D', 'H']);
+    }
+  });
+
+  it('selects the entity number in the xref query (#85)', async () => {
+    fetchJsonMock.mockResolvedValue(gql({ entry: null }));
+    await service().resolveUniprotEntities('1AOI', createMockContext());
+    const opts = fetchJsonMock.mock.calls[0]?.[2] as unknown as { body: string };
+    expect(JSON.parse(opts.body).query).toMatch(/polymer_entities\s*\{\s*rcsb_id\b/);
+  });
+
   it('fails rather than reporting a partial xref set when errors accompany data (#48)', async () => {
     // The same precedence fix covers every consumer of the shared GraphQL helper:
     // a dropped sub-selection must not read as "this entry has no UniProt xref".
@@ -387,24 +645,274 @@ describe('RcsbService.resolveUniprotEntities', () => {
 });
 
 describe('RcsbService.getSequence', () => {
-  it('returns the first entity carrying a canonical sequence, whitespace-stripped', async () => {
+  /** One polymer entity as the Sequence query selects it. */
+  const poly = (rcsb_id: string, type: string, chains: string[], sequence: string) => ({
+    rcsb_id,
+    entity_poly: { rcsb_entity_polymer_type: type, pdbx_seq_one_letter_code_can: sequence },
+    rcsb_polymer_entity_container_identifiers: { auth_asym_ids: chains },
+  });
+
+  /** Real polymer entities (2026-11-03), in the order one upstream connection served them. */
+  const ENTRIES: Record<string, ReturnType<typeof poly>[]> = {
+    '1AOI': [
+      poly(
+        '1AOI_1',
+        'DNA',
+        ['I', 'J'],
+        'ATCAATATCCACCTGCAGATTCTACCAAAAGTGTATTTGGAAACTGCTCCATCAAAAGGCATGTTCAGCTGAATTCAGCTGAACATGCCTTTTGATGGAGCAGTTTCCAAATACACTTTTGGTAGAATCTGCAGGTGGATATTGAT',
+      ),
+      poly(
+        '1AOI_2',
+        'Protein',
+        ['A', 'E'],
+        'LATKAARKSAPATGGVKKPHRYRPGTVALREIRRYQKSTELLIRKLPFQRLVREIAQDFKTDLRFQSSAVMALQEASEAYLVALFEDTNLCAIHAKRVTIMPKDIQLARRIRGERA',
+      ),
+      poly(
+        '1AOI_3',
+        'Protein',
+        ['B', 'F'],
+        'KRHRKVLRDNIQGITKPAIRRLARRGGVKRISGLIYEETRGVLKVFLENVIRDAVTYTEHAKRKTVTAMDVVYALKRQGRTLYGFGG',
+      ),
+      poly(
+        '1AOI_4',
+        'Protein',
+        ['C', 'G'],
+        'GKQGGKTRAKAKTRSSRAGLQFPVGRVHRLLRKGNYAERVGAGAPVYLAAVLEYLTAEILELAGNAARDNKKTRIIPRHLQLAVRNDEELNKLLGRVTIAQGGVLPNIQSVLLPKK',
+      ),
+      poly(
+        '1AOI_5',
+        'Protein',
+        ['D', 'H'],
+        'KKRRKTRKESYAIYVYKVLKQVHPDTGISSKAMSIMNSFVNDVFERIAGEASRLAHYNKRSTITSREIQTAVRLLLPGELAKHAVSEGTKAVTKYTSAK',
+      ),
+    ],
+    '1TSR': [
+      poly(
+        '1TSR_3',
+        'Protein',
+        ['A', 'B', 'C'],
+        'SSSVPSQKTYQGSYGFRLGFLHSGTAKSVTCTYSPALNKMFCQLAKTCPVQLWVDSTPPPGTRVRAMAIYKQSQHMTEVVRRCPHHERCSDSDGLAPPQHLIRVEGNLRVEYLDDRNTFRHSVVVPYEPPEVGSDCTTIHYNYMCNSSCMGGMNRRPILTIITLEDSSGNLLGRNSFEVRVCACPGRDRRTEEENLRKKGEPHHELPPGSTKRALPNNT',
+      ),
+      poly('1TSR_2', 'DNA', ['F'], 'ATAATTGGGCAAGTCTAGGAA'),
+      poly('1TSR_1', 'DNA', ['E'], 'TTTCCTAGACTTGCCCAATTA'),
+    ],
+    '1CDW': [
+      poly(
+        '1CDW_3',
+        'Protein',
+        ['A'],
+        'SGIVPQLQNIVSTVNLGCKLDLKTIALRARNAEYNPKRFAAVIMRIREPRTTALIFSSGKMVCTGAKSEENSRLAARKYARVVQKLGFPAKFLDFKIQNMVGSCDVKFPIRLEGLVLTHQQFSSYEPELFPGLIYRMIKPRIVLLIFVSGKVVLTGAKVRAEIYEAFENIYPILKGFRK',
+      ),
+      poly('1CDW_2', 'DNA', ['C'], 'CAGCCTTTTATAGCAG'),
+      poly('1CDW_1', 'DNA', ['B'], 'CTGCTATAAAAGGCTG'),
+    ],
+    '1BNA': [poly('1BNA_1', 'DNA', ['A', 'B'], 'CGCGAATTCGCG')],
+    '4HHB': [
+      poly(
+        '4HHB_2',
+        'Protein',
+        ['B', 'D'],
+        'VHLTPEEKSAVTALWGKVNVDEVGGEALGRLLVVYPWTQRFFESFGDLSTPDAVMGNPKVKAHGKKVLGAFSDGLAHLDNLKGTFATLSELHCDKLHVDPENFRLLGNVLVCVLAHHFGKEFTPPVQAAYQKVVAGVANALAHKYH',
+      ),
+      poly(
+        '4HHB_1',
+        'Protein',
+        ['A', 'C'],
+        'VLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFPTTKTYFPHFDLSHGSAQVKGHGKKVADALTNAVAHVDDMPNALSALSDLHAHKLRVDPVNFKLLSHCLLVTLAAHLPAEFTPAVHASLDKFLASVSTVLTSKYR',
+      ),
+    ],
+    // 8AVR_2 is a polypeptide(D), which RCSB types as Protein too.
+    '8AVR': [
+      poly('8AVR_2', 'Protein', ['B', 'D'], 'MSWLNFLKYIAKYGKKAVSAAWKYKGKVLEWLNVGPTLEWVWQKLKKIAGL'),
+      poly('8AVR_1', 'Protein', ['A', 'C'], 'MSWLNFLKYIAKYGKKAVSAAWKYKGKVLEWLNVGPTLEWVWQKLKKIAGL'),
+    ],
+    '1A5H': [
+      poly(
+        '1A5H_2',
+        'Protein',
+        ['A', 'B'],
+        'IKGGLFADIASHPWQAAIFAKHRRSPGERFLCGGILISSCWILSAAHCFQERFPPHHLTVILGRTYRVVPGEEEQKFEVEKYIVHKEFDDDTYDNDIALLQLKSDSSRCAQESSVVRTVCLPPADLQLPDWTECELSGYGKHEALSPFYSERLKEAHVRLYPSSRCTSQHLLNRTVTDNMLCAGDTRSGGPQANLHDACQGDSGGPLVCLNDGRMTLVGIISWGLGCGQKDVPGVYTKVTNYLDWIRDNMRP',
+      ),
+      poly('1A5H_1', 'Protein', ['C', 'D'], 'TCGLRQY'),
+    ],
+    '1A3I': [
+      poly('1A3I_2', 'Protein', ['B', 'C'], 'PPGPPG'),
+      poly('1A3I_1', 'Protein', ['A'], 'PPGPPGPPG'),
+    ],
+  };
+
+  const sequenceOf = (entityId: string) =>
+    Object.values(ENTRIES)
+      .flat()
+      .find((e) => e.rcsb_id === entityId)?.entity_poly.pdbx_seq_one_letter_code_can;
+
+  /** Look an entry up once with its entities in the captured order and once reversed. */
+  const bothOrders = async (pdbId: string, chain?: string) => {
+    const results = [];
+    for (const polymer_entities of [ENTRIES[pdbId], ENTRIES[pdbId]?.toReversed()]) {
+      fetchJsonMock.mockResolvedValueOnce(gql({ entry: { polymer_entities } }));
+      results.push(await service().getSequence(pdbId, chain, createMockContext()));
+    }
+    const [first, second] = results;
+    if (!first) throw new Error(`no lookup result for ${pdbId}`);
+    expect(second).toEqual(first);
+    return first;
+  };
+
+  it.each([
+    [
+      '1AOI',
+      { entityId: '1AOI_2', chains: ['A', 'E'], length: 116 },
+      [
+        { entityId: '1AOI_3', chains: ['B', 'F'], length: 87 },
+        { entityId: '1AOI_4', chains: ['C', 'G'], length: 116 },
+        { entityId: '1AOI_5', chains: ['D', 'H'], length: 99 },
+      ],
+    ],
+    ['1TSR', { entityId: '1TSR_3', chains: ['A', 'B', 'C'], length: 219 }, []],
+    ['1CDW', { entityId: '1CDW_3', chains: ['A'], length: 179 }, []],
+    [
+      '4HHB',
+      { entityId: '4HHB_1', chains: ['A', 'C'], length: 141 },
+      [{ entityId: '4HHB_2', chains: ['B', 'D'], length: 146 }],
+    ],
+  ])(
+    'searches %s’s lowest-numbered protein entity, never a DNA one, whatever the upstream order (#84)',
+    async (pdbId, entity, otherEntities) => {
+      expect(await bothOrders(pdbId)).toEqual({
+        kind: 'found',
+        entity,
+        sequence: sequenceOf(entity.entityId),
+        otherEntities,
+      });
+    },
+  );
+
+  it('skips a sub-10-residue protein entity by default (#84)', async () => {
+    expect(await bothOrders('1A5H')).toEqual({
+      kind: 'found',
+      entity: { entityId: '1A5H_2', chains: ['A', 'B'], length: 252 },
+      sequence: sequenceOf('1A5H_2'),
+      otherEntities: [{ entityId: '1A5H_1', chains: ['C', 'D'], length: 7 }],
+    });
+  });
+
+  it('falls back to the lowest-numbered protein entity when every one is under 10 residues (#84)', async () => {
+    expect(await bothOrders('1A3I')).toEqual({
+      kind: 'found',
+      entity: { entityId: '1A3I_1', chains: ['A'], length: 9 },
+      sequence: 'PPGPPGPPG',
+      otherEntities: [{ entityId: '1A3I_2', chains: ['B', 'C'], length: 6 }],
+    });
+  });
+
+  it('takes a protein entity of exactly 10 residues by default, RCSB’s sequence-search minimum (#84)', async () => {
+    const tenMer = poly('9TEN_1', 'Protein', ['P'], 'ACDEFGHIKL');
+    const longer = poly('9TEN_2', 'Protein', ['A'], 'MVLSPADKTNVKAAWGKVGAHAGEYG');
+    for (const polymer_entities of [
+      [tenMer, longer],
+      [longer, tenMer],
+    ]) {
+      fetchJsonMock.mockResolvedValueOnce(gql({ entry: { polymer_entities } }));
+      expect(await service().getSequence('9TEN', undefined, createMockContext())).toMatchObject({
+        kind: 'found',
+        entity: { entityId: '9TEN_1', chains: ['P'], length: 10 },
+        sequence: 'ACDEFGHIKL',
+      });
+    }
+  });
+
+  it.each([
+    ['4HHB', 'A', '4HHB_1'],
+    ['4HHB', 'B', '4HHB_2'],
+    ['4HHB', 'D', '4HHB_2'],
+    ['8AVR', 'B', '8AVR_2'],
+    ['1A5H', 'C', '1A5H_1'],
+  ])(
+    'selects the protein entity of %s covering author chain %s (#84)',
+    async (pdbId, chain, entityId) => {
+      const out = await bothOrders(pdbId, chain);
+      expect(out).toMatchObject({
+        kind: 'found',
+        entity: { entityId },
+        sequence: sequenceOf(entityId),
+      });
+      // Every other protein entity is listed, the selected one never.
+      const others = out.kind === 'found' ? out.otherEntities.map((e) => e.entityId) : [];
+      expect(others).toHaveLength((ENTRIES[pdbId] ?? []).length - 1);
+      expect(others).not.toContain(entityId);
+    },
+  );
+
+  it.each([
+    [
+      '4HHB',
+      'b',
+      [
+        { entityId: '4HHB_1', chains: ['A', 'C'], length: 141 },
+        { entityId: '4HHB_2', chains: ['B', 'D'], length: 146 },
+      ],
+    ],
+    // E is one of 1TSR's DNA strands.
+    ['1TSR', 'E', [{ entityId: '1TSR_3', chains: ['A', 'B', 'C'], length: 219 }]],
+    ['1TSR', 'Z', [{ entityId: '1TSR_3', chains: ['A', 'B', 'C'], length: 219 }]],
+  ])(
+    'reports chain_not_found for %s chain %j, listing the protein entities in entity order (#84)',
+    async (pdbId, chain, proteinEntities) => {
+      expect(await bothOrders(pdbId, chain)).toEqual({ kind: 'chain_not_found', proteinEntities });
+    },
+  );
+
+  it('reports no_protein for an entry of nucleic-acid entities only, with or without a chain (#84)', async () => {
+    expect(await bothOrders('1BNA')).toEqual({ kind: 'no_protein' });
+    expect(await bothOrders('1BNA', 'A')).toEqual({ kind: 'no_protein' });
+  });
+
+  it('treats a protein entity without a canonical sequence as absent', async () => {
     fetchJsonMock.mockResolvedValue(
       gql({
         entry: {
           polymer_entities: [
-            { rcsb_id: '4HHB_0', entity_poly: {} }, // no sequence → skipped
-            { rcsb_id: '4HHB_1', entity_poly: { pdbx_seq_one_letter_code_can: 'MVL\nSPA DK' } },
+            { rcsb_id: '9XYZ_1', entity_poly: { rcsb_entity_polymer_type: 'Protein' } },
           ],
         },
       }),
     );
-    const out = await service().getSequence('4HHB', createMockContext());
-    expect(out).toEqual({ entityId: '4HHB_1', sequence: 'MVLSPADK' });
+    expect(await service().getSequence('9XYZ', undefined, createMockContext())).toEqual({
+      kind: 'no_protein',
+    });
   });
 
-  it('returns null when no entity carries a sequence', async () => {
-    fetchJsonMock.mockResolvedValue(gql({ entry: { polymer_entities: [{ rcsb_id: 'x' }] } }));
-    expect(await service().getSequence('1ABC', createMockContext())).toBeNull();
+  it('reports entry_not_found when RCSB has no such entry', async () => {
+    fetchJsonMock.mockResolvedValue(gql({ entry: null }));
+    expect(await service().getSequence('9ZZZ', undefined, createMockContext())).toEqual({
+      kind: 'entry_not_found',
+    });
+  });
+
+  it('strips whitespace from the canonical sequence and counts residues after it', async () => {
+    fetchJsonMock.mockResolvedValue(
+      gql({ entry: { polymer_entities: [poly('4HHB_1', 'Protein', ['A'], 'VLS\nPAD KTNV')] } }),
+    );
+    expect(await service().getSequence('4HHB', undefined, createMockContext())).toEqual({
+      kind: 'found',
+      entity: { entityId: '4HHB_1', chains: ['A'], length: 10 },
+      sequence: 'VLSPADKTNV',
+      otherEntities: [],
+    });
+  });
+
+  it('asks GraphQL for each entity’s polymer type and author chains under the upper-cased ID (#84)', async () => {
+    fetchJsonMock.mockResolvedValue(gql({ entry: { polymer_entities: ENTRIES['4HHB'] } }));
+    await service().getSequence('4hhb', undefined, createMockContext());
+    const body = JSON.parse(String(fetchJsonMock.mock.calls[0]?.[2]?.body)) as {
+      query: string;
+      variables: unknown;
+    };
+    expect(body.variables).toEqual({ id: '4HHB' });
+    expect(body.query).toContain('rcsb_entity_polymer_type');
+    expect(body.query).toContain('auth_asym_ids');
+    expect(body.query).toContain('pdbx_seq_one_letter_code_can');
   });
 });
 
@@ -731,6 +1239,131 @@ describe('RcsbService.getBindingSites', () => {
       /polymer_entity_instances\s*\{\s*rcsb_polymer_entity_instance_container_identifiers\s*\{\s*asym_id\s+auth_asym_id\s*\}/,
     );
   });
+
+  it('selects the ligand entity number in the binding-site query (#85)', async () => {
+    fetchJsonMock.mockResolvedValue(gql({ entry: null }));
+    await service().getBindingSites('6M0J', undefined, createMockContext());
+    const opts = fetchJsonMock.mock.calls[0]?.[2] as unknown as { body: string };
+    expect(JSON.parse(opts.body).query).toMatch(/nonpolymer_entities\s*\{\s*rcsb_id\b/);
+  });
+
+  /** One ligand instance with a single pocket contact, as the 6M0J payload carries them. */
+  const instance = (chain: string, seq: string) => ({
+    rcsb_nonpolymer_entity_instance_container_identifiers: {
+      auth_asym_id: chain,
+      auth_seq_id: seq,
+    },
+    rcsb_target_neighbors: [{ target_comp_id: 'ASN', target_asym_id: chain, distance: 1.4 }],
+  });
+
+  /**
+   * Live 6M0J binding-site shape: three ligand entities (ZN 6M0J_3, CL 6M0J_4,
+   * NAG 6M0J_5) holding seven instances. Upstream served the entities as
+   * ZN,CL,NAG or CL,NAG,ZN and NAG's instances by chain A,A,A,A,E or A,A,E,A,A.
+   */
+  const NONPOLY_6M0J = [
+    {
+      rcsb_id: '6M0J_3',
+      rcsb_nonpolymer_entity_container_identifiers: { nonpolymer_comp_id: 'ZN' },
+      nonpolymer_entity_instances: [instance('A', '901')],
+    },
+    {
+      rcsb_id: '6M0J_4',
+      rcsb_nonpolymer_entity_container_identifiers: { nonpolymer_comp_id: 'CL' },
+      nonpolymer_entity_instances: [instance('A', '902')],
+    },
+    {
+      rcsb_id: '6M0J_5',
+      rcsb_nonpolymer_entity_container_identifiers: { nonpolymer_comp_id: 'NAG' },
+      nonpolymer_entity_instances: [
+        instance('A', '903'),
+        instance('A', '904'),
+        instance('A', '905'),
+        instance('A', '906'),
+        instance('E', '601'),
+      ],
+    },
+  ];
+
+  const sitesFor = async (nonpolymer_entities: unknown[]) => {
+    fetchJsonMock.mockResolvedValueOnce(gql({ entry: { nonpolymer_entities } }));
+    return service().getBindingSites('6M0J', undefined, createMockContext());
+  };
+
+  it('orders sites by ligand entity number, then author chain and residue, whatever order upstream serves (6M0J, #85)', async () => {
+    const forward = await sitesFor(NONPOLY_6M0J);
+    const reversed = await sitesFor(
+      NONPOLY_6M0J.toReversed().map((e) => ({
+        ...e,
+        nonpolymer_entity_instances: e.nonpolymer_entity_instances.toReversed(),
+      })),
+    );
+    const [zn, cl, nag] = NONPOLY_6M0J;
+    const shuffled = await sitesFor([
+      cl,
+      {
+        ...nag,
+        nonpolymer_entity_instances: [
+          instance('A', '905'),
+          instance('A', '906'),
+          instance('E', '601'),
+          instance('A', '903'),
+          instance('A', '904'),
+        ],
+      },
+      zn,
+    ]);
+
+    const order = [
+      'ZN A901',
+      'CL A902',
+      'NAG A903',
+      'NAG A904',
+      'NAG A905',
+      'NAG A906',
+      'NAG E601',
+    ];
+    const label = (s: { ligandCompId: string; ligandAsymId?: string; ligandAuthSeqId?: number }) =>
+      `${s.ligandCompId} ${s.ligandAsymId}${s.ligandAuthSeqId}`;
+    expect(forward.map(label)).toEqual(order);
+    expect(reversed).toEqual(forward);
+    expect(shuffled).toEqual(forward);
+
+    // start 0, 3, 6 at limit 3 — the slice binding_site pages with — reads each
+    // instance exactly once, and the same pages from any upstream order.
+    for (const sites of [forward, reversed, shuffled]) {
+      const pages = [0, 3, 6].map((start) => sites.slice(start, start + 3).map(label));
+      expect(pages).toEqual([order.slice(0, 3), order.slice(3, 6), order.slice(6)]);
+    }
+  });
+
+  it('orders author residue numbers numerically and puts instances without author IDs last (#85)', async () => {
+    const sites = await sitesFor([
+      {
+        rcsb_id: '1ABC_2',
+        rcsb_nonpolymer_entity_container_identifiers: { nonpolymer_comp_id: 'SO4' },
+        nonpolymer_entity_instances: [
+          {
+            rcsb_target_neighbors: [{ target_comp_id: 'ARG', target_asym_id: 'B', distance: 3 }],
+          },
+          instance('B', '10'),
+          {
+            ...instance('A', '9'),
+            rcsb_nonpolymer_entity_instance_container_identifiers: { auth_asym_id: 'A' },
+          },
+          instance('A', '10'),
+          instance('A', '9'),
+        ],
+      },
+    ]);
+    expect(sites.map((s) => [s.ligandAsymId, s.ligandAuthSeqId])).toEqual([
+      ['A', 9],
+      ['A', 10],
+      ['A', undefined],
+      ['B', 10],
+      [undefined, undefined],
+    ]);
+  });
 });
 
 describe('RcsbService.getChemComp', () => {
@@ -806,6 +1439,245 @@ describe('RcsbService search helpers', () => {
     ]);
   });
 
+  /** One verbose `sequence` service entry, its aligned strings cut (live P69905 captures). */
+  const sequenceService = (context: Record<string, unknown> | null) => ({
+    service_type: 'sequence',
+    nodes: [
+      {
+        node_id: 27204,
+        original_score: 289,
+        norm_score: 0.99,
+        match_context: context === null ? null : [context],
+      },
+    ],
+  });
+
+  /** 2MGE_1 at start 1357 of the P69905 sequence-only search: score 0, the tail of 1,382. */
+  const CONTEXT_2MGE_1 = {
+    sequence_identity: 0.25,
+    evalue: 0.0006589,
+    bitscore: 42,
+    alignment_length: 148,
+    mismatches: 105,
+    gaps_opened: 1,
+    query_beg: 1,
+    query_end: 142,
+    subject_beg: 1,
+    subject_end: 148,
+    query_length: 142,
+    subject_length: 154,
+    query_aligned_seq: 'MVLSPADKTNVK…',
+    subject_aligned_seq: 'MVLSEGEWQLVL…',
+  };
+
+  /** 3LQD_1: identity served with float noise (0.829 as 0.8290000000000001). */
+  const CONTEXT_3LQD_1 = {
+    sequence_identity: 0.8290000000000001,
+    evalue: 2.304e-76,
+    bitscore: 252,
+    alignment_length: 141,
+    mismatches: 24,
+    gaps_opened: 0,
+    query_beg: 2,
+    query_end: 142,
+    subject_beg: 1,
+    subject_end: 141,
+    query_length: 142,
+    subject_length: 141,
+    query_aligned_seq: 'VLSPADKTNVKA…',
+    subject_aligned_seq: 'VLSPADKTNIKT…',
+  };
+
+  it('searchSequence maps each hit’s match context and reports the query length once (#89)', async () => {
+    fetchJsonMock.mockResolvedValue({
+      total_count: 1382,
+      result_set: [
+        { identifier: '2MGE_1', score: 0, services: [sequenceService(CONTEXT_2MGE_1)] },
+        { identifier: '3LQD_1', score: 0.8434, services: [sequenceService(CONTEXT_3LQD_1)] },
+      ],
+    });
+    const out = await service().searchSequence('MVLSPADKTN', { start: 1357 }, createMockContext());
+    expect(out).toEqual({
+      total: 1382,
+      queryLength: 142,
+      hits: [
+        {
+          id: '2MGE_1',
+          score: 0,
+          identity: 0.25,
+          evalue: 0.0006589,
+          bitscore: 42,
+          alignmentLength: 148,
+          queryStart: 1,
+          queryEnd: 142,
+          targetStart: 1,
+          targetEnd: 148,
+          targetLength: 154,
+        },
+        {
+          id: '3LQD_1',
+          score: 0.8434,
+          identity: 0.829,
+          evalue: 2.304e-76,
+          bitscore: 252,
+          alignmentLength: 141,
+          queryStart: 2,
+          queryEnd: 142,
+          targetStart: 1,
+          targetEnd: 141,
+          targetLength: 141,
+        },
+      ],
+    });
+  });
+
+  /**
+   * hemoglobin ∧ P69905 ∧ Homo sapiens, polymer_entity, verbose: RCSB lists the
+   * sequence entry after the full_text and text entries (1O1P_1, 1O1N_1).
+   */
+  const combinedRows = () => [
+    {
+      identifier: '1O1P_1',
+      score: 1.0150708526770136,
+      services: [
+        { service_type: 'full_text', nodes: [{ node_id: 24873, original_score: 9.94 }] },
+        { service_type: 'text', nodes: [{ node_id: 30039, original_score: 5.39 }] },
+        sequenceService({
+          sequence_identity: 1.0,
+          evalue: 7.748e-89,
+          bitscore: 289,
+          alignment_length: 141,
+          query_beg: 2,
+          query_end: 142,
+          subject_beg: 143,
+          subject_end: 283,
+          query_length: 142,
+          subject_length: 283,
+        }),
+      ],
+    },
+    {
+      identifier: '1O1N_1',
+      score: 1.0130332805392315,
+      services: [
+        { service_type: 'full_text', nodes: [{ node_id: 24873, original_score: 9.87 }] },
+        { service_type: 'text', nodes: [{ node_id: 30039, original_score: 5.39 }] },
+        sequenceService({
+          sequence_identity: 0.992,
+          evalue: 5.151e-88,
+          bitscore: 287,
+          alignment_length: 141,
+          query_beg: 2,
+          query_end: 142,
+          subject_beg: 145,
+          subject_end: 285,
+          query_length: 142,
+          subject_length: 285,
+        }),
+      ],
+    },
+  ];
+
+  const COMBINED_HITS = [
+    {
+      id: '1O1P_1',
+      score: 1.0150708526770136,
+      identity: 1,
+      evalue: 7.748e-89,
+      bitscore: 289,
+      alignmentLength: 141,
+      queryStart: 2,
+      queryEnd: 142,
+      targetStart: 143,
+      targetEnd: 283,
+      targetLength: 283,
+    },
+    {
+      id: '1O1N_1',
+      score: 1.0130332805392315,
+      identity: 0.992,
+      evalue: 5.151e-88,
+      bitscore: 287,
+      alignmentLength: 141,
+      queryStart: 2,
+      queryEnd: 142,
+      targetStart: 145,
+      targetEnd: 285,
+      targetLength: 285,
+    },
+  ];
+
+  it('search reads the context from the sequence entry behind the other services (#89)', async () => {
+    fetchJsonMock.mockResolvedValue({ total_count: 739, result_set: combinedRows() });
+    const out = await service().search(
+      { text: 'hemoglobin', sequence: 'MVLSPADKTN', organism: 'Homo sapiens' },
+      createMockContext(),
+    );
+    expect(out).toEqual({ total: 739, queryLength: 142, hits: COMBINED_HITS });
+  });
+
+  it('selects the sequence entry by service type, whatever position it holds (#89)', async () => {
+    const reversed = combinedRows().map((row) => ({
+      ...row,
+      services: row.services.toReversed(),
+    }));
+    fetchJsonMock.mockResolvedValue({ total_count: 739, result_set: reversed });
+    const out = await service().search(
+      { text: 'hemoglobin', sequence: 'MVLSPADKTN' },
+      createMockContext(),
+    );
+    expect(out).toEqual({ total: 739, queryLength: 142, hits: COMBINED_HITS });
+  });
+
+  it('adds no alignment field a hit’s sequence entry did not carry (#89)', async () => {
+    fetchJsonMock.mockResolvedValue({
+      total_count: 6,
+      result_set: [
+        { identifier: 'A_1', score: 0.6 },
+        { identifier: 'B_1', score: 0.5, services: [] },
+        { identifier: 'C_1', score: 0.4, services: [sequenceService(null)] },
+        { identifier: 'D_1', score: 0.3, services: [{ service_type: 'sequence', nodes: [] }] },
+        {
+          identifier: 'E_1',
+          score: 0.2,
+          services: [
+            { service_type: 'text', nodes: [{ node_id: 1, match_context: [CONTEXT_2MGE_1] }] },
+          ],
+        },
+        {
+          identifier: 'F_1',
+          score: 0.1,
+          services: [sequenceService({ sequence_identity: 0.5, evalue: 'n/a', query_beg: null })],
+        },
+      ],
+    });
+    const out = await service().searchSequence('MVLSPADKTN', {}, createMockContext());
+    expect(out).toEqual({
+      total: 6,
+      hits: [
+        { id: 'A_1', score: 0.6 },
+        { id: 'B_1', score: 0.5 },
+        { id: 'C_1', score: 0.4 },
+        { id: 'D_1', score: 0.3 },
+        { id: 'E_1', score: 0.2 },
+        { id: 'F_1', score: 0.1, identity: 0.5 },
+      ],
+    });
+  });
+
+  it('takes the query length from the first hit that reports one (#89)', async () => {
+    fetchJsonMock.mockResolvedValue({
+      total_count: 2,
+      result_set: [
+        { identifier: 'A_1', score: 1, services: [sequenceService(null)] },
+        { identifier: '2MGE_1', score: 0, services: [sequenceService(CONTEXT_2MGE_1)] },
+      ],
+    });
+    const out = await service().searchSequence('MVLSPADKTN', {}, createMockContext());
+    expect(out.queryLength).toBe(142);
+    expect(out.hits[0]).toEqual({ id: 'A_1', score: 1 });
+  });
+
   it('forwards explicit and default offsets through every paged search helper', async () => {
     fetchJsonMock.mockResolvedValue({ total_count: 0, result_set: [] });
 
@@ -853,6 +1725,27 @@ describe('RcsbService search helpers', () => {
     expect(body.query.parameters.value).toBe('HEM');
     expect(body.request_options.paginate.rows).toBe(0);
     expect(body.request_options.sort).toBeUndefined();
+  });
+
+  it('matches bound (non-polymer) copies only, on both the ligand search and the deposition count (#92)', async () => {
+    // MSE as a selenomethionine residue inside a chain, or NAG inside a branched
+    // glycan, is not a bound ligand: binding_site reads non-polymer entities only.
+    fetchJsonMock.mockResolvedValue({ total_count: 20, result_set: [] });
+    await service().searchByLigand('mse', { limit: 5 }, createMockContext());
+    await service().countEntriesWithLigand('mse', createMockContext());
+    const queries = fetchJsonMock.mock.calls.map(
+      (call) => JSON.parse((call[2] as unknown as { body: string }).body).query,
+    );
+    const bound = {
+      type: 'terminal',
+      service: 'text',
+      parameters: {
+        attribute: 'rcsb_nonpolymer_entity_container_identifiers.nonpolymer_comp_id',
+        operator: 'exact_match',
+        value: 'MSE',
+      },
+    };
+    expect(queries).toEqual([bound, bound]);
   });
 
   it('findChemComps returns the hit identifiers with the upstream total (#67)', async () => {

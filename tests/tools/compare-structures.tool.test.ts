@@ -276,6 +276,22 @@ describe('protein_compare_structures repeated structures (#33)', () => {
     expect(String(getEnrichment(c).notice)).toContain('4HHB');
   });
 
+  it('escapes the repeated labels it echoes in the notice', async () => {
+    comparePair.mockResolvedValue({ status: 'complete', uuid: 'u', scores: {} });
+    const c = ctx();
+    await compareStructures.handler(
+      compareStructures.input.parse({
+        structures: [
+          { pdb_id: '4hh*', chain: 'A_' },
+          { pdb_id: '2HHB' },
+          { pdb_id: '4HH*', chain: 'A_' },
+        ],
+      }),
+      c,
+    );
+    expect(String(getEnrichment(c).notice)).toContain('Compared 4HH\\*.A\\_ once:');
+  });
+
   it('keeps the pair key unique across every generated pair', async () => {
     comparePair.mockResolvedValue({ status: 'complete', uuid: 'u', scores: {} });
     const repeats = [
@@ -393,6 +409,129 @@ describe('protein_compare_structures repeated structures (#33)', () => {
     expect(formatted?.text).toContain('4HHB ↔ 2HHB');
     expect(formatted?.text).not.toContain('4HHB ↔ 4HHB');
     expect(trailer.map((b) => b.text).join('\n')).toContain('4HHB');
+  });
+});
+
+describe('protein_compare_structures batch cap names what it ignored (#93)', () => {
+  /** Run `fn` with the configured structure cap set to `cap`, restoring it after. */
+  async function withCap<T>(cap: number, fn: () => T): Promise<Awaited<T>> {
+    const cfg = getServerConfig();
+    const configured = cfg.maxCompareStructures;
+    cfg.maxCompareStructures = cap;
+    try {
+      return await fn();
+    } finally {
+      cfg.maxCompareStructures = configured;
+    }
+  }
+
+  type CapResult = {
+    structuredContent: {
+      pairs: Array<{ a: string; b: string }>;
+      ignored?: Array<{ pdb_id: string; chain?: string }>;
+      notice?: string;
+    };
+    content: Array<{ type: string; text: string }>;
+  };
+
+  const ACCEPTANCE = [
+    { pdb_id: '1CRN' },
+    { pdb_id: '1crn' },
+    { pdb_id: '4HHB', chain: 'A' },
+    { pdb_id: '1UBQ' },
+  ];
+
+  beforeEach(() =>
+    comparePair.mockResolvedValue({ status: 'complete', uuid: 'u', scores: { tmScore: 0.5 } }),
+  );
+
+  it('drops repeats, caps, and returns the remainder in ignored with the repeat notice unchanged', async () => {
+    const c = ctx();
+    const out = await withCap(2, () =>
+      compareStructures.handler(
+        compareStructures.input.parse({ structures: ACCEPTANCE, reference: 'first' }),
+        c,
+      ),
+    );
+
+    expect(out.pairs.map((p) => `${p.a}↔${p.b}`)).toEqual(['1CRN↔4HHB.A']);
+    expect(getEnrichment(c).ignored).toEqual([{ pdb_id: '1UBQ' }]);
+    const notice = String(getEnrichment(c).notice);
+    expect(notice).toContain(
+      'Compared 1CRN once: a structure repeated in structures[] adds a self-alignment and a mirrored pair, not a new comparison.',
+    );
+    expect(notice).toContain(
+      'Capped at 2 structures; 1 ignored and not compared — re-call with the structures in ignored alongside the ones to compare them against.',
+    );
+  });
+
+  it('keeps the chain on a dropped structure that named one, and trims entry IDs before de-duplicating', async () => {
+    const c = ctx();
+    const out = await withCap(2, () =>
+      compareStructures.handler(
+        compareStructures.input.parse({
+          structures: [
+            { pdb_id: '1CRN' },
+            { pdb_id: ' 1CRN ' },
+            { pdb_id: '4HHB', chain: 'A' },
+            { pdb_id: '1UBQ', chain: 'B' },
+            { pdb_id: '2HHB' },
+          ],
+        }),
+        c,
+      ),
+    );
+
+    expect(out.pairs.map((p) => `${p.a}↔${p.b}`)).toEqual(['1CRN↔4HHB.A']);
+    expect(getEnrichment(c).ignored).toEqual([{ pdb_id: '1UBQ', chain: 'B' }, { pdb_id: '2HHB' }]);
+    expect(String(getEnrichment(c).notice)).toContain('Compared 1CRN once');
+  });
+
+  it('emits no ignored key on either surface for an in-cap call', async () => {
+    const result = (await runToolContract(compareStructures, {
+      structures: three,
+      reference: 'first',
+    })) as CapResult;
+
+    expect(result.structuredContent.pairs).toHaveLength(2);
+    expect(result.structuredContent).not.toHaveProperty('ignored');
+    expect(result.content.map((b) => b.text).join('\n')).not.toContain('ignored');
+  });
+
+  it('carries the same ignored entries on both surfaces', async () => {
+    const result = (await withCap(2, () =>
+      runToolContract(compareStructures, { structures: ACCEPTANCE, reference: 'first' }),
+    )) as CapResult;
+
+    expect(result.structuredContent.ignored).toEqual([{ pdb_id: '1UBQ' }]);
+    const text = result.content.map((b) => b.text).join('\n');
+    expect(text).toContain('**ignored:** `[{"pdb_id":"1UBQ"}]`');
+  });
+
+  it('aligns each ignored structure against the original reference when passed back after it', async () => {
+    const first = ctx();
+    await withCap(2, () =>
+      compareStructures.handler(
+        compareStructures.input.parse({ structures: ACCEPTANCE, reference: 'first' }),
+        first,
+      ),
+    );
+    const ignored = getEnrichment(first).ignored as Array<{ pdb_id: string; chain?: string }>;
+
+    comparePair.mockClear();
+    const second = ctx();
+    const out = await withCap(2, () =>
+      compareStructures.handler(
+        compareStructures.input.parse({
+          structures: [ACCEPTANCE[0], ...ignored],
+          reference: 'first',
+        }),
+        second,
+      ),
+    );
+    expect(out.pairs.map((p) => `${p.a}↔${p.b}`)).toEqual(['1CRN↔1UBQ']);
+    expect(comparePair).toHaveBeenCalledTimes(1);
+    expect(getEnrichment(second)).not.toHaveProperty('ignored');
   });
 });
 

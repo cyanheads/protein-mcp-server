@@ -8,12 +8,17 @@
  * position also reports its coverage gap, so buckets that sum to less than the
  * stated total say so. Also holds the entry-level polymer-entity and ligand
  * schemas shared by `protein_get_structure` and the `pdb://{entry_id}` resource,
- * so tool and resource representations of the same record stay identical.
+ * so tool and resource representations of the same record stay identical, the
+ * matched-entity organism lookup and the alignment line the two
+ * similarity-search tools share, and the one-word organism advice the two
+ * organism-filtered tools add to a zero-match notice.
  * @module mcp-server/tools/definitions/_schemas
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
-import type { ContentType, FacetDimension } from '@/services/rcsb/types.js';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { organismForm } from '@/services/rcsb/rcsb-service.js';
+import type { ContentType, EntryMeta, FacetDimension } from '@/services/rcsb/types.js';
 
 /**
  * The agent-facing `content_type` scope → the RCSB content universes it selects.
@@ -379,6 +384,17 @@ export function truncationNotices(facets: FacetDimensionOutput[], cap: number): 
   return notices;
 }
 
+/**
+ * Zero-match advice for a one-word `organism`, which matches only a taxon named
+ * exactly that — never a word inside a longer name — so a genus or virus name
+ * given alone ("Zika") finds nothing. `undefined` for a multi-word name or a
+ * taxon ID, which have no such trap.
+ */
+export function oneWordOrganismNotice(organism: string): string | undefined {
+  if (organismForm(organism) !== 'one_word') return;
+  return `organism "${escapeMarkdownInline(organism.trim())}" matches only a taxon with exactly that name, scientific or NCBI common (such as "human"), never a word inside a longer name; for a species, pass its full name (such as "Zika virus") or its NCBI taxon ID.`;
+}
+
 /** License + citation for one upstream data source that contributed to a response. */
 export const attributionSchema = z
   .object({
@@ -416,7 +432,12 @@ export const polymerEntitySchema = z
   .object({
     entityId: z.string().describe('Polymer entity ID (e.g. 4HHB_1).'),
     description: z.string().optional().describe('Entity description.'),
-    organism: z.string().optional().describe('Source organism.'),
+    organisms: z
+      .array(z.string())
+      .optional()
+      .describe(
+        'Distinct source organisms of this entity — more than one for a chimera (2RH1_1: Homo sapiens, Tequatrovirus T4). Omitted when upstream names none.',
+      ),
     authAsymIds: z
       .array(z.string())
       .optional()
@@ -433,7 +454,46 @@ export const polymerEntitySchema = z
   })
   .describe('A modeled polymer entity (chain group), with both chain namespaces.');
 
-/** One bound non-polymer component (ligand) of a PDB entry. */
+/**
+ * Source organisms of the polymer entity a sequence hit matched. A sequence hit
+ * reports these rather than the entry's list: the entry's other entities can
+ * come from other species (7BZ5_1 is the SARS-CoV-2 spike, its partner antibody
+ * chains are human). `undefined` when the metadata lacks the entity or the
+ * entity names no organism, so the caller omits the field.
+ */
+export function matchedEntityOrganisms(meta: EntryMeta, entityId: string): string[] | undefined {
+  return meta.polymerEntities.find((e) => e.entityId === entityId)?.organisms;
+}
+
+/**
+ * The `**Alignment:**` line of a sequence or structure hit, shared by the two
+ * similarity-search tools; null when the hit carries no alignment field. A bound
+ * upstream did not send renders as `?`.
+ */
+export function alignmentLine(h: {
+  alignmentLength?: number | undefined;
+  queryEnd?: number | undefined;
+  queryStart?: number | undefined;
+  targetEnd?: number | undefined;
+  targetLength?: number | undefined;
+  targetStart?: number | undefined;
+}): string | null {
+  const range = (label: string, start: number | undefined, end: number | undefined) =>
+    start === undefined && end === undefined ? null : `${label} ${start ?? '?'}–${end ?? '?'}`;
+  const parts = [
+    typeof h.alignmentLength === 'number' ? `length ${h.alignmentLength}` : null,
+    range('query', h.queryStart, h.queryEnd),
+    range('target', h.targetStart, h.targetEnd),
+    typeof h.targetLength === 'number' ? `target length ${h.targetLength}` : null,
+  ].filter(Boolean);
+  return parts.length > 0 ? `**Alignment:** ${parts.join(' · ')}` : null;
+}
+
+/**
+ * One bound non-polymer component (ligand) of a PDB entry. The service's ligand
+ * record also carries internal author chains; parsing through this shape drops
+ * them, so `protein_get_structure` and `pdb://` never emit them.
+ */
 export const ligandSchema = z
   .object({
     compId: z.string().describe('Chemical component ID (e.g. HEM).'),

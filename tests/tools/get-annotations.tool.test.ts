@@ -2,22 +2,34 @@
  * @fileoverview Tests for protein_get_annotations: direct-accession vs. PDB→UniProt
  * resolution, deterministic multi-accession disambiguation (default lowest-chain
  * pick + ambiguity block, chain selection, unrecognized-chain error), the
- * missing_identifier / invalid_accession input rejections, the
- * no_uniprot_mapping failure (unresolvable PDB, upstream-malformed accession),
- * include-scope gating of features/variants/domains, per-response
- * attribution gating (UniProt / InterPro / GO), the resolvedFrom enrichment, and
- * format() rendering of ambiguity, features, variants, InterPro domains with GO
- * terms, and attribution. Services mocked.
+ * missing_identifier / invalid_accession input rejections (isoforms named to
+ * their canonical accession), the no_uniprot_mapping failure (unresolvable PDB,
+ * upstream-malformed accession), include-scope gating of features/variants/
+ * domains, per-class paging over InterPro's own membership count with the
+ * early-stop notice, per-response attribution gating (UniProt / InterPro / GO),
+ * the resolvedFrom enrichment, the one call budget across RCSB, UniProt, and
+ * InterPro, and format() rendering. Service-level mocks cover the wiring; the
+ * accession-status block runs the real UniProt service against a fetch fake to
+ * pin the merge, inactive, never-assigned, and zero-membership paths and the
+ * speculative InterPro request each one aborts or keeps.
  * @module tests/tools/get-annotations.tool.test
  */
 
+import type { Context } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  createFetchMock,
+  createMockContext,
+  getEnrichment,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const getEntry = vi.fn();
 const getInterPro = vi.fn();
-vi.mock('@/services/uniprot/uniprot-service.js', () => ({
+vi.mock('@/services/uniprot/uniprot-service.js', async (importOriginal) => ({
+  // The real module (UniProtService, error and notice builders) with the singleton swapped.
+  ...(await importOriginal<typeof import('@/services/uniprot/uniprot-service.js')>()),
   getUniProtService: () => ({ getEntry, getInterPro }),
 }));
 
@@ -27,14 +39,29 @@ vi.mock('@/services/rcsb/rcsb-service.js', () => ({
 }));
 
 import { getAnnotations } from '@/mcp-server/tools/definitions/get-annotations.tool.js';
+import { type AnnotationInclude, UniProtService } from '@/services/uniprot/uniprot-service.js';
 
 const ctx = () => createMockContext({ errors: getAnnotations.errors });
 
+/** What `UniProtService.getInterPro` resolves to: the retrieved memberships beside InterPro's count. */
+const memberships = (entries: unknown[], total = entries.length) => ({ entries, total });
+
+/** The text of every content[] text block, joined. */
+const textOf = (result: { content: Array<{ type: string; text?: string }> }) =>
+  result.content
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text)
+    .join('\n');
+
 /** A `runToolContract` failure — the envelope that carries the declared recovery fill. */
 type ContractError = {
+  content: Array<{ type: string; text?: string }>;
   isError?: boolean;
   structuredContent: {
-    error: { code: number; data: { reason: string; recovery?: { hint: string } } };
+    error: {
+      code: number;
+      data: { reason: string; recovery?: { hint: string } } & Record<string, unknown>;
+    };
   };
 };
 
@@ -81,7 +108,7 @@ beforeEach(() => vi.clearAllMocks());
 describe('protein_get_annotations', () => {
   it('fetches by a directly-supplied UniProt accession (include:all)', async () => {
     getEntry.mockResolvedValue(entry());
-    getInterPro.mockResolvedValue([interProDomain()]);
+    getInterPro.mockResolvedValue(memberships([interProDomain()]));
     const out = await getAnnotations.handler(
       getAnnotations.input.parse({ uniprot: 'p69905' }),
       ctx(),
@@ -106,7 +133,7 @@ describe('protein_get_annotations', () => {
       { chains: ['A'], accession: 'P69905', proteinName: 'Hemoglobin subunit alpha' },
     ]);
     getEntry.mockResolvedValue(entry());
-    getInterPro.mockResolvedValue([]);
+    getInterPro.mockResolvedValue(memberships([]));
     const c = ctx();
     const out = await getAnnotations.handler(getAnnotations.input.parse({ pdb_id: '4hhb' }), c);
 
@@ -159,6 +186,53 @@ describe('protein_get_annotations', () => {
     expect(getEntry).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['P04637-2', 'P04637'],
+    ['p04637-2', 'P04637'],
+    ['P04637-1', 'P04637'],
+    ['P04637-99', 'P04637'],
+    ['A0A024R161-3', 'A0A024R161'],
+  ])(
+    'rejects the isoform %s as invalid_accession, naming its canonical accession %s, before any request (#91)',
+    async (uniprot, canonical) => {
+      const result = (await runToolContract(getAnnotations, { uniprot })) as ContractError;
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent.error).toMatchObject({
+        code: JsonRpcErrorCode.InvalidParams,
+        data: { reason: 'invalid_accession' },
+      });
+      expect(textOf(result)).toContain(
+        `"${uniprot}" is an isoform of ${canonical}; UniProt annotates the canonical entry, so pass ${canonical}.`,
+      );
+      expect(getEntry).not.toHaveBeenCalled();
+      expect(getInterPro).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps the plain malformed-accession message for a suffix that is no isoform (#91)', async () => {
+    const result = (await runToolContract(getAnnotations, {
+      uniprot: 'P04637-0',
+    })) as ContractError;
+    expect(result.structuredContent.error.data.reason).toBe('invalid_accession');
+    expect(textOf(result)).toContain('"P04637-0" is not a valid UniProt accession.');
+    expect(textOf(result)).not.toContain('isoform of');
+    expect(getEntry).not.toHaveBeenCalled();
+  });
+
+  it('fails accession_not_found naming the accession when UniProt has no entry (#83)', async () => {
+    getEntry.mockResolvedValue(null);
+    getInterPro.mockResolvedValue(memberships([]));
+    const result = (await runToolContract(getAnnotations, {
+      uniprot: 'A0A9Z9Z9Z9',
+    })) as ContractError;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'accession_not_found', recovery: { hint: expect.any(String) } },
+    });
+    expect(textOf(result)).toContain('A0A9Z9Z9Z9');
+  });
+
   it('keeps no_uniprot_mapping when a pdb_id resolves to a malformed accession (#46)', async () => {
     // An upstream-data problem, not caller input — this branch stays NotFound.
     resolveUniprotEntities.mockResolvedValue([{ chains: ['A'], accession: 'NOTANACC' }]);
@@ -173,7 +247,7 @@ describe('protein_get_annotations', () => {
 
   it('leaves a valid uniprot and a resolving pdb_id unaffected (#46)', async () => {
     getEntry.mockResolvedValue(entry());
-    getInterPro.mockResolvedValue([]);
+    getInterPro.mockResolvedValue(memberships([]));
     const direct = await getAnnotations.handler(
       getAnnotations.input.parse({ uniprot: 'p69905' }),
       ctx(),
@@ -202,7 +276,7 @@ describe('protein_get_annotations', () => {
 
   it('include:domains omits features/variants but fetches InterPro', async () => {
     getEntry.mockResolvedValue(entry());
-    getInterPro.mockResolvedValue([]);
+    getInterPro.mockResolvedValue(memberships([]));
     const out = await getAnnotations.handler(
       getAnnotations.input.parse({ uniprot: 'P69905', include: 'domains' }),
       ctx(),
@@ -213,9 +287,28 @@ describe('protein_get_annotations', () => {
     expect(getInterPro).toHaveBeenCalledOnce();
   });
 
+  it('requests InterPro while the entry is still loading, not after it', async () => {
+    let resolveEntry: (value: unknown) => void = () => {};
+    getEntry.mockReturnValue(
+      new Promise((resolve) => {
+        resolveEntry = resolve;
+      }),
+    );
+    getInterPro.mockResolvedValue(memberships([interProDomain()]));
+    const running = getAnnotations.handler(
+      getAnnotations.input.parse({ uniprot: 'P69905' }),
+      ctx(),
+    );
+    await vi.waitFor(() => expect(getEntry).toHaveBeenCalledOnce());
+    // The entry has not answered yet, and InterPro is already on its way.
+    expect(getInterPro).toHaveBeenCalledWith('P69905', expect.anything());
+    resolveEntry(entry());
+    expect((await running).domains).toHaveLength(1);
+  });
+
   it('output conforms to the declared schema', async () => {
     getEntry.mockResolvedValue(entry());
-    getInterPro.mockResolvedValue([]);
+    getInterPro.mockResolvedValue(memberships([]));
     const out = await getAnnotations.handler(
       getAnnotations.input.parse({ uniprot: 'P69905' }),
       ctx(),
@@ -227,7 +320,7 @@ describe('protein_get_annotations', () => {
 describe('protein_get_annotations per-class limit', () => {
   it('walks each class without overlaps, stops on final pages, and reports empty totals (#65)', async () => {
     getEntry.mockResolvedValue(entry({ features: [...many('feature', 5), ...many('variant', 3)] }));
-    getInterPro.mockResolvedValue([]);
+    getInterPro.mockResolvedValue(memberships([]));
     const starts: number[] = [];
     for (const features_offset of [0, 2, 4]) {
       const result = await runToolContract(getAnnotations, {
@@ -297,7 +390,7 @@ describe('protein_get_annotations per-class limit', () => {
         {},
       ],
     };
-    getInterPro.mockResolvedValue([domain]);
+    getInterPro.mockResolvedValue(memberships([domain]));
     const result = await runToolContract(getAnnotations, { uniprot: 'P68871' });
     expect(result.isError).not.toBe(true);
     expect(result.structuredContent).toMatchObject({
@@ -327,10 +420,9 @@ describe('protein_get_annotations per-class limit', () => {
   });
   it('continues independent annotation pages with totals and executable recovery (#65)', async () => {
     getEntry.mockResolvedValue(entry({ features: [...many('feature', 5), ...many('variant', 4)] }));
-    getInterPro.mockResolvedValue([
-      interProDomain(),
-      { ...interProDomain(), accession: 'IPR000002' },
-    ]);
+    getInterPro.mockResolvedValue(
+      memberships([interProDomain(), { ...interProDomain(), accession: 'IPR000002' }]),
+    );
     const result = await runToolContract(getAnnotations, {
       uniprot: 'P69905',
       limit: 2,
@@ -373,7 +465,7 @@ describe('protein_get_annotations per-class limit', () => {
   );
   it('preserves explicit first-page contents and independent caps', async () => {
     getEntry.mockResolvedValue(entry({ features: [...many('feature', 3), ...many('variant', 4)] }));
-    getInterPro.mockResolvedValue([interProDomain()]);
+    getInterPro.mockResolvedValue(memberships([interProDomain()]));
     const out = await getAnnotations.handler(
       getAnnotations.input.parse({ uniprot: 'P69905', limit: 2 }),
       ctx(),
@@ -397,7 +489,9 @@ describe('protein_get_annotations per-class limit', () => {
 
   it('caps features, variants, and domains independently, composing one notice per capped class', async () => {
     getEntry.mockResolvedValue(entry({ features: [...many('feature', 3), ...many('variant', 3)] }));
-    getInterPro.mockResolvedValue([interProDomain(), interProDomain(), interProDomain()]);
+    getInterPro.mockResolvedValue(
+      memberships([interProDomain(), interProDomain(), interProDomain()]),
+    );
     const c = ctx();
     const out = await getAnnotations.handler(
       getAnnotations.input.parse({ uniprot: 'P69905', include: 'all', limit: 2 }),
@@ -416,7 +510,7 @@ describe('protein_get_annotations per-class limit', () => {
   it('leaves an under-limit class intact and composes a capped class and a no-data class into one notice', async () => {
     // features over the limit (capped), variants empty (no-data advisory), domains under the limit (intact).
     getEntry.mockResolvedValue(entry({ features: many('feature', 60) }));
-    getInterPro.mockResolvedValue([interProDomain(), interProDomain()]);
+    getInterPro.mockResolvedValue(memberships([interProDomain(), interProDomain()]));
     const c = ctx();
     const out = await getAnnotations.handler(
       getAnnotations.input.parse({ uniprot: 'P69905', include: 'all' }),
@@ -433,7 +527,7 @@ describe('protein_get_annotations per-class limit', () => {
 
   it('sets a no-data notice without flagging truncation when a requested class is merely empty', async () => {
     getEntry.mockResolvedValue(entry()); // 1 feature + 1 variant, both under the limit
-    getInterPro.mockResolvedValue([]); // domains requested but empty
+    getInterPro.mockResolvedValue(memberships([])); // domains requested but empty
     const c = ctx();
     await getAnnotations.handler(
       getAnnotations.input.parse({ uniprot: 'P69905', include: 'all' }),
@@ -445,11 +539,81 @@ describe('protein_get_annotations per-class limit', () => {
 
   it('emits no notice and no truncation flag when every requested class is present and under the limit', async () => {
     getEntry.mockResolvedValue(entry()); // 1 feature + 1 variant
-    getInterPro.mockResolvedValue([interProDomain()]); // 1 domain
+    getInterPro.mockResolvedValue(memberships([interProDomain()])); // 1 domain
     const c = ctx();
     await getAnnotations.handler(getAnnotations.input.parse({ uniprot: 'P69905' }), c);
     expect(getEnrichment(c)?.notice).toBeUndefined();
     expect(getEnrichment(c)?.truncated).toBeUndefined();
+  });
+
+  it("reports InterPro's count as domainsTotal, names an early stop, and pages over what was retrieved (#81)", async () => {
+    getEntry.mockResolvedValue(entry());
+    const retrieved = ['IPR000001', 'IPR000002', 'IPR000003'].map((accession) => ({
+      ...interProDomain(),
+      accession,
+    }));
+    getInterPro.mockResolvedValue(memberships(retrieved, 1234));
+    const page = (domains_offset: number) =>
+      runToolContract(getAnnotations, {
+        uniprot: 'P69905',
+        include: 'domains',
+        limit: 2,
+        domains_offset,
+      });
+    const stopped =
+      'Retrieved 3 of 1234 domains; paging stopped early, so domains_offset reaches only those 3.';
+
+    const first = await page(0);
+    expect(first.structuredContent).toMatchObject({
+      domains: [{ accession: 'IPR000001' }, { accession: 'IPR000002' }],
+      domainsTotal: 1234,
+      truncated: true,
+      notice: `${stopped} Showing 2 of 3 retrieved domains at offset 0; continue with domains_offset: 2.`,
+    });
+    expect(textOf(first)).toContain('InterPro domains (2 of 1234)');
+    expect(textOf(first)).toContain(stopped);
+
+    // The last retrieved page: nothing further to offer, yet the set is still short of the count.
+    const last = await page(2);
+    expect(last.structuredContent).toMatchObject({
+      domains: [{ accession: 'IPR000003' }],
+      domainsTotal: 1234,
+      truncated: true,
+      notice: stopped,
+    });
+    expect(textOf(last)).not.toContain('continue with');
+
+    const past = await page(3);
+    expect(past.structuredContent).toMatchObject({ domains: [], domainsTotal: 1234 });
+    expect((past.structuredContent as { notice: string }).notice).toContain(
+      'No domains at offset 3 (3 retrieved of 1234); use a lower domains_offset, such as 0.',
+    );
+  });
+
+  it('puts the merge notice first, re-reads InterPro for the successor, and aborts the speculative read (#83)', async () => {
+    getEntry.mockResolvedValue(
+      entry({ mergedFrom: 'Q1HDT5', features: many('feature', 3), accession: 'P69905' }),
+    );
+    const signals: AbortSignal[] = [];
+    getInterPro.mockImplementation((accession: string, c: { signal: AbortSignal }) => {
+      signals.push(c.signal);
+      return Promise.resolve(
+        accession === 'P69905' ? memberships([interProDomain()]) : memberships([]),
+      );
+    });
+    const result = await runToolContract(getAnnotations, { uniprot: 'Q1HDT5', limit: 2 });
+    expect(result.isError).not.toBe(true);
+
+    expect(getInterPro.mock.calls.map(([accession]) => accession)).toEqual(['Q1HDT5', 'P69905']);
+    expect(signals.map((s) => s.aborted)).toEqual([true, false]);
+    const merged = 'Q1HDT5 was merged into P69905 in UniProtKB; this answer is for P69905.';
+    expect(result.structuredContent).toMatchObject({
+      accession: 'P69905',
+      domains: [{ accession: 'IPR009050' }],
+      domainsTotal: 1,
+      notice: `${merged} Showing 2 of 3 features at offset 0; continue with features_offset: 2. No variants present.`,
+    });
+    expect(textOf(result)).toContain(merged);
   });
 });
 
@@ -458,7 +622,7 @@ describe('protein_get_annotations multi-accession disambiguation', () => {
     // Supplied beta-first to prove the pick does NOT follow upstream entity order.
     resolveUniprotEntities.mockResolvedValue([xrefs4hhb[1], xrefs4hhb[0]]);
     getEntry.mockImplementation((acc: string) => Promise.resolve(entry({ accession: acc })));
-    getInterPro.mockResolvedValue([]);
+    getInterPro.mockResolvedValue(memberships([]));
     const out = await getAnnotations.handler(getAnnotations.input.parse({ pdb_id: '4HHB' }), ctx());
 
     // chain A < chain B, so alpha wins regardless of the beta-first input order.
@@ -474,7 +638,7 @@ describe('protein_get_annotations multi-accession disambiguation', () => {
   it('chain "A" selects the alpha accession with no ambiguity', async () => {
     resolveUniprotEntities.mockResolvedValue(xrefs4hhb);
     getEntry.mockImplementation((acc: string) => Promise.resolve(entry({ accession: acc })));
-    getInterPro.mockResolvedValue([]);
+    getInterPro.mockResolvedValue(memberships([]));
     const out = await getAnnotations.handler(
       getAnnotations.input.parse({ pdb_id: '4HHB', chain: 'A' }),
       ctx(),
@@ -487,7 +651,7 @@ describe('protein_get_annotations multi-accession disambiguation', () => {
   it('chain "B" selects the beta accession with no ambiguity', async () => {
     resolveUniprotEntities.mockResolvedValue(xrefs4hhb);
     getEntry.mockImplementation((acc: string) => Promise.resolve(entry({ accession: acc })));
-    getInterPro.mockResolvedValue([]);
+    getInterPro.mockResolvedValue(memberships([]));
     const out = await getAnnotations.handler(
       getAnnotations.input.parse({ pdb_id: '4HHB', chain: 'B' }),
       ctx(),
@@ -504,7 +668,8 @@ describe('protein_get_annotations multi-accession disambiguation', () => {
     ).rejects.toMatchObject({
       data: {
         reason: 'chain_not_found',
-        recovery: { hint: expect.stringContaining('Author chains in 4HHB') },
+        // Entity order (alpha A, C; then beta B, D), not alphabetical (#85).
+        recovery: { hint: expect.stringContaining('Author chains in 4HHB: A, C, B, D.') },
       },
     });
     expect(getEntry).not.toHaveBeenCalled();
@@ -512,13 +677,68 @@ describe('protein_get_annotations multi-accession disambiguation', () => {
 
   it('ignores chain when a UniProt accession is supplied directly (no PDB resolution)', async () => {
     getEntry.mockResolvedValue(entry());
-    getInterPro.mockResolvedValue([]);
+    getInterPro.mockResolvedValue(memberships([]));
     const out = await getAnnotations.handler(
       getAnnotations.input.parse({ uniprot: 'P69905', chain: 'Z' }),
       ctx(),
     );
     expect(out.accession).toBe('P69905');
     expect(resolveUniprotEntities).not.toHaveBeenCalled();
+  });
+});
+
+describe('protein_get_annotations call budget (#83)', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  /** A service call that holds until its signal aborts, then fails with the signal's reason. */
+  const untilAborted = (signal: AbortSignal) =>
+    new Promise<never>((_, reject) =>
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true }),
+    );
+
+  it('bounds the PDB lookup, the entry, and InterPro by one 50 s budget, leaving the caller signal alone', async () => {
+    const seen: Record<'rcsb' | 'entry' | 'interpro', AbortSignal | undefined> = {
+      rcsb: undefined,
+      entry: undefined,
+      interpro: undefined,
+    };
+    // The PDB lookup spends 30 s of the budget before the UniProt and InterPro reads start.
+    resolveUniprotEntities.mockImplementation((_id: string, c: { signal: AbortSignal }) => {
+      seen.rcsb = c.signal;
+      return new Promise((resolve) =>
+        setTimeout(() => resolve([{ chains: ['A'], accession: 'P69905' }]), 30_000),
+      );
+    });
+    getEntry.mockImplementation((_acc: string, _inc: string, c: { signal: AbortSignal }) => {
+      seen.entry = c.signal;
+      return untilAborted(c.signal);
+    });
+    getInterPro.mockImplementation((_acc: string, c: { signal: AbortSignal }) => {
+      seen.interpro = c.signal;
+      return untilAborted(c.signal);
+    });
+    const caller = new AbortController();
+    const running = Promise.resolve(
+      getAnnotations.handler(
+        getAnnotations.input.parse({ pdb_id: '4HHB' }),
+        createMockContext({ errors: getAnnotations.errors, signal: caller.signal }),
+      ),
+    ).catch((err: unknown) => err);
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(getEntry).toHaveBeenCalledOnce();
+    expect(getInterPro).toHaveBeenCalledOnce();
+    const aborted = () => [seen.rcsb, seen.entry, seen.interpro].map((s) => s?.aborted);
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(aborted()).toEqual([false, false, false]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(aborted()).toEqual([true, true, true]);
+    expect(seen.interpro?.reason).toMatchObject({ name: 'TimeoutError' });
+    expect(caller.signal.aborted).toBe(false);
+
+    expect(await running).toMatchObject({ name: 'TimeoutError' });
+    expect(vi.getTimerCount()).toBe(0); // no clock outlives the call
   });
 });
 
@@ -535,7 +755,7 @@ describe('protein_get_annotations attribution', () => {
 
   it('adds InterPro (CC0) when domains are present but withholds GO when no domain carries GO terms', async () => {
     getEntry.mockResolvedValue(entry());
-    getInterPro.mockResolvedValue([interProDomain([])]); // domain present, zero GO terms
+    getInterPro.mockResolvedValue(memberships([interProDomain([])])); // domain present, zero GO terms
     const out = await getAnnotations.handler(
       getAnnotations.input.parse({ uniprot: 'P69905', include: 'domains' }),
       ctx(),
@@ -547,9 +767,9 @@ describe('protein_get_annotations attribution', () => {
 
   it('adds GO (CC BY 4.0) independently when a returned InterPro entry carries GO terms', async () => {
     getEntry.mockResolvedValue(entry());
-    getInterPro.mockResolvedValue([
-      interProDomain([{ id: 'GO:0005344', name: 'oxygen carrier activity' }]),
-    ]);
+    getInterPro.mockResolvedValue(
+      memberships([interProDomain([{ id: 'GO:0005344', name: 'oxygen carrier activity' }])]),
+    );
     const out = await getAnnotations.handler(
       getAnnotations.input.parse({ uniprot: 'P69905', include: 'all' }),
       ctx(),
@@ -623,5 +843,323 @@ describe('protein_get_annotations format()', () => {
     const text = (blocks[0] as { text: string }).text;
     expect(text).toContain('**Binding site** [87]');
     expect(text).not.toContain('[87–87]');
+  });
+});
+
+/** A route on one test host, matched by hostname and path — never by substring. */
+const on = (host: 'uniprot.test' | 'interpro.test', path: string) => (req: Request) => {
+  const url = new URL(req.url);
+  return url.hostname === host && url.pathname === path;
+};
+
+/** A field-selected UniProtKB entry for P69905, trimmed (shape of a live capture, UniProt 2026_03). */
+const P69905_ENTRY = {
+  entryType: 'UniProtKB reviewed (Swiss-Prot)',
+  primaryAccession: 'P69905',
+  proteinDescription: { recommendedName: { fullName: { value: 'Hemoglobin subunit alpha' } } },
+  genes: [{ geneName: { value: 'HBA1' } }],
+  organism: { scientificName: 'Homo sapiens', taxonId: 9606 },
+  sequence: { length: 142, value: 'MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFPTTKTYFPHF' },
+  features: [
+    {
+      type: 'Chain',
+      description: 'Hemoglobin subunit alpha',
+      location: { start: { value: 2 }, end: { value: 142 } },
+    },
+    {
+      type: 'Domain',
+      description: 'Globin',
+      location: { start: { value: 2 }, end: { value: 142 } },
+    },
+  ],
+};
+
+/**
+ * What fetch hands back for merged Q1HDT5: UniProt answers 303 to P69905 and the
+ * redirect drops `fields`, so the successor arrives whole, secondary structure included.
+ */
+const FOLLOWED_Q1HDT5 = {
+  ...P69905_ENTRY,
+  secondaryAccessions: ['P01922', 'Q1HDT5'],
+  features: [
+    { type: 'Helix', location: { start: { value: 4 }, end: { value: 17 } } },
+    { type: 'Turn', location: { start: { value: 51 }, end: { value: 53 } } },
+    ...P69905_ENTRY.features,
+  ],
+};
+
+/** UniProt's 200 answers for a demerged and a deleted accession (live captures, UniProt 2026_03). */
+const DEMERGED_P62988 = {
+  entryType: 'Inactive',
+  primaryAccession: 'P62988',
+  inactiveReason: {
+    inactiveReasonType: 'DEMERGED',
+    mergeDemergeTo: ['P0CG47', 'P0CG48', 'P62979', 'P62987'],
+  },
+};
+const DELETED_A0A008APQ8 = {
+  entryType: 'Inactive',
+  primaryAccession: 'A0A008APQ8',
+  inactiveReason: {
+    inactiveReasonType: 'DELETED',
+    deletedReason: 'Not part of a reference proteome',
+  },
+};
+
+/** InterPro's protein record; a zero counter is omitted, as InterPro omits it (P84996 answers `dbEntries: {}`). */
+const proteinRecord = (interpro?: number) =>
+  Response.json({
+    metadata: { counters: { dbEntries: interpro === undefined ? {} : { pfam: 1, interpro } } },
+  });
+
+/** One complete InterPro membership page for `protein`. */
+const entriesPage = (protein: string, accessions: string[]) =>
+  Response.json({
+    count: accessions.length,
+    next: null,
+    previous: null,
+    results: accessions.map((accession) => ({
+      metadata: { accession, name: `${accession} name`, type: 'family', member_databases: {} },
+      proteins: [{ accession: protein.toLowerCase(), entry_protein_locations: [] }],
+    })),
+  });
+
+describe('protein_get_annotations accession status through the UniProt service (#83)', () => {
+  let http: ReturnType<typeof createFetchMock>;
+  /** Every getInterPro call the handler makes, and whether its promise has settled. */
+  let interproCalls: Array<{ accession: string; settled: boolean }>;
+  /** Paths of InterPro requests that were aborted while held open. */
+  let abortedPaths: string[];
+
+  /**
+   * An InterPro request that never answers: it waits for its abort, then fails one
+   * macrotask later — so only a handler that awaits the aborted read sees it settle
+   * before returning.
+   */
+  const heldOpen = (req: Request) =>
+    new Promise<Response>((_, reject) => {
+      const fail = () => {
+        abortedPaths.push(new URL(req.url).pathname);
+        setTimeout(() => reject(req.signal.reason), 0);
+      };
+      if (req.signal.aborted) fail();
+      else req.signal.addEventListener('abort', fail, { once: true });
+    });
+
+  const interproRequests = () =>
+    http.calls.filter((c) => new URL(c.request.url).hostname === 'interpro.test');
+
+  beforeEach(() => {
+    const real = new UniProtService(
+      {} as never,
+      {} as never,
+      { uniprotBaseUrl: 'https://uniprot.test', interproBaseUrl: 'https://interpro.test' } as never,
+    );
+    interproCalls = [];
+    abortedPaths = [];
+    getEntry.mockImplementation((accession: string, include: AnnotationInclude, c: Context) =>
+      real.getEntry(accession, include, c),
+    );
+    getInterPro.mockImplementation((accession: string, c: Context) => {
+      const call = { accession, settled: false };
+      interproCalls.push(call);
+      return real.getInterPro(accession, c).finally(() => {
+        call.settled = true;
+      });
+    });
+    http = createFetchMock();
+    http.install();
+  });
+
+  afterEach(() => {
+    http.restore();
+    getEntry.mockReset();
+    getInterPro.mockReset();
+  });
+
+  it("answers a merged accession for its successor: the successor's own fields, its InterPro, the merge notice first", async () => {
+    http.route(
+      { match: on('uniprot.test', '/uniprotkb/Q1HDT5'), respond: Response.json(FOLLOWED_Q1HDT5) },
+      { match: on('uniprot.test', '/uniprotkb/P69905'), respond: Response.json(P69905_ENTRY) },
+      { match: on('interpro.test', '/protein/UniProt/Q1HDT5/'), respond: heldOpen },
+      { match: on('interpro.test', '/protein/UniProt/P69905/'), respond: proteinRecord(1) },
+      {
+        match: on('interpro.test', '/entry/interpro/protein/UniProt/P69905/'),
+        respond: entriesPage('P69905', ['IPR002338']),
+      },
+    );
+    const result = await runToolContract(getAnnotations, { uniprot: 'Q1HDT5' });
+    expect(result.isError).not.toBe(true);
+
+    const merged = 'Q1HDT5 was merged into P69905 in UniProtKB; this answer is for P69905.';
+    const out = result.structuredContent as {
+      accession: string;
+      features: Array<{ type: string }>;
+      notice: string;
+    };
+    expect(out).toMatchObject({
+      accession: 'P69905',
+      featuresTotal: 2,
+      domains: [{ accession: 'IPR002338' }],
+      domainsTotal: 1,
+    });
+    // The field-selected successor record, not the redirect's whole entry.
+    expect(out.features.map((f) => f.type)).toEqual(['Chain', 'Domain']);
+    expect(out.notice.startsWith(merged)).toBe(true);
+    expect(textOf(result)).toContain(merged);
+
+    // The speculative read for Q1HDT5 was aborted, never retried, and settled before the call returned.
+    expect(abortedPaths).toEqual(['/protein/UniProt/Q1HDT5/']);
+    expect(interproCalls).toEqual([
+      { accession: 'Q1HDT5', settled: true },
+      { accession: 'P69905', settled: true },
+    ]);
+    expect(interproRequests().map((c) => new URL(c.request.url).pathname)).toEqual([
+      '/protein/UniProt/Q1HDT5/',
+      '/protein/UniProt/P69905/',
+      '/entry/interpro/protein/UniProt/P69905/',
+    ]);
+  });
+
+  it("answers a merged accession under include:features with the successor's field-selected features and no InterPro read", async () => {
+    http.route(
+      { match: on('uniprot.test', '/uniprotkb/Q1HDT5'), respond: Response.json(FOLLOWED_Q1HDT5) },
+      { match: on('uniprot.test', '/uniprotkb/P69905'), respond: Response.json(P69905_ENTRY) },
+    );
+    const result = await runToolContract(getAnnotations, {
+      uniprot: 'Q1HDT5',
+      include: 'features',
+    });
+    expect(result.structuredContent).toMatchObject({
+      accession: 'P69905',
+      features: [{ type: 'Chain' }, { type: 'Domain' }],
+      featuresTotal: 2,
+      notice: 'Q1HDT5 was merged into P69905 in UniProtKB; this answer is for P69905.',
+    });
+    expect(textOf(result)).not.toMatch(/Helix|Turn/);
+    expect(interproRequests()).toEqual([]);
+  });
+
+  it.each(['features', 'variants', 'domains', 'all'] as const)(
+    'fails a demerged accession as inactive_accession with its replacements under include:%s, leaving no InterPro read running',
+    async (include) => {
+      http.route(
+        {
+          match: on('uniprot.test', '/uniprotkb/P62988'),
+          respond: Response.json(DEMERGED_P62988),
+        },
+        { match: on('interpro.test', '/protein/UniProt/P62988/'), respond: heldOpen },
+      );
+      const result = (await runToolContract(getAnnotations, {
+        uniprot: 'P62988',
+        include,
+      })) as ContractError;
+
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent.error).toMatchObject({
+        code: JsonRpcErrorCode.NotFound,
+        data: {
+          reason: 'inactive_accession',
+          accession: 'P62988',
+          inactiveReason: 'DEMERGED',
+          replacements: ['P0CG47', 'P0CG48', 'P62979', 'P62987'],
+          recovery: { hint: 'Retry with a replacement accession: P0CG47, P0CG48, P62979, P62987.' },
+        },
+      });
+      expect(textOf(result)).toContain(
+        'P62988 is inactive in UniProtKB (DEMERGED); replaced by P0CG47, P0CG48, P62979, P62987.',
+      );
+      if (include === 'domains' || include === 'all') {
+        expect(abortedPaths).toEqual(['/protein/UniProt/P62988/']);
+        expect(interproCalls).toEqual([{ accession: 'P62988', settled: true }]);
+        expect(interproRequests()).toHaveLength(1); // aborted, never retried
+      } else {
+        expect(interproRequests()).toEqual([]);
+      }
+    },
+  );
+
+  it('fails a deleted accession as inactive_accession with no replacements and the declared recovery', async () => {
+    http.route({
+      match: on('uniprot.test', '/uniprotkb/A0A008APQ8'),
+      respond: Response.json(DELETED_A0A008APQ8),
+    });
+    const result = (await runToolContract(getAnnotations, {
+      uniprot: 'A0A008APQ8',
+      include: 'features',
+    })) as ContractError;
+
+    const declared = getAnnotations.errors?.find((e) => e.reason === 'inactive_accession');
+    expect(declared?.recovery).toBeDefined();
+    expect(result.structuredContent.error).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: {
+        reason: 'inactive_accession',
+        accession: 'A0A008APQ8',
+        inactiveReason: 'DELETED',
+        replacements: [],
+        recovery: { hint: declared?.recovery },
+      },
+    });
+    expect(textOf(result)).toMatch(/no replacement/i);
+    expect(textOf(result)).toContain('Not part of a reference proteome');
+  });
+
+  it('fails a never-assigned accession as accession_not_found, without the upstream URL or a retry', async () => {
+    http.route(
+      {
+        match: on('uniprot.test', '/uniprotkb/A0A9Z9Z9Z9'),
+        respond: () =>
+          new Response(
+            JSON.stringify({
+              url: 'http://rest.uniprot.org/uniprotkb/A0A9Z9Z9Z9',
+              messages: ['Resource not found'],
+            }),
+            { status: 404, headers: { 'content-type': 'application/json' } },
+          ),
+      },
+      { match: on('interpro.test', '/protein/UniProt/A0A9Z9Z9Z9/'), respond: heldOpen },
+    );
+    const result = (await runToolContract(getAnnotations, {
+      uniprot: 'A0A9Z9Z9Z9',
+    })) as ContractError;
+
+    const declared = getAnnotations.errors?.find((e) => e.reason === 'accession_not_found');
+    expect(result.structuredContent.error).toMatchObject({
+      code: JsonRpcErrorCode.NotFound,
+      data: { reason: 'accession_not_found', recovery: { hint: declared?.recovery } },
+    });
+    const text = textOf(result);
+    expect(text).toContain('A0A9Z9Z9Z9');
+    expect(text).not.toMatch(/uniprot\.test|rest\.uniprot\.org|Status: 404|Resource not found/);
+    expect(
+      http.calls.filter((c) => new URL(c.request.url).hostname === 'uniprot.test'),
+    ).toHaveLength(1);
+    expect(abortedPaths).toEqual(['/protein/UniProt/A0A9Z9Z9Z9/']);
+    expect(interproCalls).toEqual([{ accession: 'A0A9Z9Z9Z9', settled: true }]);
+  });
+
+  it('answers an active accession without InterPro memberships with domainsTotal 0, reading only the protein record', async () => {
+    http.route(
+      {
+        match: on('uniprot.test', '/uniprotkb/P84996'),
+        respond: Response.json({ ...P69905_ENTRY, primaryAccession: 'P84996', features: [] }),
+      },
+      { match: on('interpro.test', '/protein/UniProt/P84996/'), respond: proteinRecord() },
+    );
+    const result = await runToolContract(getAnnotations, { uniprot: 'P84996' });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent).toMatchObject({
+      accession: 'P84996',
+      domains: [],
+      domainsTotal: 0,
+      attribution: [{ source: 'UniProt' }],
+    });
+    expect((result.structuredContent as { attribution: unknown[] }).attribution).toHaveLength(1);
+    expect(textOf(result)).toContain('No domains present.');
+    // The record's zero count ends it: no entries request, no retry.
+    expect(interproRequests().map((c) => new URL(c.request.url).pathname)).toEqual([
+      '/protein/UniProt/P84996/',
+    ]);
   });
 });

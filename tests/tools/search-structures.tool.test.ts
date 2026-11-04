@@ -6,8 +6,11 @@
  * metadata enrichment, the total/echo/empty-notice enrichment, the capped-facet
  * advisory and its sequence-search variant, the flat facet contract (no
  * cross-tab child requested or advertised), the repeated-facet-dimension
- * rejection, and the empty-facet-dimension rendering across both consumption
- * surfaces. RCSB mocked.
+ * rejection, the empty-facet-dimension rendering across both consumption
+ * surfaces, the unknown_method contract, the ligand filter and its zero-hit
+ * pointer, the computed-model notice for experimental-only filters under
+ * predicted content, and the per-hit sequence alignment with the query length.
+ * The RCSB service instance is mocked; its query builders run for real.
  * @module tests/tools/search-structures.tool.test
  */
 
@@ -16,12 +19,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const search = vi.fn();
 const getEntries = vi.fn();
-vi.mock('@/services/rcsb/rcsb-service.js', () => ({
+// Only the service instance is faked; the query builders run the real code.
+vi.mock('@/services/rcsb/rcsb-service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/rcsb/rcsb-service.js')>()),
   getRcsbService: () => ({ search, getEntries }),
 }));
 
 import { getServerConfig } from '@/config/server-config.js';
 import { searchStructures } from '@/mcp-server/tools/definitions/search-structures.tool.js';
+import { buildQuery } from '@/services/rcsb/rcsb-service.js';
+import type { StructureSearchParams } from '@/services/rcsb/types.js';
 
 const ctx = () => createMockContext({ errors: searchStructures.errors });
 const FACET_CAP = getServerConfig().facetBucketCap;
@@ -496,9 +503,108 @@ describe('protein_search_structures', () => {
       source: 'experimental',
       title: 'Deoxyhaemoglobin',
       method: 'X-RAY DIFFRACTION',
-      organism: 'Homo sapiens',
+      organisms: ['Homo sapiens'],
     });
+    expect(out.hits[0]).not.toHaveProperty('organism');
     expect(getEnrichment(c)).toMatchObject({ totalCount: 9064, effectiveQuery: 'hemoglobin' });
+  });
+
+  /** 6M0J metadata as getEntries returns it: entities in entity-number order. */
+  const META_6M0J = {
+    id: '6M0J',
+    title: 'Crystal structure of SARS-CoV-2 spike receptor-binding domain bound with ACE2',
+    methods: ['X-RAY DIFFRACTION'],
+    resolution: 2.45,
+    organisms: ['Homo sapiens', 'Severe acute respiratory syndrome coronavirus 2'],
+    polymerEntities: [
+      { entityId: '6M0J_1', organisms: ['Homo sapiens'] },
+      { entityId: '6M0J_2', organisms: ['Severe acute respiratory syndrome coronavirus 2'] },
+    ],
+    ligands: [],
+  };
+
+  /** 7BZ5: the SARS-CoV-2 spike RBD (entity 1) bound by a human antibody (entities 2 and 3). */
+  const META_7BZ5 = {
+    id: '7BZ5',
+    title:
+      'Structure of COVID-19 virus spike receptor-binding domain complexed with a neutralizing antibody',
+    organisms: ['Severe acute respiratory syndrome coronavirus 2', 'Homo sapiens'],
+    polymerEntities: [
+      { entityId: '7BZ5_1', organisms: ['Severe acute respiratory syndrome coronavirus 2'] },
+      { entityId: '7BZ5_2', organisms: ['Homo sapiens'] },
+      { entityId: '7BZ5_3', organisms: ['Homo sapiens'] },
+    ],
+    ligands: [],
+  };
+
+  type HitsResult = {
+    structuredContent: { hits: Array<{ id: string; entityId?: string; organisms?: string[] }> };
+    content: Array<{ text: string }>;
+  };
+
+  it("lists every source organism of a text hit's entry on both surfaces (6M0J, #85)", async () => {
+    search.mockResolvedValue({ total: 1, hits: [{ id: '6M0J', score: 1 }] });
+    getEntries.mockResolvedValue([META_6M0J]);
+
+    const result = (await runToolContract(searchStructures, {
+      query: 'ACE2 spike',
+      limit: 1,
+    })) as HitsResult;
+
+    expect(result.structuredContent.hits[0]?.organisms).toEqual([
+      'Homo sapiens',
+      'Severe acute respiratory syndrome coronavirus 2',
+    ]);
+    expect(result.content[0]?.text).toContain(
+      '**Organisms:** Homo sapiens, Severe acute respiratory syndrome coronavirus 2',
+    );
+  });
+
+  it("reports a sequence hit's matched-entity organisms, not the entry's, on both surfaces (7BZ5_1, #85)", async () => {
+    search.mockResolvedValue({
+      total: 2,
+      hits: [
+        { id: '7BZ5_1', score: 1 },
+        { id: '7BZ5_2', score: 0.4 },
+      ],
+    });
+    getEntries.mockResolvedValue([META_7BZ5]);
+
+    const result = (await runToolContract(searchStructures, {
+      sequence: 'RVQPTESIVRFPNITNLCPFGEVFNATRFASVYAWNRKRISNCVADYSVLYNSASFSTFKCYGVSPTKLNDLCFTNVYAD',
+      limit: 2,
+    })) as HitsResult;
+
+    const [spike, heavy] = result.structuredContent.hits;
+    expect(spike).toMatchObject({
+      id: '7BZ5',
+      entityId: '7BZ5_1',
+      organisms: ['Severe acute respiratory syndrome coronavirus 2'],
+    });
+    expect(heavy).toMatchObject({ id: '7BZ5', entityId: '7BZ5_2', organisms: ['Homo sapiens'] });
+    const text = result.content[0]?.text ?? '';
+    expect(text).toContain(
+      '**Entity:** 7BZ5_1 | **Organisms:** Severe acute respiratory syndrome coronavirus 2',
+    );
+    expect(text).toContain('**Entity:** 7BZ5_2 | **Organisms:** Homo sapiens');
+  });
+
+  it('omits organisms on a sequence hit whose matched entity the entry metadata lacks (#85)', async () => {
+    search.mockResolvedValue({ total: 1, hits: [{ id: '7BZ5_4', score: 1 }] });
+    getEntries.mockResolvedValue([META_7BZ5]);
+
+    const result = (await runToolContract(searchStructures, {
+      sequence: 'MVLSPADKTN',
+      limit: 1,
+    })) as HitsResult;
+
+    // The entry resolved (its title is there); only the entity is unknown.
+    expect(result.structuredContent.hits[0]).toMatchObject({ id: '7BZ5', entityId: '7BZ5_4' });
+    expect(result.structuredContent.hits[0]).toHaveProperty('title');
+    // Neither the entry's list nor its first organism stands in for the unknown entity's.
+    expect(result.structuredContent.hits[0]).not.toHaveProperty('organisms');
+    expect(result.structuredContent.hits[0]).not.toHaveProperty('organism');
+    expect(result.content[0]?.text).not.toMatch(/\*\*Organisms?:\*\*/);
   });
 
   it('uses bare entry IDs for sequence-hit metadata lookup', async () => {
@@ -650,6 +756,33 @@ describe('protein_search_structures', () => {
     }
   });
 
+  it('explains a one-word organism that matched nothing on both surfaces, without a phrase fallback (#86)', async () => {
+    search.mockResolvedValue({ total: 0, hits: [] });
+    const result = (await runToolContract(searchStructures, { organism: 'Zika' })) as {
+      structuredContent: { notice?: string };
+      content: Array<{ text: string }>;
+    };
+    const advice = 'organism "Zika" matches only a taxon with exactly that name';
+    expect(String(result.structuredContent.notice)).toContain(advice);
+    expect(String(result.structuredContent.notice)).toContain('"Zika virus"');
+    expect(result.content.map((b) => b.text).join('\n')).toContain(advice);
+    // The query keeps the exact arms only: no phrase match reaches RCSB.
+    const params = search.mock.calls[0]?.[0] as StructureSearchParams;
+    expect(JSON.stringify(buildQuery(params))).not.toContain('contains_phrase');
+  });
+
+  it.each([
+    [{ organism: 'Zika virus' }, 0],
+    [{ organism: '9606' }, 0],
+    [{ organism: 'Zika' }, 3],
+  ])('adds no one-word organism advice for %j with %i matches', async (input, total) => {
+    search.mockResolvedValue({ total, hits: [] });
+    getEntries.mockResolvedValue([]);
+    const c = ctx();
+    await searchStructures.handler(searchStructures.input.parse(input), c);
+    expect(String(getEnrichment(c).notice)).not.toContain('matches only a taxon');
+  });
+
   it('leaves the notice unset when hits came back', async () => {
     search.mockResolvedValue({
       total: 500,
@@ -779,7 +912,9 @@ describe('protein_search_structures', () => {
     const notice = String(getEnrichment(c).notice);
     expect(notice).toContain(`organism was capped at ${FACET_CAP} buckets.`);
     expect(notice).toMatch(/cannot reproduce a sequence search/);
-    expect(notice).toMatch(/drop sequence, or add organism, method, max_resolution, or query/);
+    expect(notice).toMatch(
+      /drop sequence, or add organism, method, max_resolution, ligand, or query/,
+    );
     expect(notice).not.toMatch(/bucket_limit/);
   });
 
@@ -963,5 +1098,272 @@ describe('protein_search_structures', () => {
     expect(formatted?.text.trimEnd().endsWith('**method**')).toBe(false);
     // The notice reaches content[] as a separate trailing block, never content[0].
     expect(trailer.map((b) => b.text).join('\n')).toMatch(/no experimental structures matched/i);
+  });
+});
+
+/** A `runToolContract` result, success or failure, read on both surfaces. */
+type ContractResult = {
+  isError?: boolean;
+  structuredContent: Record<string, unknown> & {
+    error?: { code: number; data: { reason: string; recovery?: { hint: string } } };
+    hits?: Array<Record<string, unknown>>;
+    notice?: string;
+  };
+  content: Array<{ type: string; text: string }>;
+};
+
+const run = async (input: Record<string, unknown>) =>
+  (await runToolContract(searchStructures, input)) as ContractResult;
+
+/** Every content[] block joined — the formatted body and the enrichment trailer. */
+const allText = (result: ContractResult) => result.content.map((b) => b.text).join('\n');
+
+/** Run the real query builder on what the handler forwards, as the real search does before posting. */
+const buildThenReturn = (result: unknown) =>
+  search.mockImplementation(async (params: StructureSearchParams) => {
+    buildQuery(params);
+    return result;
+  });
+
+describe('protein_search_structures filters (#86, #95)', () => {
+  it('rejects an unknown method with its declared recovery on both surfaces (#86)', async () => {
+    buildThenReturn({ total: 0, hits: [] });
+    const result = await run({ query: 'hemoglobin', method: 'cryo-ET' });
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({
+      code: -32602,
+      data: { reason: 'unknown_method', recovery: { hint: expect.stringMatching(/alias/) } },
+    });
+    const text = allText(result);
+    expect(text).toContain('unknown_method');
+    expect(text).toContain('"cryo-ET"');
+    expect(text).toContain('SOLID-STATE NMR');
+    expect(getEntries).not.toHaveBeenCalled();
+  });
+
+  it('passes a method alias through for the query builder to resolve (#86)', async () => {
+    buildThenReturn({ total: 0, hits: [] });
+    const result = await run({ query: 'hemoglobin', method: 'cryo-EM' });
+    expect(result.isError).not.toBe(true);
+    expect(search.mock.calls[0]?.[0]).toMatchObject({ text: 'hemoglobin', method: 'cryo-EM' });
+  });
+
+  it('lists the accepted methods and organism forms in the input descriptions (#86)', () => {
+    const { method, organism, ligand } = searchStructures.input.shape;
+    for (const value of ['X-RAY DIFFRACTION', 'SOLID-STATE NMR', 'THEORETICAL MODEL', 'cryo-EM']) {
+      expect(method.description).toContain(value);
+    }
+    expect(organism.description).toMatch(/common name/);
+    expect(organism.description).toMatch(/taxon ID/);
+    expect(ligand.description).toMatch(/find_ligand/);
+  });
+
+  it('states that an active organism or method filter constrains its own facet (#86)', () => {
+    expect(searchStructures.description).not.toMatch(/does not constrain by its own active filter/);
+    expect(searchStructures.description).toMatch(
+      /active organism or method filter also constrains its own facet/,
+    );
+  });
+
+  it('accepts a ligand as the only criterion and forwards it (#95)', async () => {
+    search.mockResolvedValue({ total: 29, hits: [{ id: '1XBB', score: 1 }] });
+    getEntries.mockResolvedValue([]);
+    const result = await run({ ligand: 'sti' });
+    expect(result.isError).not.toBe(true);
+    expect(search).toHaveBeenCalledOnce();
+    expect(search.mock.calls[0]?.[0]).toMatchObject({ ligand: 'sti' });
+    expect(result.structuredContent).not.toHaveProperty('notice');
+  });
+
+  it('names the ligand among the criteria no_criteria asks for (#95)', async () => {
+    const result = await run({});
+    expect(result.structuredContent.error?.data.reason).toBe('no_criteria');
+    expect(result.structuredContent.error?.data.recovery?.hint).toMatch(/ligand/);
+    expect(allText(result)).toMatch(/ligand to search on/);
+    const contract = searchStructures.errors?.find((e) => e.reason === 'no_criteria');
+    expect(contract?.when).toMatch(/ligand/);
+  });
+
+  it('points a zero-hit ligand search at find_ligand on both surfaces (#95)', async () => {
+    for (const content_type of ['experimental', 'all'] as const) {
+      search.mockResolvedValue({ total: 0, hits: [] });
+      const result = await run({ query: 'SYK', ligand: 'ZZZQQ', content_type });
+      const notice = String(result.structuredContent.notice);
+      expect(notice).toMatch(/^No (experimental )?structures matched/);
+      expect(notice).toContain('protein_track_ligands mode "find_ligand"');
+      expect(allText(result)).toContain('protein_track_ligands mode "find_ligand"');
+    }
+  });
+
+  it('adds no find_ligand pointer without a ligand or when the ligand search matched (#95)', async () => {
+    search.mockResolvedValue({ total: 0, hits: [] });
+    const unfiltered = await run({ query: 'zzzznotathing', content_type: 'experimental' });
+    expect(String(unfiltered.structuredContent.notice)).not.toMatch(/find_ligand/);
+
+    search.mockResolvedValue({ total: 1, hits: [{ id: '1XBB', score: 1 }] });
+    getEntries.mockResolvedValue([]);
+    const matched = await run({ query: 'SYK', ligand: 'STI' });
+    expect(matched.isError).not.toBe(true);
+    expect(matched.structuredContent.hits).toHaveLength(1);
+    expect(matched.structuredContent).not.toHaveProperty('notice');
+  });
+
+  it.each([
+    [{ method: 'X-RAY DIFFRACTION' }, 'experimental method', 'method matches'],
+    [{ max_resolution: 2.5 }, 'resolution', 'max_resolution matches'],
+    [{ ligand: 'STI' }, 'bound ligands', 'ligand matches'],
+  ] as const)(
+    'explains why %o matches no computed model under predicted content (#86, #95)',
+    async (filter, lacking, named) => {
+      buildThenReturn({ total: 0, hits: [] });
+      const c = ctx();
+      await searchStructures.handler(
+        searchStructures.input.parse({ query: 'hemoglobin', ...filter, content_type: 'predicted' }),
+        c,
+      );
+      const notice = String(getEnrichment(c).notice);
+      expect(notice).toContain(`computed models carry no ${lacking}`);
+      expect(notice).toContain(`so ${named} nothing under content_type "predicted"`);
+      expect(notice).toMatch(/content_type to "experimental" or "all"/);
+      expect(notice).not.toMatch(/Predicted search covers computed models/);
+      expect(notice).not.toMatch(/find_ligand/);
+    },
+  );
+
+  it('names every experimental-only filter supplied, on both surfaces (#86, #95)', async () => {
+    buildThenReturn({ total: 0, hits: [] });
+    const result = await run({
+      method: 'cryo-EM',
+      max_resolution: 2.5,
+      ligand: 'HEM',
+      content_type: 'predicted',
+    });
+    const fragment =
+      'computed models carry no experimental method, resolution, or bound ligands, so method, max_resolution, and ligand match nothing under content_type "predicted"';
+    expect(String(result.structuredContent.notice)).toContain(fragment);
+    expect(allText(result)).toContain(fragment);
+  });
+
+  it('keeps the predicted notice for a zero-hit search with no experimental-only filter (#86)', async () => {
+    search.mockResolvedValue({ total: 0, hits: [] });
+    const result = await run({ organism: 'human', content_type: 'predicted' });
+    // The predicted scope advice leads; a one-word organism adds its own.
+    expect(result.structuredContent.notice).toBe(
+      'No predicted models matched. Predicted search covers computed models indexed by RCSB; widen content_type to "all" to include experimental structures. organism "human" matches only a taxon with exactly that name, scientific or NCBI common (such as "human"), never a word inside a longer name; for a species, pass its full name (such as "Zika virus") or its NCBI taxon ID.',
+    );
+  });
+
+  it('keeps the experimental and all notices for the same filters (#86)', async () => {
+    for (const [content_type, expected] of [
+      [
+        'experimental',
+        'No experimental structures matched. Broaden the query, drop filters, or widen content_type to "all" to include computed models.',
+      ],
+      [
+        'all',
+        'No structures matched in either the experimental or computed-model universe — content_type "all" is already the widest scope. Broaden the query or drop filters.',
+      ],
+    ] as const) {
+      buildThenReturn({ total: 0, hits: [] });
+      const result = await run({ method: 'NMR', max_resolution: 1, content_type });
+      expect(result.structuredContent.notice).toBe(expected);
+    }
+  });
+});
+
+describe('protein_search_structures sequence alignment (#89)', () => {
+  const SEQUENCE = 'MVLSPADKTNVKAAWGKVGA';
+  /** 2MGE_1, the tail of the P69905 sequence search (live, start 1357). */
+  const ALIGNED_2MGE_1 = {
+    identity: 0.25,
+    evalue: 0.0006589,
+    bitscore: 42,
+    alignmentLength: 148,
+    queryStart: 1,
+    queryEnd: 142,
+    targetStart: 1,
+    targetEnd: 148,
+    targetLength: 154,
+  };
+  const ALIGNED_AF_P69905 = {
+    identity: 1,
+    evalue: 4.469e-90,
+    bitscore: 291,
+    alignmentLength: 142,
+    queryStart: 1,
+    queryEnd: 142,
+    targetStart: 1,
+    targetEnd: 142,
+    targetLength: 142,
+  };
+
+  it('carries every hit’s alignment and the query length once, on both surfaces', async () => {
+    search.mockResolvedValue({
+      total: 1953,
+      queryLength: 142,
+      hits: [
+        { id: '2MGE_1', score: 0, ...ALIGNED_2MGE_1 },
+        { id: 'AF_AFP69905F1_1', score: 1, ...ALIGNED_AF_P69905 },
+      ],
+    });
+    getEntries.mockResolvedValue([]);
+    const result = await run({ sequence: SEQUENCE, limit: 2 });
+
+    expect(result.structuredContent.queryLength).toBe(142);
+    const [experimental, predicted] = result.structuredContent.hits ?? [];
+    expect(experimental).toEqual({
+      id: '2MGE',
+      entityId: '2MGE_1',
+      source: 'experimental',
+      score: 0,
+      ...ALIGNED_2MGE_1,
+    });
+    expect(predicted).toEqual({
+      id: 'AF_AFP69905F1',
+      entityId: 'AF_AFP69905F1_1',
+      source: 'predicted',
+      score: 1,
+      uniprotAccession: 'P69905',
+      ...ALIGNED_AF_P69905,
+    });
+
+    const text = allText(result);
+    expect(text.match(/\*\*Query length:\*\* 142/g)).toHaveLength(1);
+    expect(text).toContain(
+      '**Score:** 0.000 | **Identity:** 0.25 | **E-value:** 0.0006589 | **Bit score:** 42',
+    );
+    expect(text).toContain(
+      '**Alignment:** length 148 · query 1–142 · target 1–148 · target length 154',
+    );
+    expect(text).toContain(
+      '**Alignment:** length 142 · query 1–142 · target 1–142 · target length 142',
+    );
+  });
+
+  it('adds no alignment field or query length the service did not report', async () => {
+    search.mockResolvedValue({
+      total: 2,
+      hits: [
+        { id: '1A00_1', score: 1 },
+        { id: '4HHB_1', score: 0.5, queryStart: 5 },
+      ],
+    });
+    getEntries.mockResolvedValue([]);
+    const result = await run({ sequence: SEQUENCE, limit: 2 });
+
+    expect(result.structuredContent).not.toHaveProperty('queryLength');
+    const [bare, partial] = result.structuredContent.hits ?? [];
+    expect(bare).toEqual({ id: '1A00', entityId: '1A00_1', source: 'experimental', score: 1 });
+    expect(partial).toEqual({
+      id: '4HHB',
+      entityId: '4HHB_1',
+      source: 'experimental',
+      score: 0.5,
+      queryStart: 5,
+    });
+    const text = allText(result);
+    expect(text).not.toMatch(/Query length|Identity|E-value|Bit score/);
+    expect(text).toContain('**Alignment:** query 5–?');
+    expect(text.match(/\*\*Alignment:\*\*/g)).toHaveLength(1);
   });
 });

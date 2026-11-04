@@ -1,8 +1,9 @@
 /**
  * @fileoverview Tests for the 3D-Beacons service: federated model normalization
- * against the real summary shape, the 404 → { found:false } branch (distinct from
- * a transport error), the non-404 throw, the model_identifier filter (drops
- * entries with no ID), and the found = (models.length > 0) rule. HTTP mocked.
+ * against the real summary shape (UniProt span included), the provider-narrowed
+ * summary request, the 404 → { found:false } branch (distinct from a transport
+ * error), the non-404 throw, the model_identifier filter (drops entries with no
+ * ID), and the found = (models.length > 0) rule. HTTP mocked.
  * @module tests/services/beacons/beacons-service.test
  */
 
@@ -42,6 +43,8 @@ const SUMMARY = {
         provider: 'PDBe',
         model_url: 'https://files.test/4hhb.cif',
         coverage: 0.98,
+        uniprot_start: 2,
+        uniprot_end: 142,
         resolution: 1.74,
         experimental_method: 'X-RAY DIFFRACTION',
       },
@@ -53,6 +56,8 @@ const SUMMARY = {
         provider: 'AlphaFold DB',
         model_url: 'https://alphafold.test/af.cif',
         coverage: 1,
+        uniprot_start: 1,
+        uniprot_end: 142,
         confidence_type: 'pLDDT',
         confidence_avg_local_score: 96.7,
       },
@@ -76,6 +81,8 @@ describe('BeaconsService.getSummary', () => {
       provider: 'PDBe',
       modelUrl: 'https://files.test/4hhb.cif',
       coverage: 0.98,
+      uniprotStart: 2,
+      uniprotEnd: 142,
       resolution: 1.74,
       experimentalMethod: 'X-RAY DIFFRACTION',
     });
@@ -83,7 +90,42 @@ describe('BeaconsService.getSummary', () => {
       modelIdentifier: 'AF-P69905-F1',
       confidenceType: 'pLDDT',
       confidenceAvgLocalScore: 96.7,
+      uniprotStart: 1,
+      uniprotEnd: 142,
     });
+    // The federated request carries no provider filter.
+    expect(fetchResponseMock.mock.calls[0]?.[0]).toBe(
+      'https://beacons.test/uniprot/summary/P69905.json',
+    );
+  });
+
+  it('omits the UniProt span when the summary lacks it, rather than inventing one', async () => {
+    fetchResponseMock.mockResolvedValue(
+      okResponse({ structures: [{ summary: { model_identifier: 'X1', provider: 'PDBe' } }] }),
+    );
+    const [model] = (await service().getSummary('P1', createMockContext())).models;
+    expect(model).toEqual({ modelIdentifier: 'X1', provider: 'PDBe' });
+  });
+
+  it('narrows the summary to one provider with the provider query', async () => {
+    fetchResponseMock.mockResolvedValue(
+      okResponse({ ...SUMMARY, structures: SUMMARY.structures.slice(0, 1) }),
+    );
+    const out = await service().getSummary('p69905', createMockContext(), 'pdbe');
+    expect(fetchResponseMock.mock.calls[0]?.[0]).toBe(
+      'https://beacons.test/uniprot/summary/P69905.json?provider=pdbe',
+    );
+    expect(out.models.map((m) => m.provider)).toEqual(['PDBe']);
+  });
+
+  it('reads a 404 on the provider-narrowed summary as that provider holding no models', async () => {
+    fetchResponseMock.mockResolvedValue({
+      status: 404,
+      ok: false,
+      text: async () => '{}',
+    } as Response);
+    const out = await service().getSummary('Q6ZS81', createMockContext(), 'pdbe');
+    expect(out).toEqual({ accession: 'Q6ZS81', found: false, models: [] });
   });
 
   it('returns found:false with no models on a 404 (no transport error thrown)', async () => {

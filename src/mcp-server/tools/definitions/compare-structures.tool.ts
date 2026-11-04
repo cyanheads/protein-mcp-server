@@ -1,13 +1,16 @@
 /**
- * @fileoverview protein_compare_structures — structural alignment of 2–10
- * structures via the RCSB Structural Comparison service. Aligns each structure to
- * a reference (default the first) or computes the full all-pairs matrix, fanning
- * out pairwise async jobs with a concurrency cap and per-pair partial success.
+ * @fileoverview protein_compare_structures — structural alignment of two or more
+ * structures, up to the configured cap, via the RCSB Structural Comparison
+ * service. Aligns each structure to a reference (default the first) or computes
+ * the full all-pairs matrix, fanning out pairwise async jobs with a concurrency
+ * cap and per-pair partial success. Repeats are dropped before the cap, and the
+ * cap's remainder is returned as `ignored` in the input's own shape.
  * @module mcp-server/tools/definitions/compare-structures.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline, markdown } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import type {
   AlignmentJob,
@@ -35,7 +38,7 @@ const inputSchema = z.object({
     .min(2)
     .max(25)
     .describe(
-      'The structures to compare, up to the configured batch cap (excess is dropped with a notice). A structure repeated here is compared once.',
+      'The structures to compare, up to the configured batch cap; structures past it are returned in ignored and not compared. A structure repeated here is compared once.',
     ),
   reference: z
     .enum(['first', 'all_pairs'])
@@ -144,7 +147,7 @@ type StructInput = z.infer<typeof inputSchema>['structures'][number];
 
 export const compareStructures = tool('protein_compare_structures', {
   title: 'protein-mcp-server: compare structures',
-  description: `Structurally align multiple structures (up to the configured batch cap) via the RCSB Structural Comparison service (TM-align / jFATCAT). reference:"first" aligns every structure to the first; reference:"all_pairs" computes the full pairwise matrix. Each pair is an independent async alignment job with per-pair partial success — a pair still computing when the budget elapses returns status "computing" with its job UUID, and a failed pair degrades its row without sinking the others. Re-call with a matching entry in resume[] to poll a computing pair's UUID instead of resubmitting; a resumed pair reports a and b in the order its job was submitted, and a resume under a different method is rejected. Returns TM-score, RMSD, and aligned-residue count per pair, plus each structure's modeled-residue count and alignment coverage. TM-score is length-normalized and can shift sharply between structures that differ only by a terminal residue or two — the greedy superposition can settle into a worse local optimum — so read tmScore alongside rmsd, alignedResidues, modeledResidues and coverage, the columns that make such cases diagnosable.`,
+  description: `Structurally align multiple structures (up to the configured batch cap; structures past it are returned in ignored) via the RCSB Structural Comparison service (TM-align / jFATCAT). reference:"first" aligns every structure to the first; reference:"all_pairs" computes the full pairwise matrix. Each pair is an independent async alignment job with per-pair partial success — a pair still computing when the budget elapses returns status "computing" with its job UUID, and a failed pair degrades its row without sinking the others. Re-call with a matching entry in resume[] to poll a computing pair's UUID instead of resubmitting; a resumed pair reports a and b in the order its job was submitted, and a resume under a different method is rejected. Returns TM-score, RMSD, and aligned-residue count per pair, plus each structure's modeled-residue count and alignment coverage. TM-score is length-normalized and can shift sharply between structures that differ only by a terminal residue or two — the greedy superposition can settle into a worse local optimum — so read tmScore alongside rmsd, alignedResidues, modeledResidues and coverage, the columns that make such cases diagnosable.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   errors: [
@@ -184,6 +187,21 @@ export const compareStructures = tool('protein_compare_structures', {
   enrichment: {
     pairsTotal: z.number().describe('Number of pairs compared.'),
     computing: z.number().describe('Number of pairs still computing.'),
+    ignored: z
+      .array(
+        z
+          .object({
+            pdb_id: z.string().describe('PDB entry ID.'),
+            chain: z.string().optional().describe('Chain, when the structure named one.'),
+          })
+          .describe(
+            'A structure past the batch cap, never compared, in the shape structures[] takes.',
+          ),
+      )
+      .optional()
+      .describe(
+        'Structures past the batch cap, never compared — repeats dropped, in input order. Re-call with them alongside the structures to compare them against (e.g. the first structure plus these, reference "first"). Absent when the cap dropped nothing.',
+      ),
     notice: z
       .string()
       .optional()
@@ -192,13 +210,22 @@ export const compareStructures = tool('protein_compare_structures', {
       ),
   },
 
+  enrichmentTrailer: {
+    ignored: {
+      render: (ignored) =>
+        markdown().bold('ignored:').text(' ').inlineCode(JSON.stringify(ignored)).build(),
+    },
+  },
+
   async handler(input, ctx) {
     const cfg = getServerConfig();
     const notices: string[] = [];
-    const { unique, repeated } = dedupeStructures(input.structures);
+    const { unique, repeated } = dedupeStructures(
+      input.structures.map((s) => ({ ...s, pdb_id: s.pdb_id.trim() })),
+    );
     if (repeated.length > 0) {
       notices.push(
-        `Compared ${[...new Set(repeated)].join(', ')} once: a structure repeated in structures[] adds a self-alignment and a mirrored pair, not a new comparison.`,
+        `Compared ${[...new Set(repeated)].map(escapeMarkdownInline).join(', ')} once: a structure repeated in structures[] adds a self-alignment and a mirrored pair, not a new comparison.`,
       );
     }
     if (unique.length < 2) {
@@ -209,9 +236,12 @@ export const compareStructures = tool('protein_compare_structures', {
       );
     }
     const structures = unique.slice(0, cfg.maxCompareStructures);
-    if (unique.length > cfg.maxCompareStructures) {
+    const ignored = unique
+      .slice(cfg.maxCompareStructures)
+      .map((s) => ({ pdb_id: s.pdb_id, ...(s.chain ? { chain: s.chain } : {}) }));
+    if (ignored.length > 0) {
       notices.push(
-        `Capped at ${cfg.maxCompareStructures} structures; ${unique.length - cfg.maxCompareStructures} ignored.`,
+        `Capped at ${cfg.maxCompareStructures} structures; ${ignored.length} ignored and not compared — re-call with the structures in ignored alongside the ones to compare them against.`,
       );
     }
     const timeoutMs = input.timeout_s ? input.timeout_s * 1000 : cfg.asyncPollTimeoutMs;
@@ -289,7 +319,7 @@ export const compareStructures = tool('protein_compare_structures', {
 
     const computing = rows.filter((r) => r.status === 'computing').length;
     const failed = rows.filter((r) => r.status === 'failed').length;
-    ctx.enrich({ pairsTotal: rows.length, computing });
+    ctx.enrich({ pairsTotal: rows.length, computing, ...(ignored.length > 0 ? { ignored } : {}) });
     if (computing > 0 || failed > 0) {
       notices.push(
         `${computing} pair(s) still computing${failed > 0 ? `, ${failed} failed` : ''}. ` +

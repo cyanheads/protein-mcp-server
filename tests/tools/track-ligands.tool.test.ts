@@ -2,8 +2,9 @@
  * @fileoverview Tests for protein_track_ligands: the three modes (find_ligand,
  * structures_with_ligand, binding_site), the missing-param guards (InvalidParams),
  * the find_ligand / binding_site empty-result not_found branches,
- * structures_with_ligand's empty-result set + notice, the totalCount /
- * resolvedCompId enrichment, find_ligand's candidate-pool disclosure
+ * structures_with_ligand's empty-result set + notice, its per-row title, method,
+ * and host entities (the polymer entities whose chains carry the ligand) on both
+ * surfaces, the totalCount / resolvedCompId enrichment, find_ligand's candidate-pool disclosure
  * (totalCount / candidatesConsidered / truncation notice), comp_id upper-casing,
  * and format() rendering of ligands, structure lists, and binding sites in both
  * residue-numbering namespaces. RCSB service mocked.
@@ -167,6 +168,23 @@ describe('protein_track_ligands — find_ligand', () => {
     expect(out.ligands).toHaveLength(100);
     expect(getEnrichment(c)).toMatchObject({ totalCount: 12412, candidatesConsidered: 100 });
     expect(String(getEnrichment(c).notice)).toContain('100 of 12412');
+  });
+
+  it('escapes the query it echoes in the candidate-pool notice', async () => {
+    const pool = Array.from({ length: 25 }, (_, i) => `C${i}`);
+    findChemComps.mockResolvedValue({ ids: pool, total: 119 });
+    getChemComp.mockImplementation(async (id: string) => ({ compId: id }));
+    countEntriesWithLigand.mockResolvedValue(1);
+    const c = ctx();
+    await trackLigands.handler(
+      trackLigands.input.parse({ mode: 'find_ligand', query: '*iron* [x](y)' }),
+      c,
+    );
+    expect(String(getEnrichment(c).notice)).toContain(
+      '25 of 119 components matching "\\*iron\\* \\[x\\](y)" were ranked',
+    );
+    // The search itself receives the query as written.
+    expect(findChemComps).toHaveBeenCalledWith('*iron* [x](y)', 25, expect.anything());
   });
 
   it('resolves a name to chem-comp metadata with its deposition count', async () => {
@@ -485,6 +503,327 @@ describe('protein_track_ligands — structures_with_ligand', () => {
     }
   });
 
+  /** getEntries' normalized 3K5V and 6KTN (live STI hits), trimmed; entities in entity-number order. */
+  const META_3K5V = {
+    id: '3K5V',
+    title: 'Structure of Abl kinase in complex with imatinib and GNF-2',
+    methods: ['X-RAY DIFFRACTION'],
+    resolution: 1.74,
+    organisms: ['Mus musculus'],
+    polymerEntities: [
+      {
+        entityId: '3K5V_1',
+        description: 'Tyrosine-protein kinase ABL1',
+        organisms: ['Mus musculus'],
+        authAsymIds: ['A', 'B'],
+        labelAsymIds: ['A', 'B'],
+        sequenceLength: 293,
+      },
+    ],
+    ligands: [
+      { compId: 'CL', authAsymIds: ['A'] },
+      { compId: 'STI', name: 'IMATINIB', authAsymIds: ['A', 'B'] },
+      { compId: 'STJ', authAsymIds: ['A', 'B'] },
+    ],
+  };
+  const META_6KTN = {
+    id: '6KTN',
+    title: 'Human PPARgamma ligand-binding domain R288A mutant in complex with imatinib',
+    methods: ['X-RAY DIFFRACTION'],
+    resolution: 2.752,
+    organisms: ['Homo sapiens'],
+    polymerEntities: [
+      {
+        entityId: '6KTN_1',
+        description: 'Peroxisome proliferator-activated receptor gamma',
+        organisms: ['Homo sapiens'],
+        authAsymIds: ['A'],
+      },
+      {
+        entityId: '6KTN_2',
+        description: '16-mer peptide from Nuclear receptor coactivator 1',
+        organisms: ['Homo sapiens'],
+        authAsymIds: ['B'],
+      },
+    ],
+    ligands: [{ compId: 'STI', authAsymIds: ['A'] }],
+  };
+
+  type StructuresResult = {
+    structuredContent: {
+      structures: Array<{
+        id: string;
+        resolution?: number;
+        title?: string;
+        method?: string;
+        hostEntities?: Array<{ entityId: string; description?: string; organisms?: string[] }>;
+      }>;
+    };
+    content: Array<{ text: string }>;
+  };
+
+  it("names each row's title, method, and host entities on both surfaces from the one getEntries call (#92)", async () => {
+    searchByLigand.mockResolvedValue({
+      total: 29,
+      hits: [
+        { id: '3K5V', score: 1 },
+        { id: '6KTN', score: 1 },
+      ],
+    });
+    getEntries.mockResolvedValue([META_6KTN, META_3K5V]);
+
+    const result = (await runToolContract(trackLigands, {
+      mode: 'structures_with_ligand',
+      comp_id: 'sti',
+      limit: 2,
+    })) as StructuresResult;
+
+    expect(result.structuredContent.structures).toEqual([
+      {
+        id: '3K5V',
+        resolution: 1.74,
+        title: 'Structure of Abl kinase in complex with imatinib and GNF-2',
+        method: 'X-RAY DIFFRACTION',
+        hostEntities: [
+          {
+            entityId: '3K5V_1',
+            description: 'Tyrosine-protein kinase ABL1',
+            organisms: ['Mus musculus'],
+          },
+        ],
+      },
+      {
+        id: '6KTN',
+        resolution: 2.752,
+        title: 'Human PPARgamma ligand-binding domain R288A mutant in complex with imatinib',
+        method: 'X-RAY DIFFRACTION',
+        // Chain A carries STI: the receptor, not the coactivator peptide on chain B.
+        hostEntities: [
+          {
+            entityId: '6KTN_1',
+            description: 'Peroxisome proliferator-activated receptor gamma',
+            organisms: ['Homo sapiens'],
+          },
+        ],
+      },
+    ]);
+    expect(searchByLigand).toHaveBeenCalledTimes(1);
+    expect(getEntries).toHaveBeenCalledTimes(1);
+
+    const text = result.content.map((block) => block.text).join('\n');
+    expect(text).toContain(
+      '- 3K5V — 1.74 Å — X-RAY DIFFRACTION — Structure of Abl kinase in complex with imatinib and GNF-2',
+    );
+    expect(text).toContain('  - host entity 3K5V_1: Tyrosine-protein kinase ABL1 (Mus musculus)');
+    expect(text).toContain(
+      '  - host entity 6KTN_1: Peroxisome proliferator-activated receptor gamma (Homo sapiens)',
+    );
+    expect(text).not.toContain('6KTN_2');
+  });
+
+  it('lists only the entities whose chains carry the ligand in a many-entity complex (9PGI, #92)', async () => {
+    // 9PGI holds 92 polymer entities; its one ATP sits on chain AX alone. MG
+    // spans chain AX too, which must not pull its other chains' entities in.
+    searchByLigand.mockResolvedValue({ total: 1, hits: [{ id: '9PGI', score: 1 }] });
+    getEntries.mockResolvedValue([
+      {
+        id: '9PGI',
+        organisms: ['Homo sapiens'],
+        polymerEntities: [
+          {
+            entityId: '9PGI_74',
+            description: '28S ribosomal protein S28, mitochondrial',
+            authAsymIds: ['AW'],
+          },
+          {
+            entityId: '9PGI_89',
+            description: '28S ribosomal protein S29, mitochondrial',
+            organisms: ['Homo sapiens'],
+            authAsymIds: ['AX'],
+          },
+          { entityId: '9PGI_90', description: 'unrelated', authAsymIds: ['AY', 'A'] },
+        ],
+        ligands: [
+          { compId: 'MG', authAsymIds: ['A', 'AX'] },
+          { compId: 'ATP', authAsymIds: ['AX'] },
+        ],
+      },
+    ]);
+    const out = await trackLigands.handler(
+      trackLigands.input.parse({ mode: 'structures_with_ligand', comp_id: 'ATP' }),
+      ctx(),
+    );
+    expect(out.structures?.[0]?.hostEntities).toEqual([
+      {
+        entityId: '9PGI_89',
+        description: '28S ribosomal protein S29, mitochondrial',
+        organisms: ['Homo sapiens'],
+      },
+    ]);
+  });
+
+  it('lists every entity whose chains carry the ligand, in entity order, on both surfaces (4HHB HEM, #92)', async () => {
+    // 4HHB's HEM sits on all four globin chains, so both entities host it; the
+    // phosphate's chains (B, D) must not narrow or reorder that list.
+    searchByLigand.mockResolvedValue({ total: 1, hits: [{ id: '4HHB', score: 1 }] });
+    getEntries.mockResolvedValue([
+      {
+        id: '4HHB',
+        resolution: 1.74,
+        organisms: ['Homo sapiens'],
+        polymerEntities: [
+          {
+            entityId: '4HHB_1',
+            description: 'Hemoglobin subunit alpha',
+            organisms: ['Homo sapiens'],
+            authAsymIds: ['A', 'C'],
+          },
+          {
+            entityId: '4HHB_2',
+            description: 'Hemoglobin subunit beta',
+            organisms: ['Homo sapiens'],
+            authAsymIds: ['B', 'D'],
+          },
+        ],
+        ligands: [
+          { compId: 'PO4', authAsymIds: ['B', 'D'] },
+          { compId: 'HEM', authAsymIds: ['A', 'B', 'C', 'D'] },
+        ],
+      },
+    ]);
+
+    const result = (await runToolContract(trackLigands, {
+      mode: 'structures_with_ligand',
+      comp_id: 'HEM',
+    })) as StructuresResult;
+
+    expect(result.structuredContent.structures[0]?.hostEntities).toEqual([
+      { entityId: '4HHB_1', description: 'Hemoglobin subunit alpha', organisms: ['Homo sapiens'] },
+      { entityId: '4HHB_2', description: 'Hemoglobin subunit beta', organisms: ['Homo sapiens'] },
+    ]);
+    const text = result.content.map((block) => block.text).join('\n');
+    expect(text).toContain(
+      '  - host entity 4HHB_1: Hemoglobin subunit alpha (Homo sapiens)\n  - host entity 4HHB_2: Hemoglobin subunit beta (Homo sapiens)',
+    );
+  });
+
+  it('reads a comp_id through surrounding whitespace for the search, host entities, and notice', async () => {
+    searchByLigand.mockResolvedValue({ total: 1, hits: [{ id: '4HHB', score: 1 }] });
+    getEntries.mockResolvedValue([
+      {
+        id: '4HHB',
+        organisms: [],
+        polymerEntities: [{ entityId: '4HHB_1', authAsymIds: ['A'] }],
+        ligands: [{ compId: 'HEM', authAsymIds: ['A'] }],
+      },
+    ]);
+    const c = ctx();
+    const out = await trackLigands.handler(
+      trackLigands.input.parse({ mode: 'structures_with_ligand', comp_id: ' hem\t' }),
+      c,
+    );
+    expect(searchByLigand).toHaveBeenCalledWith('HEM', { limit: 25, start: 0 }, expect.anything());
+    expect(getEnrichment(c)).toMatchObject({ resolvedCompId: 'HEM' });
+    expect(out.structures?.[0]?.hostEntities).toEqual([{ entityId: '4HHB_1' }]);
+
+    searchByLigand.mockResolvedValue({ total: 0, hits: [] });
+    const empty = ctx();
+    await trackLigands.handler(
+      trackLigands.input.parse({ mode: 'structures_with_ligand', comp_id: ' STI ' }),
+      empty,
+    );
+    expect(getEnrichment(empty).notice).toBe(
+      'No PDB entries contain STI. Verify the component ID via mode find_ligand.',
+    );
+  });
+
+  it.each([
+    [0, 'No PDB entries contain A\\*B\\_. Verify the component ID via mode find_ligand.'],
+    [
+      3,
+      'start 5 is past the end of the 3 PDB entries containing A\\*B\\_. Re-call with a lower start to read a populated page.',
+    ],
+  ])('escapes the comp_id it echoes in an empty-page notice (total %i)', async (total, notice) => {
+    searchByLigand.mockResolvedValue({ total, hits: [] });
+    const c = ctx();
+    await trackLigands.handler(
+      trackLigands.input.parse({ mode: 'structures_with_ligand', comp_id: 'a*b_', start: 5 }),
+      c,
+    );
+    expect(getEnrichment(c).notice).toBe(notice);
+    // structuredContent keeps the ID as the search used it.
+    expect(getEnrichment(c)).toMatchObject({ resolvedCompId: 'A*B_' });
+  });
+
+  it('omits hostEntities when no polymer chain carries the ligand, and title/method a row lacks, on both surfaces (#92)', async () => {
+    searchByLigand.mockResolvedValue({
+      total: 3,
+      hits: [
+        { id: '6E0O', score: 1 },
+        { id: '1ABC', score: 1 },
+        { id: '2ABC', score: 1 },
+      ],
+    });
+    getEntries.mockResolvedValue([
+      // No ATP non-polymer entity at all: the search hit came from elsewhere.
+      {
+        id: '6E0O',
+        title: 'Some complex',
+        methods: ['ELECTRON MICROSCOPY'],
+        resolution: 3.1,
+        organisms: [],
+        polymerEntities: [{ entityId: '6E0O_1', authAsymIds: ['A'] }],
+        ligands: [],
+      },
+      // ATP present, but on a chain no polymer entity reports; no title or method.
+      {
+        id: '1ABC',
+        organisms: [],
+        polymerEntities: [{ entityId: '1ABC_1', authAsymIds: ['A'] }],
+        ligands: [{ compId: 'ATP', authAsymIds: ['Z'] }],
+      },
+      // ATP with no reported author chains.
+      {
+        id: '2ABC',
+        organisms: [],
+        polymerEntities: [{ entityId: '2ABC_1', authAsymIds: ['A'] }],
+        ligands: [{ compId: 'ATP' }],
+      },
+    ]);
+
+    const result = (await runToolContract(trackLigands, {
+      mode: 'structures_with_ligand',
+      comp_id: 'ATP',
+    })) as StructuresResult;
+
+    expect(result.structuredContent.structures).toEqual([
+      { id: '6E0O', resolution: 3.1, title: 'Some complex', method: 'ELECTRON MICROSCOPY' },
+      { id: '1ABC' },
+      { id: '2ABC' },
+    ]);
+    const text = result.content.map((block) => block.text).join('\n');
+    expect(text).toContain('- 6E0O — 3.10 Å — ELECTRON MICROSCOPY — Some complex');
+    expect(text).not.toContain('host entity');
+  });
+
+  it('renders a host entity that lacks a description or organisms without inventing them (#92)', () => {
+    const blocks = trackLigands.format!({
+      mode: 'structures_with_ligand',
+      structures: [
+        {
+          id: '7ABC',
+          hostEntities: [
+            { entityId: '7ABC_1' },
+            { entityId: '7ABC_2', organisms: ['Homo sapiens', 'Tequatrovirus T4'] },
+          ],
+        },
+      ],
+    });
+    const text = (blocks[0] as { text: string }).text;
+    expect(text).toContain('- 7ABC\n  - host entity 7ABC_1\n');
+    expect(text).toContain('  - host entity 7ABC_2 (Homo sapiens, Tequatrovirus T4)');
+  });
+
   it('rejects negative or fractional ligand-search offsets', () => {
     expect(
       trackLigands.input.safeParse({
@@ -518,6 +857,14 @@ describe('protein_track_ligands — binding_site', () => {
     );
     expect(out.bindingSites?.[0]).toMatchObject({ ligandCompId: 'HEM', ligandAsymId: 'A' });
     expect(getBindingSites).toHaveBeenCalledWith('4HHB', 'HEM', expect.anything());
+
+    const c = ctx();
+    await trackLigands.handler(
+      trackLigands.input.parse({ mode: 'binding_site', pdb_id: '4HHB', comp_id: ' hem\n' }),
+      c,
+    );
+    expect(getBindingSites).toHaveBeenLastCalledWith('4HHB', 'HEM', expect.anything());
+    expect(getEnrichment(c)).toMatchObject({ resolvedCompId: 'HEM' });
   });
 
   it('returns label and author numbering for pocket residues on both surfaces (1IEP STI, #69)', async () => {

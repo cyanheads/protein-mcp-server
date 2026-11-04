@@ -5,12 +5,38 @@
  * @module services/rcsb/types
  */
 
-/** A single search hit before metadata enrichment. */
+/**
+ * A single search hit before metadata enrichment. The alignment fields come from
+ * the mmseqs2 `match_context` of a sequence search and are set one by one, only
+ * where upstream sent the value: a hit of any other search, or a sequence hit
+ * with no context, carries none of them.
+ */
 export interface SearchHit {
+  /** Alignment length in columns, gaps included. */
+  alignmentLength?: number;
+  /** Bit score of the alignment. */
+  bitscore?: number;
+  /** Alignment E-value. */
+  evalue?: number;
   /** Identifier (PDB entry ID, polymer-entity ID, or chem-comp ID per return type). */
   id: string;
-  /** RCSB relevance score. */
+  /** Sequence identity 0–1 over the alignment, rounded to 4 decimal places. */
+  identity?: number;
+  /** Last aligned query residue, 1-based, inclusive. */
+  queryEnd?: number;
+  /** First aligned query residue, 1-based, inclusive. */
+  queryStart?: number;
+  /**
+   * RCSB relevance score — a rank within the result set (a sequence search
+   * min–max rescales bit scores across it), not a similarity measure.
+   */
   score: number;
+  /** Last aligned residue of the hit sequence, 1-based, inclusive. */
+  targetEnd?: number;
+  /** Residue count of the hit sequence the target range indexes into. */
+  targetLength?: number;
+  /** First aligned residue of the hit sequence, 1-based, inclusive. */
+  targetStart?: number;
 }
 
 /** One facet bucket; `child` present only for multidimensional (nested) facets. */
@@ -60,6 +86,11 @@ export interface SearchResult {
   facets?: FacetDimension[];
   /** The current page of hits. */
   hits: SearchHit[];
+  /**
+   * Residue count of the query sequence the hits' query ranges index into —
+   * constant within one sequence search. Absent when no hit carried a context.
+   */
+  queryLength?: number;
   /** Total matches upstream (before pagination). */
   total: number;
 }
@@ -81,15 +112,22 @@ export interface PolymerEntityMeta {
    * transformation, though the two coincide for many entries.
    */
   labelAsymIds?: string[];
-  /** Source organism scientific name. */
-  organism?: string;
+  /**
+   * Distinct named source organisms, in upstream source order. A chimeric entity
+   * lists each fused source (2RH1_1: Homo sapiens, Tequatrovirus T4). Absent when
+   * upstream names none.
+   */
+  organisms?: string[];
   /** One-letter canonical sequence (present only when explicitly requested). */
   sequence?: string;
   /** Residue count of the sample sequence. */
   sequenceLength?: number;
 }
 
-/** One polymer entity's UniProt cross-reference: the chains it covers and the mapped accession. */
+/**
+ * One polymer entity's UniProt cross-reference: the chains it covers and the
+ * mapped accession. `resolveUniprotEntities` returns them in entity-number order.
+ */
 export interface UniProtXref {
   /** UniProt accession this entity maps to. */
   accession: string;
@@ -99,8 +137,46 @@ export interface UniProtXref {
   proteinName?: string;
 }
 
+/** A protein polymer entity of a PDB entry, as the sequence lookup reports it. */
+export interface ProteinEntitySummary {
+  /** Author chain IDs (`auth_asym_id`) the entity covers; empty when upstream lists none. */
+  chains: string[];
+  /** Polymer entity ID (e.g. `4HHB_2`). */
+  entityId: string;
+  /** Residue count of the entity's canonical one-letter sequence. */
+  length: number;
+}
+
+/**
+ * What a PDB entry yields as a sequence-search query, judged over its protein
+ * polymer entities (DNA and RNA never qualify) in entity-number order:
+ * - `found` — the selected entity and its sequence, plus the entry's other
+ *   protein entities;
+ * - `chain_not_found` — no protein entity covers the requested author chain;
+ *   `proteinEntities` lists every protein entity;
+ * - `no_protein` — the entry holds no protein entity with a sequence;
+ * - `entry_not_found` — RCSB has no such entry.
+ */
+export type EntrySequence =
+  | {
+      entity: ProteinEntitySummary;
+      kind: 'found';
+      otherEntities: ProteinEntitySummary[];
+      sequence: string;
+    }
+  | { kind: 'chain_not_found'; proteinEntities: ProteinEntitySummary[] }
+  | { kind: 'no_protein' }
+  | { kind: 'entry_not_found' };
+
 /** A bound non-polymer (ligand) component within an entry. */
 export interface LigandMeta {
+  /**
+   * Author chain IDs (`auth_asym_id`) the depositor assigned this component's
+   * instances to. Internal: `structures_with_ligand` matches it against
+   * {@link PolymerEntityMeta.authAsymIds} to name the host entities; the shared
+   * ligand output schema leaves it out, so it never reaches a response.
+   */
+  authAsymIds?: string[];
   /** Chemical component ID (e.g. `HEM`, `STI`). */
   compId: string;
   /** Molecular formula when available. */
@@ -126,13 +202,16 @@ export interface EntryMeta {
   computedModelProvider?: string;
   /** PDB entry ID. */
   id: string;
-  /** Bound ligands (non-polymer entities). */
+  /** Bound ligands (non-polymer entities), in entity-number order. */
   ligands: LigandMeta[];
   /** Experimental method(s) (e.g. ["X-RAY DIFFRACTION"]). */
   methods?: string[];
   /** Deposited structure molecular weight (kDa). */
   molecularWeight?: number;
-  /** Distinct source organisms across polymer entities. */
+  /**
+   * Distinct source organisms across the polymer entities, in entity-number
+   * order (each entity's own sources in upstream order). Empty when none is named.
+   */
   organisms: string[];
   /**
    * Whether the archive publishes a legacy PDB-format file for this entry —
@@ -140,7 +219,7 @@ export interface EntryMeta {
    * reports no value (computed models).
    */
   pdbFormatCompatible?: boolean;
-  /** Modeled polymer entities. */
+  /** Modeled polymer entities, in entity-number order. */
   polymerEntities: PolymerEntityMeta[];
   /** Initial release date (ISO 8601). */
   releaseDate?: string;
@@ -230,17 +309,29 @@ export interface StructureSearchParams {
    * experimental-only default, which drops every computed model.
    */
   contentType?: ContentType[];
+  /**
+   * Chemical component ID of a bound ligand (any letter case): keeps entries
+   * holding the component as a non-polymer entity.
+   */
+  ligand?: string;
   /** Page size. */
   limit?: number;
   /** Max E-value for a sequence query. */
   maxEvalue?: number;
   /** Maximum resolution in Å. */
   maxResolution?: number;
-  /** Experimental method filter (e.g. "X-RAY DIFFRACTION"). */
+  /**
+   * Experimental method filter: one of the `exptl.method` values or an alias
+   * (`cryo-EM`, `X-ray`, `NMR`, …), any letter case. Any other value makes
+   * `buildQuery` throw `unknown_method`.
+   */
   method?: string;
   /** Minimum sequence identity (0–1) for a sequence query. */
   minIdentity?: number;
-  /** Source organism filter (scientific name). */
+  /**
+   * Source organism filter: a scientific name, an NCBI common name, or an
+   * all-digit NCBI taxon ID. Matches the named taxon and every taxon under it.
+   */
   organism?: string;
   /** Protein sequence (one-letter) for an mmseqs2 search. */
   sequence?: string;

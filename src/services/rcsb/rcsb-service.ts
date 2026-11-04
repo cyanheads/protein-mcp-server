@@ -14,7 +14,7 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import type { ServerConfig } from '@/config/server-config.js';
 import { fetchJson } from '../shared/http.js';
-import { normalizeProteinSequence } from '../shared/protein-sequence.js';
+import { MIN_SEQUENCE_RESIDUES, normalizeProteinSequence } from '../shared/protein-sequence.js';
 import type {
   BindingResidue,
   BindingSite,
@@ -23,10 +23,12 @@ import type {
   ContentType,
   CoordinateUrls,
   EntryMeta,
+  EntrySequence,
   FacetBucket,
   FacetDimension,
   LigandMeta,
   PolymerEntityMeta,
+  ProteinEntitySummary,
   SearchHit,
   SearchResult,
   StructureSearchParams,
@@ -59,8 +61,37 @@ const MATCH_ALL = {
 
 interface RawSearchResponse {
   facets?: RawFacet[];
-  result_set?: Array<{ identifier: string; score: number }>;
+  result_set?: RawSearchRow[];
   total_count?: number;
+}
+
+/** One result row; `services` arrives only under `results_verbosity: "verbose"`. */
+interface RawSearchRow {
+  identifier: string;
+  score: number;
+  services?: Array<{
+    nodes?: Array<{ match_context?: RawMatchContext[] | null }>;
+    service_type?: string;
+  }>;
+}
+
+/**
+ * The mmseqs2 alignment a verbose sequence search attaches to its node. Values
+ * are typed `unknown` and read only when numeric. The aligned strings,
+ * `mismatches`, and `gaps_opened` are left unread: identity and alignment length
+ * already express the last two.
+ */
+interface RawMatchContext {
+  alignment_length?: unknown;
+  bitscore?: unknown;
+  evalue?: unknown;
+  query_beg?: unknown;
+  query_end?: unknown;
+  query_length?: unknown;
+  sequence_identity?: unknown;
+  subject_beg?: unknown;
+  subject_end?: unknown;
+  subject_length?: unknown;
 }
 
 interface RawFacet {
@@ -94,7 +125,12 @@ export class RcsbService {
 
   // ─── Search ────────────────────────────────────────────────────────────────
 
-  /** Full-text / filtered structure search, optionally with a facet breakdown. */
+  /**
+   * Full-text / filtered structure search, optionally with a facet breakdown.
+   * With a sequence it returns polymer-entity hits carrying their alignment to
+   * the query (see {@link searchSequence}); the verbose response that carries the
+   * alignment is only requested then.
+   */
   async search(
     params: StructureSearchParams,
     ctx: Context,
@@ -110,17 +146,21 @@ export class RcsbService {
         paginate: { start: params.start ?? 0, rows: params.limit ?? 25 },
         ...(facets && facets.length > 0 ? { facets: facets.map(toRcsbFacet) } : {}),
         scoring_strategy: 'combined',
+        ...(params.sequence ? { results_verbosity: 'verbose' } : {}),
       },
     };
     const raw = await this.postSearch(body, ctx, 'RcsbService.search');
     return {
-      total: raw.total_count ?? 0,
-      hits: normalizeHits(raw.result_set),
+      ...toSearchResult(raw),
       ...(facets && facets.length > 0 ? { facets: normalizeFacets(raw.facets, facets) } : {}),
     };
   }
 
-  /** mmseqs2 sequence-similarity search. Returns polymer-entity hits. */
+  /**
+   * mmseqs2 sequence-similarity search. Returns polymer-entity hits, each with
+   * its identity, E-value, bit score, and aligned range from the verbose
+   * response, plus the query length once on the result.
+   */
   async searchSequence(
     sequence: string,
     opts: {
@@ -148,15 +188,17 @@ export class RcsbService {
         ...contentTypeOption(opts.contentType),
         paginate: { start: opts.start ?? 0, rows: opts.limit ?? 25 },
         scoring_strategy: 'sequence',
+        results_verbosity: 'verbose',
       },
     };
     const raw = await this.postSearch(body, ctx, 'RcsbService.searchSequence');
-    return { total: raw.total_count ?? 0, hits: normalizeHits(raw.result_set) };
+    return toSearchResult(raw);
   }
 
   /**
-   * Find entries containing a given ligand (exact chemical component ID),
-   * highest-resolution first. Containment is boolean so RCSB's relevance score is
+   * Find entries holding a bound copy of a ligand (exact chemical component ID),
+   * highest-resolution first — see {@link ligandContainmentQuery} for what
+   * counts as bound. Containment is boolean so RCSB's relevance score is
    * uniform; a server-side resolution sort orders the page by a signal that
    * actually discriminates (the returned page is the globally best-resolution
    * entries, not an arbitrary PDB-ID-ascending slice).
@@ -171,13 +213,15 @@ export class RcsbService {
       ctx,
       'RcsbService.searchByLigand',
     );
-    return { total: raw.total_count ?? 0, hits: normalizeHits(raw.result_set) };
+    return toSearchResult(raw);
   }
 
   /**
-   * Count PDB entries containing a given ligand (its deposition frequency). Used
-   * to re-rank name-search candidates so the canonical, most-deposited component
-   * surfaces first — a count-only query (rows 0), no rows or sort pulled.
+   * Count PDB entries holding a bound copy of a ligand (its deposition
+   * frequency) — the same match set {@link searchByLigand} pages, so the two
+   * totals agree. Used to re-rank name-search candidates so the canonical,
+   * most-deposited component surfaces first — a count-only query (rows 0), no
+   * rows or sort pulled.
    */
   async countEntriesWithLigand(compId: string, ctx: Context): Promise<number> {
     const raw = await this.postSearch(
@@ -259,11 +303,12 @@ export class RcsbService {
   }
 
   /**
-   * Resolve a PDB entry to its UniProt-cross-referenced polymer entities. Each
-   * returned entry carries the author chain IDs it covers, the mapped UniProt
-   * accession, and the polymer description — entity-grained so a caller can
-   * disambiguate a multi-chain entry by chain. One entry per polymer entity that
-   * carries a UniProt xref; entities without one are skipped. Single round trip.
+   * Resolve a PDB entry to its UniProt-cross-referenced polymer entities, in
+   * entity-number order. Each returned entry carries the author chain IDs it
+   * covers, the mapped UniProt accession, and the polymer description —
+   * entity-grained so a caller can disambiguate a multi-chain entry by chain. One
+   * entry per polymer entity that carries a UniProt xref; entities without one
+   * are skipped. Single round trip.
    */
   async resolveUniprotEntities(pdbId: string, ctx: Context): Promise<UniProtXref[]> {
     const data = await this.graphql<{ entry: RawXrefEntry | null }>(
@@ -273,7 +318,7 @@ export class RcsbService {
       'RcsbService.resolveUniprotEntities',
     );
     const xrefs: UniProtXref[] = [];
-    for (const entity of data.entry?.polymer_entities ?? []) {
+    for (const entity of byEntityNumber(data.entry?.polymer_entities)) {
       const container = entity.rcsb_polymer_entity_container_identifiers;
       const accession = container?.reference_sequence_identifiers?.find(
         (ref) => /uniprot/i.test(ref.database_name ?? '') && ref.database_accession,
@@ -290,23 +335,60 @@ export class RcsbService {
     return xrefs;
   }
 
-  /** First polymer entity's one-letter sequence for a PDB entry. */
+  /**
+   * The sequence-search query a PDB entry yields: the canonical one-letter
+   * sequence of one protein polymer entity (`rcsb_entity_polymer_type`
+   * `Protein`, L- and D-polypeptides alike; DNA and RNA never qualify), read in
+   * entity-number order. With `chain`, the protein entity whose author chains
+   * (`auth_asym_ids`) include it, matched exactly; without, the lowest-numbered
+   * protein entity of at least 10 residues — RCSB's sequence-search minimum — or
+   * the lowest-numbered one when every protein entity is shorter, which the
+   * search then rejects. Single round trip.
+   */
   async getSequence(
     pdbId: string,
+    chain: string | undefined,
     ctx: Context,
-  ): Promise<{ entityId: string; sequence: string } | null> {
+  ): Promise<EntrySequence> {
     const data = await this.graphql<{ entry: RawSequenceEntry | null }>(
       SEQUENCE_QUERY,
       { id: pdbId.toUpperCase() },
       ctx,
       'RcsbService.getSequence',
     );
-    const entity = data.entry?.polymer_entities?.find(
-      (e) => e.entity_poly?.pdbx_seq_one_letter_code_can,
-    );
-    const seq = entity?.entity_poly?.pdbx_seq_one_letter_code_can;
-    if (!entity || !seq) return null;
-    return { entityId: entity.rcsb_id ?? pdbId, sequence: seq.replace(/\s+/g, '') };
+    if (!data.entry) return { kind: 'entry_not_found' };
+
+    const proteins: Array<{ entity: ProteinEntitySummary; sequence: string }> = [];
+    for (const raw of byEntityNumber(data.entry.polymer_entities)) {
+      const sequence = raw.entity_poly?.pdbx_seq_one_letter_code_can?.replace(/\s+/g, '');
+      if (raw.entity_poly?.rcsb_entity_polymer_type !== 'Protein' || !raw.rcsb_id || !sequence) {
+        continue;
+      }
+      proteins.push({
+        entity: {
+          entityId: raw.rcsb_id,
+          chains: raw.rcsb_polymer_entity_container_identifiers?.auth_asym_ids ?? [],
+          length: sequence.length,
+        },
+        sequence,
+      });
+    }
+    const [first] = proteins;
+    if (!first) return { kind: 'no_protein' };
+
+    const selected =
+      chain === undefined
+        ? (proteins.find((p) => p.entity.length >= MIN_SEQUENCE_RESIDUES) ?? first)
+        : proteins.find((p) => p.entity.chains.includes(chain));
+    if (!selected) {
+      return { kind: 'chain_not_found', proteinEntities: proteins.map((p) => p.entity) };
+    }
+    return {
+      kind: 'found',
+      entity: selected.entity,
+      sequence: selected.sequence,
+      otherEntities: proteins.filter((p) => p !== selected).map((p) => p.entity),
+    };
   }
 
   /**
@@ -315,6 +397,12 @@ export class RcsbService {
    * reports the mmCIF label chain and position plus the author residue number,
    * and the author chain comes from the entry's own per-instance
    * `asym_id`/`auth_asym_id` pairs.
+   *
+   * Sites come back in one fixed order — ligand entities by entity number, each
+   * entity's instances by author chain then author residue number — because the
+   * caller pages them with `start`/`limit`, and upstream's own order varies
+   * between connections: two pages read under different orders would skip or
+   * repeat instances.
    */
   async getBindingSites(
     pdbId: string,
@@ -339,15 +427,16 @@ export class RcsbService {
     }
     const sites: BindingSite[] = [];
     const want = compId?.toUpperCase();
-    for (const nonpoly of data.entry?.nonpolymer_entities ?? []) {
+    for (const nonpoly of byEntityNumber(data.entry?.nonpolymer_entities)) {
       const ligand = nonpoly.rcsb_nonpolymer_entity_container_identifiers?.nonpolymer_comp_id;
       if (!ligand || (want && ligand.toUpperCase() !== want)) continue;
+      const entitySites: BindingSite[] = [];
       for (const inst of nonpoly.nonpolymer_entity_instances ?? []) {
         const neighbors = inst.rcsb_target_neighbors ?? [];
         if (neighbors.length === 0) continue;
         const ids = inst.rcsb_nonpolymer_entity_instance_container_identifiers;
         const ligandAuthSeqId = parseAuthSeqId(ids?.auth_seq_id);
-        sites.push({
+        entitySites.push({
           ligandCompId: ligand,
           ...(ids?.auth_asym_id ? { ligandAsymId: ids.auth_asym_id } : {}),
           ...(ligandAuthSeqId !== undefined ? { ligandAuthSeqId } : {}),
@@ -357,6 +446,7 @@ export class RcsbService {
             .sort((a, b) => (a.distance ?? Infinity) - (b.distance ?? Infinity)),
         });
       }
+      sites.push(...entitySites.sort(compareLigandInstances));
     }
     return sites;
   }
@@ -470,7 +560,11 @@ export class RcsbService {
 
 // ─── Query builders ──────────────────────────────────────────────────────────
 
-/** Build the RCSB query node from search params (match-all when no constraint given). */
+/**
+ * Build the RCSB query node from search params (match-all when no constraint
+ * given). Throws before any request exists: `invalid_sequence` for a malformed
+ * sequence, `unknown_method` for a method outside the vocabulary and its aliases.
+ */
 export function buildQuery(params: StructureSearchParams): unknown {
   const nodes: unknown[] = [];
   if (params.text) {
@@ -488,30 +582,156 @@ export function buildQuery(params: StructureSearchParams): unknown {
       },
     });
   }
-  if (params.organism) {
-    nodes.push(
-      textNode(
-        'rcsb_entity_source_organism.ncbi_scientific_name',
-        'contains_phrase',
-        params.organism,
-      ),
-    );
-  }
-  if (params.method) {
-    nodes.push(textNode('exptl.method', 'exact_match', params.method));
-  }
+  if (params.organism) nodes.push(organismNode(params.organism));
+  if (params.method) nodes.push(methodNode(params.method));
   if (typeof params.maxResolution === 'number') {
     nodes.push(
       textNode('rcsb_entry_info.resolution_combined', 'less_or_equal', params.maxResolution),
     );
   }
+  if (params.ligand) nodes.push(ligandNode(params.ligand));
   if (nodes.length === 0) return MATCH_ALL;
   if (nodes.length === 1) return nodes[0];
   return { type: 'group', logical_operator: 'and', nodes };
 }
 
-function textNode(attribute: string, operator: string, value: string | number): unknown {
+function textNode(
+  attribute: string,
+  operator: string,
+  value: string | number | readonly string[],
+): unknown {
   return { type: 'terminal', service: 'text', parameters: { attribute, operator, value } };
+}
+
+/** A value with surrounding whitespace dropped and inner runs collapsed to one space. */
+function collapseWhitespace(value: string): string {
+  return value.trim().split(/\s+/).join(' ');
+}
+
+/**
+ * How an organism filter value matches, once whitespace is collapsed: an
+ * all-digit `taxon_id`, a `one_word` name (exact matches only), or a
+ * `multi_word` name (exact matches plus a phrase match). See {@link organismNode}.
+ */
+export function organismForm(value: string): 'taxon_id' | 'one_word' | 'multi_word' {
+  const name = collapseWhitespace(value);
+  if (/^\d+$/.test(name)) return 'taxon_id';
+  return name.includes(' ') ? 'multi_word' : 'one_word';
+}
+
+/**
+ * Source-organism node. An all-digit value is an NCBI taxon ID, matched on the
+ * entity's taxonomy lineage, so every taxon under it matches too (9606 takes in
+ * each strain and subspecies of Homo sapiens). A name is matched exactly, in any
+ * letter case, on the lineage, which lists each ancestor under its scientific
+ * name, NCBI common names, and synonyms ("human", "E. coli"), or on the entity's
+ * own scientific name. That second arm recovers records whose lineage labels a
+ * node "Scientific (common)" ("Mus musculus (mouse)"), which a bare name never
+ * equals. A multi-word name also keeps a phrase match on the scientific name, so
+ * strain-labelled names ("Escherichia coli (strain K12)") stay in; a one-word
+ * name never takes that arm, where "human" would match "Human immunodeficiency
+ * virus 1" and "coli" every other species of the genus.
+ */
+function organismNode(value: string): unknown {
+  const name = collapseWhitespace(value);
+  const form = organismForm(name);
+  if (form === 'taxon_id') {
+    return textNode('rcsb_entity_source_organism.taxonomy_lineage.id', 'exact_match', name);
+  }
+  const arms = [
+    textNode('rcsb_entity_source_organism.taxonomy_lineage.name', 'exact_match', name),
+    textNode('rcsb_entity_source_organism.ncbi_scientific_name', 'exact_match', name),
+  ];
+  if (form === 'multi_word') {
+    arms.push(
+      textNode('rcsb_entity_source_organism.ncbi_scientific_name', 'contains_phrase', name),
+    );
+  }
+  return { type: 'group', logical_operator: 'or', nodes: arms };
+}
+
+/**
+ * The values RCSB's `exptl.method` takes: its search-schema enum, the same 13 the
+ * method facet reports. Upstream matches them in any letter case.
+ */
+const EXPTL_METHODS = [
+  'X-RAY DIFFRACTION',
+  'ELECTRON MICROSCOPY',
+  'SOLUTION NMR',
+  'SOLID-STATE NMR',
+  'ELECTRON CRYSTALLOGRAPHY',
+  'NEUTRON DIFFRACTION',
+  'FIBER DIFFRACTION',
+  'POWDER DIFFRACTION',
+  'SOLUTION SCATTERING',
+  'EPR',
+  'FLUORESCENCE TRANSFER',
+  'INFRARED SPECTROSCOPY',
+  'THEORETICAL MODEL',
+] as const;
+
+type ExptlMethod = (typeof EXPTL_METHODS)[number];
+
+/** Common method spellings outside the vocabulary, as written, and the values each selects. */
+const METHOD_ALIASES: ReadonlyArray<{
+  aliases: readonly string[];
+  methods: readonly [ExptlMethod, ...ExptlMethod[]];
+}> = [
+  { aliases: ['cryo-EM', 'cryoEM', 'EM'], methods: ['ELECTRON MICROSCOPY'] },
+  { aliases: ['X-ray', 'xray'], methods: ['X-RAY DIFFRACTION'] },
+  { aliases: ['NMR'], methods: ['SOLUTION NMR', 'SOLID-STATE NMR'] },
+];
+
+/** Every accepted method spelling, upper-cased, and the vocabulary values it selects. */
+const METHOD_LOOKUP = new Map<string, readonly [ExptlMethod, ...ExptlMethod[]]>([
+  ...EXPTL_METHODS.map((method) => [method, [method]] as const),
+  ...METHOD_ALIASES.flatMap(({ aliases, methods }) =>
+    aliases.map((alias) => [alias.toUpperCase(), methods] as const),
+  ),
+]);
+
+/** What a method filter accepts — the vocabulary and its aliases, in one phrase. */
+export const METHOD_VOCABULARY = `${EXPTL_METHODS.join(', ')} (any letter case), or an alias: ${METHOD_ALIASES.map(({ aliases, methods }) => `${aliases.join(' / ')} → ${methods.join(' + ')}`).join('; ')}`;
+
+/**
+ * Experimental-method node, matched on the vocabulary spelling an input
+ * resolves to; `NMR` selects both NMR methods through `in`. The vocabulary is
+ * closed, so any other value could only match nothing: it throws
+ * `unknown_method` instead of reaching RCSB as a zero-hit search that reads as
+ * data.
+ */
+function methodNode(value: string): unknown {
+  const spelling = collapseWhitespace(value);
+  const methods = METHOD_LOOKUP.get(spelling.toUpperCase());
+  if (!methods) {
+    throw new McpError(
+      JsonRpcErrorCode.InvalidParams,
+      `Unknown method ${JSON.stringify(spelling)}. method takes one of ${METHOD_VOCABULARY}.`,
+      { reason: 'unknown_method' },
+    );
+  }
+  return methods.length === 1
+    ? textNode('exptl.method', 'exact_match', methods[0])
+    : textNode('exptl.method', 'in', methods);
+}
+
+/**
+ * Bound-ligand node (exact chemical-component ID, trimmed and upper-cased),
+ * shared by the search filter and the ligand-containment search. An entry or
+ * entity matches when it holds the component as a non-polymer entity, a bound
+ * copy: the instances `getBindingSites` and the ligand author chains read. A
+ * component present only as a residue inside a polymer chain (MSE,
+ * selenomethionine) or a sugar inside a branched glycan (NAG) does not match.
+ * The chemical-dictionary attribute `rcsb_chem_comp_container_identifiers.comp_id`
+ * matched those too (for MSE, nearly every entry it returned), and matches
+ * nothing at all under the `polymer_entity` return type a sequence search uses.
+ */
+function ligandNode(compId: string): unknown {
+  return textNode(
+    'rcsb_nonpolymer_entity_container_identifiers.nonpolymer_comp_id',
+    'exact_match',
+    compId.trim().toUpperCase(),
+  );
 }
 
 /**
@@ -607,9 +827,10 @@ function contentTypeOption(contentTypes?: ContentType[]): { results_content_type
 
 /**
  * Ligand-containment search body (exact chemical-component ID), shared by
- * searchByLigand and countEntriesWithLigand. Defaults to experimental content;
- * `rows` bounds the page (0 for a count-only query), and `sortByResolution`
- * orders entries best-resolution-first (skip it for counts — order is moot).
+ * searchByLigand and countEntriesWithLigand: entries holding a bound copy, as
+ * {@link ligandNode} defines it. Defaults to experimental content; `rows` bounds
+ * the page (0 for a count-only query), and `sortByResolution` orders entries
+ * best-resolution-first (skip it for counts — order is moot).
  */
 function ligandContainmentQuery(
   compId: string,
@@ -619,15 +840,7 @@ function ligandContainmentQuery(
   sortByResolution: boolean,
 ): unknown {
   return {
-    query: {
-      type: 'terminal',
-      service: 'text_chem',
-      parameters: {
-        attribute: 'rcsb_chem_comp_container_identifiers.comp_id',
-        operator: 'exact_match',
-        value: compId.toUpperCase(),
-      },
-    },
+    query: ligandNode(compId),
     return_type: 'entry',
     request_options: {
       ...contentTypeOption(contentType ?? ['experimental']),
@@ -652,10 +865,119 @@ export function toRcsbFacet(spec: FacetSpec): Record<string, unknown> {
   return facet;
 }
 
+// ─── Entity order ─────────────────────────────────────────────────────────────
+
+/** The entity number of an RCSB entity ID — the integer after its last `_` (`6M0J_2` → 2). */
+function entityNumber(id: string | undefined): number {
+  const suffix = /_(\d+)$/.exec(id ?? '')?.[1];
+  return suffix === undefined ? Number.POSITIVE_INFINITY : Number(suffix);
+}
+
+/**
+ * Order RCSB entity IDs by entity number, so `_10` follows `_9`. An ID with no
+ * numeric suffix (or none at all) sorts after every numbered one; ties fall back
+ * to a code-unit comparison of the whole ID, so the order never depends on the
+ * input's.
+ *
+ * RCSB's GraphQL API returns `polymer_entities`, `nonpolymer_entities`, and their
+ * instances in an order fixed per upstream connection that varies between
+ * connections, so every method here orders each entity array where it reads the
+ * response — anything order-sensitive downstream (the first organism, which
+ * entity a sequence comes from, a paged binding-site list) is otherwise a coin
+ * toss per connection.
+ */
+export function compareEntityIds(a: string | undefined, b: string | undefined): number {
+  const byNumber = entityNumber(a) - entityNumber(b);
+  if (byNumber !== 0 && !Number.isNaN(byNumber)) return byNumber;
+  const [x, y] = [a ?? '', b ?? ''];
+  return x < y ? -1 : x > y ? 1 : 0;
+}
+
+/** A GraphQL entity array in entity-number order (a copy; absent reads as empty). */
+function byEntityNumber<T extends { rcsb_id?: string }>(entities: T[] | undefined): T[] {
+  return (entities ?? []).toSorted((a, b) => compareEntityIds(a.rcsb_id, b.rcsb_id));
+}
+
+/**
+ * Order one ligand entity's binding sites by author chain (code-unit), then
+ * author residue number; an instance missing either sorts after those carrying it.
+ */
+function compareLigandInstances(a: BindingSite, b: BindingSite): number {
+  const [x, y] = [a.ligandAsymId, b.ligandAsymId];
+  if (x !== y) {
+    if (x === undefined) return 1;
+    if (y === undefined) return -1;
+    return x < y ? -1 : 1;
+  }
+  const [m, n] = [
+    a.ligandAuthSeqId ?? Number.POSITIVE_INFINITY,
+    b.ligandAuthSeqId ?? Number.POSITIVE_INFINITY,
+  ];
+  return m === n ? 0 : m - n;
+}
+
 // ─── Normalizers ──────────────────────────────────────────────────────────────
 
-function normalizeHits(resultSet: RawSearchResponse['result_set']): SearchHit[] {
-  return (resultSet ?? []).map((r) => ({ id: r.identifier, score: r.score }));
+/** Total, hits, and (from a verbose sequence search) the query length of one search response. */
+function toSearchResult(raw: RawSearchResponse): SearchResult {
+  const queryLength = queryLengthOf(raw.result_set);
+  return {
+    total: raw.total_count ?? 0,
+    hits: normalizeHits(raw.result_set),
+    ...(queryLength !== undefined ? { queryLength } : {}),
+  };
+}
+
+function normalizeHits(resultSet: RawSearchRow[] | undefined): SearchHit[] {
+  return (resultSet ?? []).map((row) => ({
+    id: row.identifier,
+    score: row.score,
+    ...alignmentOf(sequenceContext(row)),
+  }));
+}
+
+/**
+ * A verbose row's mmseqs2 context: the first node context of its `sequence`
+ * service entry, found by type, since the entry's position in `services` follows
+ * the order of the query's other criteria.
+ */
+function sequenceContext(row: RawSearchRow): RawMatchContext | undefined {
+  return row.services
+    ?.find((service) => service.service_type === 'sequence')
+    ?.nodes?.find((node) => node.match_context && node.match_context.length > 0)
+    ?.match_context?.[0];
+}
+
+/** The alignment fields a match context carries, each set only where upstream sent a number. */
+function alignmentOf(context: RawMatchContext | undefined): Omit<SearchHit, 'id' | 'score'> {
+  const alignment: Omit<SearchHit, 'id' | 'score'> = {};
+  if (!context) return alignment;
+  // Served with float noise on some rows (0.829 arrives as 0.8290000000000001).
+  // Four places keeps every digit mmseqs2 reports and matches the precision the
+  // Foldseek structure hits carry.
+  if (typeof context.sequence_identity === 'number') {
+    alignment.identity = Math.round(context.sequence_identity * 10_000) / 10_000;
+  }
+  if (typeof context.evalue === 'number') alignment.evalue = context.evalue;
+  if (typeof context.bitscore === 'number') alignment.bitscore = context.bitscore;
+  if (typeof context.alignment_length === 'number') {
+    alignment.alignmentLength = context.alignment_length;
+  }
+  if (typeof context.query_beg === 'number') alignment.queryStart = context.query_beg;
+  if (typeof context.query_end === 'number') alignment.queryEnd = context.query_end;
+  if (typeof context.subject_beg === 'number') alignment.targetStart = context.subject_beg;
+  if (typeof context.subject_end === 'number') alignment.targetEnd = context.subject_end;
+  if (typeof context.subject_length === 'number') alignment.targetLength = context.subject_length;
+  return alignment;
+}
+
+/** The query length a sequence search reports: constant within one search, so the first row carrying it speaks for all. */
+function queryLengthOf(resultSet: RawSearchRow[] | undefined): number | undefined {
+  for (const row of resultSet ?? []) {
+    const length = sequenceContext(row)?.query_length;
+    if (typeof length === 'number') return length;
+  }
+  return undefined;
 }
 
 function normalizeFacets(raw: RawFacet[] | undefined, specs: FacetSpec[]): FacetDimension[] {
@@ -731,11 +1053,9 @@ function normalizeEntry(raw: RawEntry): EntryMeta {
   const sourceDb = provenance?.source_db;
   const computedModelProvider = sourceDb ? (CSM_PROVIDER_NAMES[sourceDb] ?? sourceDb) : undefined;
   const pdbCompatible = raw.pdbx_database_status?.pdb_format_compatible;
-  const polymerEntities = (raw.polymer_entities ?? []).map(normalizePolymerEntity);
-  const organisms = [
-    ...new Set(polymerEntities.map((e) => e.organism).filter((o): o is string => !!o)),
-  ];
-  const ligands = (raw.nonpolymer_entities ?? [])
+  const polymerEntities = byEntityNumber(raw.polymer_entities).map(normalizePolymerEntity);
+  const organisms = [...new Set(polymerEntities.flatMap((e) => e.organisms ?? []))];
+  const ligands = byEntityNumber(raw.nonpolymer_entities)
     .map(normalizeLigand)
     .filter((l): l is LigandMeta => l != null);
   const methods = (raw.exptl ?? []).map((e) => e.method).filter((m): m is string => !!m);
@@ -763,9 +1083,16 @@ function normalizeEntry(raw: RawEntry): EntryMeta {
 }
 
 function normalizePolymerEntity(raw: RawPolymerEntity): PolymerEntityMeta {
-  const organism = raw.rcsb_entity_source_organism?.find(
-    (o) => o.ncbi_scientific_name,
-  )?.ncbi_scientific_name;
+  // Every named source, not the first: a chimera lists one source per fused
+  // segment (2RH1_1: Homo sapiens 8–237, Homo sapiens 398–500, Tequatrovirus T4
+  // 238–397). The array sits inside one entity document, so its order is stable.
+  const organisms = [
+    ...new Set(
+      (raw.rcsb_entity_source_organism ?? [])
+        .map((o) => o.ncbi_scientific_name)
+        .filter((name): name is string => !!name),
+    ),
+  ];
   // Two distinct chain namespaces, never interchangeable: `auth_asym_ids` are the
   // depositor's labels (what protein_get_annotations.chain takes), `asym_ids` the
   // mmCIF label_asym_ids (what protein_compare_structures.chain takes). For many
@@ -780,7 +1107,7 @@ function normalizePolymerEntity(raw: RawPolymerEntity): PolymerEntityMeta {
       ? { description: raw.rcsb_polymer_entity.pdbx_description }
       : {}),
     ...(labelAsymIds && labelAsymIds.length > 0 ? { labelAsymIds } : {}),
-    ...(organism ? { organism } : {}),
+    ...(organisms.length > 0 ? { organisms } : {}),
     ...(typeof raw.entity_poly?.rcsb_sample_sequence_length === 'number'
       ? { sequenceLength: raw.entity_poly.rcsb_sample_sequence_length }
       : {}),
@@ -788,13 +1115,16 @@ function normalizePolymerEntity(raw: RawPolymerEntity): PolymerEntityMeta {
 }
 
 function normalizeLigand(raw: RawNonpolymerEntity): LigandMeta | undefined {
-  const compId = raw.rcsb_nonpolymer_entity_container_identifiers?.nonpolymer_comp_id;
+  const container = raw.rcsb_nonpolymer_entity_container_identifiers;
+  const compId = container?.nonpolymer_comp_id;
   if (!compId) return;
   const chem = raw.nonpolymer_comp?.chem_comp;
+  const authAsymIds = container.auth_asym_ids;
   return {
     compId,
     ...(chem?.name ? { name: chem.name } : {}),
     ...(chem?.formula ? { formula: chem.formula } : {}),
+    ...(authAsymIds && authAsymIds.length > 0 ? { authAsymIds } : {}),
   };
 }
 
@@ -873,11 +1203,16 @@ interface RawPolymerEntity {
 
 interface RawNonpolymerEntity {
   nonpolymer_comp?: { chem_comp?: { name?: string; formula?: string } };
-  rcsb_nonpolymer_entity_container_identifiers?: { nonpolymer_comp_id?: string };
+  rcsb_id?: string;
+  rcsb_nonpolymer_entity_container_identifiers?: {
+    auth_asym_ids?: string[];
+    nonpolymer_comp_id?: string;
+  };
 }
 
 interface RawXrefEntry {
   polymer_entities?: Array<{
+    rcsb_id?: string;
     rcsb_polymer_entity?: { pdbx_description?: string };
     rcsb_polymer_entity_container_identifiers?: {
       auth_asym_ids?: string[];
@@ -892,12 +1227,15 @@ interface RawXrefEntry {
 interface RawSequenceEntry {
   polymer_entities?: Array<{
     rcsb_id?: string;
-    entity_poly?: { pdbx_seq_one_letter_code_can?: string };
+    /** `rcsb_entity_polymer_type` is `Protein`, `DNA`, `RNA`, `NA-hybrid`, or `Other`. */
+    entity_poly?: { pdbx_seq_one_letter_code_can?: string; rcsb_entity_polymer_type?: string };
+    rcsb_polymer_entity_container_identifiers?: { auth_asym_ids?: string[] };
   }>;
 }
 
 interface RawBindingEntry {
   nonpolymer_entities?: Array<{
+    rcsb_id?: string;
     rcsb_nonpolymer_entity_container_identifiers?: { nonpolymer_comp_id?: string };
     nonpolymer_entity_instances?: Array<{
       rcsb_nonpolymer_entity_instance_container_identifiers?: {
@@ -950,7 +1288,8 @@ const ENTRIES_QUERY = `query Entries($ids: [String!]!) {
       rcsb_entity_source_organism { ncbi_scientific_name }
     }
     nonpolymer_entities {
-      rcsb_nonpolymer_entity_container_identifiers { nonpolymer_comp_id }
+      rcsb_id
+      rcsb_nonpolymer_entity_container_identifiers { nonpolymer_comp_id auth_asym_ids }
       nonpolymer_comp { chem_comp { name formula } }
     }
   }
@@ -959,6 +1298,7 @@ const ENTRIES_QUERY = `query Entries($ids: [String!]!) {
 const XREF_QUERY = `query Xref($id: String!) {
   entry(entry_id: $id) {
     polymer_entities {
+      rcsb_id
       rcsb_polymer_entity { pdbx_description }
       rcsb_polymer_entity_container_identifiers {
         auth_asym_ids
@@ -972,7 +1312,8 @@ const SEQUENCE_QUERY = `query Sequence($id: String!) {
   entry(entry_id: $id) {
     polymer_entities {
       rcsb_id
-      entity_poly { pdbx_seq_one_letter_code_can }
+      entity_poly { rcsb_entity_polymer_type pdbx_seq_one_letter_code_can }
+      rcsb_polymer_entity_container_identifiers { auth_asym_ids }
     }
   }
 }`;
@@ -985,6 +1326,7 @@ const BINDING_SITE_QUERY = `query BindingSite($id: String!) {
       }
     }
     nonpolymer_entities {
+      rcsb_id
       rcsb_nonpolymer_entity_container_identifiers { nonpolymer_comp_id }
       nonpolymer_entity_instances {
         rcsb_nonpolymer_entity_instance_container_identifiers { auth_asym_id auth_seq_id }

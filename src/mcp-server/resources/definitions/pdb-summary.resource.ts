@@ -1,8 +1,8 @@
 /**
  * @fileoverview pdb://{entry_id} — experimental structure summary (title, method,
- * resolution, organism, ligands, and per-entity chain IDs in both the author and
- * mmCIF label namespaces). The injectable-context twin of protein_get_structure
- * for source: experimental.
+ * resolution, source organisms, ligands, and per-entity chain IDs in both the
+ * author and mmCIF label namespaces). The injectable-context twin of
+ * protein_get_structure for source: experimental.
  * @module mcp-server/resources/definitions/pdb-summary.resource
  */
 
@@ -15,7 +15,7 @@ export const pdbSummaryResource = resource('pdb://{entry_id}', {
   name: 'pdb-structure-summary',
   title: 'PDB structure summary',
   description:
-    'Experimental structure summary for a PDB entry: title, method, resolution, organism, bound ligands, and per-entity chain IDs in both the author (auth_asym_id) and mmCIF label (label_asym_id) namespaces.',
+    'Experimental structure summary for a PDB entry: title, method, resolution, source organisms, bound ligands, and per-entity chain IDs in both the author (auth_asym_id) and mmCIF label (label_asym_id) namespaces.',
   mimeType: 'application/json',
   params: z.object({
     entry_id: z.string().describe('PDB entry ID (e.g. 4HHB).'),
@@ -27,13 +27,17 @@ export const pdbSummaryResource = resource('pdb://{entry_id}', {
     resolution: z.number().optional().describe('Resolution in Å.'),
     molecularWeight: z.number().optional().describe('Structure molecular weight (kDa).'),
     releaseDate: z.string().optional().describe('Initial release date (ISO 8601).'),
-    organisms: z.array(z.string()).describe('Source organisms.'),
+    organisms: z
+      .array(z.string())
+      .describe(
+        'Distinct source organisms across the polymer entities, in entity-number order; a chimeric entity contributes each fused source. Empty when upstream names none.',
+      ),
     polymerEntities: z
       .array(polymerEntitySchema)
       .describe(
-        'Modeled polymer entities, each carrying both chain namespaces — authAsymIds for protein_get_annotations, labelAsymIds for protein_compare_structures.',
+        'Modeled polymer entities in entity-number order, each carrying both chain namespaces — authAsymIds for protein_get_annotations, labelAsymIds for protein_compare_structures.',
       ),
-    ligands: z.array(ligandSchema).describe('Bound ligands.'),
+    ligands: z.array(ligandSchema).describe('Bound ligands, in non-polymer entity-number order.'),
   }),
 
   async handler(params, ctx) {

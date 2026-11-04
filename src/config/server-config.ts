@@ -70,7 +70,7 @@ const ServerConfigSchema = z.object({
     .min(1000)
     .default(30_000)
     .describe(
-      'Max wall-clock to poll an async job (alignment / Foldseek) before returning a "still computing" result.',
+      'Max wall-clock to poll an async job (alignment / Foldseek) before returning a "still computing" result. For a new protein_find_similar structure search the window starts with the call, and the call\'s 50 s upstream budget ends it first above about 45 s, so keep it at or below 45000.',
     ),
   maxBatchIds: z.coerce
     .number()

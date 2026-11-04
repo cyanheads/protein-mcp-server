@@ -3,8 +3,11 @@
  * Database API (`/api/prediction/{accession}`). Kept as a direct provider (not
  * only via 3D-Beacons) because it carries confidence detail the Beacons summary
  * abbreviates: mean pLDDT, the four confidence-bucket fractions, and the PAE
- * documentation URL. Backs `protein_get_structure` (predicted) and the `af://`
- * resource.
+ * documentation URL. Serves canonical and isoform models. Backs
+ * `protein_get_structure` (predicted, and the coordinate URLs of an AlphaFold
+ * computed model under experimental), `protein_find_similar` (`by: structure`,
+ * through `findPrediction`), and the `af://` resource; `findPrediction` adds
+ * UniProt's accession verdict after a miss.
  * @module services/alphafold/alphafold-service
  */
 
@@ -14,6 +17,8 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import type { ServerConfig } from '@/config/server-config.js';
 import { fetchJson } from '../shared/http.js';
+import { accessionOfAlphaFoldEntryId, isAlphaFoldEntryId } from '../shared/identifiers.js';
+import { type AccessionStatus, getUniProtService } from '../uniprot/uniprot-service.js';
 
 /** Fractions of residues in each pLDDT confidence band (0–1). */
 export interface ConfidenceBuckets {
@@ -76,11 +81,16 @@ export class AlphaFoldService {
   }
 
   /**
-   * Fetch the AlphaFold prediction for a UniProt accession. Returns `null` when
-   * no model exists (404); a malformed accession (400) bubbles as `InvalidParams`.
+   * Fetch the AlphaFold prediction for a UniProt accession (canonical or
+   * isoform) or an AlphaFold DB entry ID. Returns the record keyed to the
+   * request — by `uniprotAccession`, or by `entryId` for an entry-ID request —
+   * because a canonical lookup also lists every isoform model, in an order
+   * AlphaFold DB does not document. `null` when no model exists (404) or no
+   * record matches; a malformed identifier (400) bubbles as `InvalidParams`.
    */
-  async getPrediction(accession: string, ctx: Context): Promise<AlphaFoldModel | null> {
-    const url = `${this.baseUrl}/api/prediction/${encodeURIComponent(accession.toUpperCase())}`;
+  async getPrediction(id: string, ctx: Context): Promise<AlphaFoldModel | null> {
+    const requested = id.toUpperCase();
+    const url = `${this.baseUrl}/api/prediction/${encodeURIComponent(requested)}`;
     let raw: RawPrediction[];
     try {
       raw = await fetchJson<RawPrediction[]>(url, ctx, {
@@ -93,11 +103,48 @@ export class AlphaFoldService {
       if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) return null;
       throw err;
     }
-    const first = raw[0];
-    if (!first) return null;
-    return normalizePrediction(accession.toUpperCase(), first);
+    const byEntryId = isAlphaFoldEntryId(requested);
+    const match = raw.find(
+      (r) => (byEntryId ? r.entryId : r.uniprotAccession)?.toUpperCase() === requested,
+    );
+    if (!match) return null;
+    return normalizePrediction(
+      byEntryId ? accessionOfAlphaFoldEntryId(requested) : requested,
+      match,
+    );
+  }
+
+  /**
+   * The prediction for a UniProt accession or AlphaFold DB entry ID, asking
+   * UniProt (through `getUniProtService()`) only after AlphaFold DB has no model
+   * for it: a merged accession is followed to its successor's model, and any
+   * other verdict comes back as `missed` for the caller to report — a per-ID row,
+   * or a typed failure via `inactiveAccessionError`. A model AlphaFold DB holds
+   * under the requested key costs no UniProt request.
+   */
+  async findPrediction(id: string, ctx: Context): Promise<PredictionLookup> {
+    const model = await this.getPrediction(id, ctx);
+    if (model) return { kind: 'found', model };
+    const accession = isAlphaFoldEntryId(id) ? accessionOfAlphaFoldEntryId(id) : id.toUpperCase();
+    const uniprot = await getUniProtService().resolveAccession(accession, ctx);
+    if (uniprot.kind !== 'merged') return { kind: 'missed', uniprot };
+    const successorModel = await this.getPrediction(uniprot.successor, ctx);
+    return successorModel
+      ? { kind: 'found', model: successorModel, mergedFrom: accession }
+      : { kind: 'missed', uniprot };
   }
 }
+
+/**
+ * What a predicted-model lookup found:
+ * - `found` — the model; `mergedFrom` is the requested accession when UniProt
+ *   merged it into the accession the model predicts;
+ * - `missed` — no model, with UniProt's verdict on the accession (`active` with
+ *   no model, `merged` whose successor has none either, `inactive`, `unknown`).
+ */
+export type PredictionLookup =
+  | { kind: 'found'; model: AlphaFoldModel; mergedFrom?: string }
+  | { kind: 'missed'; uniprot: AccessionStatus };
 
 function normalizePrediction(accession: string, raw: RawPrediction): AlphaFoldModel {
   const buckets = confidenceBuckets(raw);

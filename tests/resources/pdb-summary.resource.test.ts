@@ -94,6 +94,38 @@ describe('pdb://{entry_id}', () => {
     expect(out).toEqual(expect.schemaMatching(pdbSummaryResource.output));
   });
 
+  it('carries every source organism, per entity and entry-wide, through the output parse (2RH1, #85)', async () => {
+    // getEntries' normalized 2RH1: the beta-2 adrenergic receptor/T4 lysozyme chimera.
+    getEntries.mockResolvedValue([
+      {
+        id: '2RH1',
+        organisms: ['Homo sapiens', 'Tequatrovirus T4'],
+        polymerEntities: [
+          {
+            entityId: '2RH1_1',
+            description: 'beta-2-adrenergic receptor/T4-lysozyme chimera',
+            organisms: ['Homo sapiens', 'Tequatrovirus T4'],
+            authAsymIds: ['A'],
+          },
+        ],
+        ligands: [{ compId: 'CAU', authAsymIds: ['A'] }],
+      },
+    ]);
+    const params = pdbSummaryResource.params!.parse({ entry_id: '2rh1' });
+    const out = await pdbSummaryResource.handler(
+      params,
+      createMockContext({ uri: new URL('pdb://2rh1') }),
+    );
+
+    // The framework parses a resource result against `output` before serving it.
+    const served = pdbSummaryResource.output!.parse(out);
+    expect(served.organisms).toEqual(['Homo sapiens', 'Tequatrovirus T4']);
+    expect(served.polymerEntities[0]?.organisms).toEqual(['Homo sapiens', 'Tequatrovirus T4']);
+    expect(served.polymerEntities[0]).not.toHaveProperty('organism');
+    // The ligand's author chains are internal to structures_with_ligand.
+    expect(served.ligands).toEqual([{ compId: 'CAU' }]);
+  });
+
   it('throws NotFound when the entry does not resolve', async () => {
     getEntries.mockResolvedValue([]);
     const params = pdbSummaryResource.params!.parse({ entry_id: '9ZZZ' });

@@ -1,17 +1,40 @@
 /**
  * @fileoverview protein_track_ligands — ligand discovery and binding-site
  * analysis. Resolves a ligand name/formula to chemical component IDs, finds PDB
- * entries bound to a ligand, or returns the protein residues lining a ligand's
- * pocket in a structure (via RCSB `rcsb_target_neighbors`).
+ * entries holding a bound copy of a ligand (each named by title, method, and the
+ * polymer entities whose chains carry it), or returns the protein residues lining
+ * a ligand's pocket in a structure (via RCSB `rcsb_target_neighbors`).
  * @module mcp-server/tools/definitions/track-ligands.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
 import { getServerConfig } from '@/config/server-config.js';
 import { getRcsbService } from '@/services/rcsb/rcsb-service.js';
 import type { ChemComp, EntryMeta } from '@/services/rcsb/types.js';
 import { mapWithConcurrency } from '@/services/shared/async.js';
+
+/**
+ * The polymer entities whose author chains carry an instance of `compId`, in
+ * the entity-number order `getEntries` returns them. The chain assignment is the
+ * depositor's, so a ligand at a subunit interface names only its assigned
+ * chain's entity, not every entity it contacts.
+ */
+function hostEntities(meta: EntryMeta, compId: string) {
+  const ligandChains = new Set(
+    meta.ligands
+      .filter((l) => l.compId.toUpperCase() === compId)
+      .flatMap((l) => l.authAsymIds ?? []),
+  );
+  return meta.polymerEntities
+    .filter((e) => e.authAsymIds?.some((chain) => ligandChains.has(chain)))
+    .map((e) => ({
+      entityId: e.entityId,
+      ...(e.description ? { description: e.description } : {}),
+      ...(e.organisms ? { organisms: e.organisms } : {}),
+    }));
+}
 
 const chemCompSchema = z
   .object({
@@ -25,7 +48,7 @@ const chemCompSchema = z
     depositionCount: z
       .number()
       .describe(
-        'Number of PDB entries containing this component (deposition frequency). Candidates are ranked by this value, most-deposited first.',
+        'Number of PDB entries holding a bound (non-polymer) copy of this component — the totalCount structures_with_ligand reports for it. Entries where it occurs only as a residue inside a polymer chain or a sugar inside a branched glycan are not counted. Candidates are ranked by this value, most-deposited first.',
       ),
   })
   .describe('A resolved chemical component (ligand) and its identifiers.');
@@ -81,7 +104,7 @@ const bindingSiteSchema = z
 
 export const trackLigands = tool('protein_track_ligands', {
   title: 'protein-mcp-server: track ligands',
-  description: `Ligand discovery and binding-site analysis across the PDB. mode "find_ligand" resolves a name or formula to chemical component IDs with metadata (formula, weight, SMILES), ranked by deposition frequency — most-deposited component first, so the top hit is the most common match for the name, not necessarily an exact name-string match. The ranking covers a bounded candidate pool; totalCount and candidatesConsidered report how many components matched and how many were ranked. mode "structures_with_ligand" returns PDB entries containing a ligand (by exact component ID — get the ID from find_ligand first), highest-resolution first, each with its resolution in Å. mode "binding_site" returns the protein residues lining a ligand's pocket in a given structure, with contact distances, each numbered in both the mmCIF label namespace (asymId, seqId) and the author namespace (authAsymId, authSeqId) used by deposited coordinates and most literature. Binding sites are experimental-only (computed from deposited coordinates; predicted models carry no bound ligands).`,
+  description: `Ligand discovery and binding-site analysis across the PDB. mode "find_ligand" resolves a name or formula to chemical component IDs with metadata (formula, weight, SMILES), ranked by deposition frequency — most-deposited component first, so the top hit is the most common match for the name, not necessarily an exact name-string match. The ranking covers a bounded candidate pool; totalCount and candidatesConsidered report how many components matched and how many were ranked. mode "structures_with_ligand" returns PDB entries holding a bound copy of a ligand (by exact component ID — get the ID from find_ligand first), highest-resolution first, each with its resolution in Å, title, method, and the polymer entities whose chains carry the ligand. This mode and find_ligand's depositionCount count bound copies only: a component present only as a residue inside a polymer chain (e.g. MSE in a selenomethionine protein) or a sugar inside a branched glycan is not counted. mode "binding_site" returns the protein residues lining a ligand's pocket in a given structure, with contact distances, each numbered in both the mmCIF label namespace (asymId, seqId) and the author namespace (authAsymId, authSeqId) used by deposited coordinates and most literature. Binding sites are experimental-only (computed from deposited coordinates; predicted models carry no bound ligands).`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   errors: [
@@ -142,24 +165,55 @@ export const trackLigands = tool('protein_track_ligands', {
       .array(
         z
           .object({
-            id: z.string().describe('PDB entry ID containing the ligand.'),
+            id: z.string().describe('PDB entry ID holding a bound copy of the ligand.'),
             resolution: z
               .number()
               .optional()
               .describe(
                 'Best reported resolution in Å (absent for methods without one, e.g. NMR).',
               ),
+            title: z.string().optional().describe('Structure title. Omitted when unreported.'),
+            method: z
+              .string()
+              .optional()
+              .describe('Experimental method(s), comma-joined. Omitted when unreported.'),
+            hostEntities: z
+              .array(
+                z
+                  .object({
+                    entityId: z.string().describe('Polymer entity ID (e.g. 3K5V_1).'),
+                    description: z
+                      .string()
+                      .optional()
+                      .describe('Entity description (e.g. Tyrosine-protein kinase ABL1).'),
+                    organisms: z
+                      .array(z.string())
+                      .optional()
+                      .describe(
+                        'Distinct source organisms of the entity. Omitted when upstream names none.',
+                      ),
+                  })
+                  .describe('A polymer entity carrying an instance of the ligand.'),
+              )
+              .optional()
+              .describe(
+                "Polymer entities whose author chains carry an instance of the ligand, in entity-number order. The chain assignment is the depositor's, so a ligand at a subunit interface lists only its assigned chain's entity — use mode binding_site for the residues it contacts. Omitted when no polymer chain carries an instance.",
+              ),
           })
-          .describe('A PDB entry containing the ligand, with its resolution.'),
+          .describe(
+            'A PDB entry holding a bound copy of the ligand: its resolution, title, method, and host entities.',
+          ),
       )
       .optional()
       .describe(
-        'PDB entries containing the ligand, highest-resolution first (structures_with_ligand).',
+        'PDB entries holding a bound (non-polymer) copy of the ligand, highest-resolution first (structures_with_ligand).',
       ),
     bindingSites: z
       .array(bindingSiteSchema)
       .optional()
-      .describe('Binding-site residues (binding_site).'),
+      .describe(
+        'Ligand instances and their pocket residues (binding_site), in a fixed order — ligands by entity number, then the instances of each ligand by author chain and author residue number — so start/limit pages read every instance exactly once.',
+      ),
   }),
 
   enrichment: {
@@ -167,7 +221,7 @@ export const trackLigands = tool('protein_track_ligands', {
       .number()
       .optional()
       .describe(
-        'Total upstream matches before any local narrowing: PDB entries containing the component (structures_with_ligand), chemical components matching the query (find_ligand), or ligand instances with pocket contacts (binding_site).',
+        'Total upstream matches before any local narrowing: PDB entries holding a bound (non-polymer) copy of the component (structures_with_ligand), chemical components matching the query (find_ligand), or ligand instances with pocket contacts (binding_site).',
       ),
     candidatesConsidered: z
       .number()
@@ -216,7 +270,7 @@ export const trackLigands = tool('protein_track_ligands', {
       ctx.enrich({ candidatesConsidered: ids.length });
       if (ids.length < total) {
         ctx.enrich.notice(
-          `${ids.length} of ${total} components matching "${input.query}" were ranked by deposition frequency; the ranking covers only those ${ids.length}, so a more-deposited match can be missing. Narrow the query (a more specific name, a synonym, or a formula) to rank the full match set.`,
+          `${ids.length} of ${total} components matching "${escapeMarkdownInline(input.query)}" were ranked by deposition frequency; the ranking covers only those ${ids.length}, so a more-deposited match can be missing. Narrow the query (a more specific name, a synonym, or a formula) to rank the full match set.`,
         );
       }
       const resolved = await mapWithConcurrency(ids, cfg.fanoutConcurrency, async (id) => {
@@ -241,7 +295,7 @@ export const trackLigands = tool('protein_track_ligands', {
     }
 
     if (input.mode === 'structures_with_ligand') {
-      const compId = input.comp_id?.toUpperCase();
+      const compId = input.comp_id?.trim().toUpperCase();
       if (!compId)
         throw ctx.fail('missing_param', 'mode structures_with_ligand requires a "comp_id".');
       const result = await rcsb.searchByLigand(
@@ -260,16 +314,18 @@ export const trackLigands = tool('protein_track_ligands', {
       // not a not-found — mirrors protein_search_structures' empty-hits behavior.
       // An empty page over a nonzero total is an offset past the end instead.
       if (result.hits.length === 0) {
+        const named = escapeMarkdownInline(compId);
         ctx.enrich.notice(
           result.total === 0
-            ? `No PDB entries contain ${compId}. Verify the component ID via mode find_ligand.`
-            : `start ${input.start} is past the end of the ${result.total} PDB entries containing ${compId}. Re-call with a lower start to read a populated page.`,
+            ? `No PDB entries contain ${named}. Verify the component ID via mode find_ligand.`
+            : `start ${input.start} is past the end of the ${result.total} PDB entries containing ${named}. Re-call with a lower start to read a populated page.`,
         );
       }
       // Replace RCSB's uniform containment score (noise for a boolean filter) with
-      // each entry's resolution, enriched via the same batched entry-metadata path
-      // the other tools use. The search is resolution-sorted server-side; sort
-      // again by the enriched value since getEntries does not preserve input order.
+      // each entry's resolution, title, method, and host entities, all read from
+      // the one batched entry-metadata call. The search is resolution-sorted
+      // server-side; sort again by the enriched value since getEntries does not
+      // preserve input order.
       const ids = result.hits.map((h) => h.id);
       const metaById = new Map<string, EntryMeta>();
       if (ids.length > 0) {
@@ -277,15 +333,24 @@ export const trackLigands = tool('protein_track_ligands', {
       }
       const structures = ids
         .map((id) => {
-          const resolution = metaById.get(id.toUpperCase())?.resolution;
-          return { id, ...(typeof resolution === 'number' ? { resolution } : {}) };
+          const meta = metaById.get(id.toUpperCase());
+          const hosts = meta ? hostEntities(meta, compId) : [];
+          return {
+            id,
+            ...(typeof meta?.resolution === 'number' ? { resolution: meta.resolution } : {}),
+            ...(meta?.title ? { title: meta.title } : {}),
+            ...(meta?.methods && meta.methods.length > 0
+              ? { method: meta.methods.join(', ') }
+              : {}),
+            ...(hosts.length > 0 ? { hostEntities: hosts } : {}),
+          };
         })
         .sort((a, b) => (a.resolution ?? Infinity) - (b.resolution ?? Infinity));
       return { mode: input.mode, structures };
     }
 
     // binding_site
-    const compId = input.comp_id?.toUpperCase();
+    const compId = input.comp_id?.trim().toUpperCase();
     if (!input.pdb_id) throw ctx.fail('missing_param', 'mode binding_site requires a "pdb_id".');
     const sites = await rcsb.getBindingSites(input.pdb_id, compId, ctx);
     if (sites.length === 0) {
@@ -341,8 +406,19 @@ export const trackLigands = tool('protein_track_ligands', {
       lines.push(`\n**${result.structures.length} structures:**`);
       lines.push(result.structures.map((s) => s.id).join(', '));
       for (const s of result.structures) {
-        if (typeof s.resolution === 'number')
-          lines.push(`- ${s.id} — ${s.resolution.toFixed(2)} Å`);
+        const details = [
+          typeof s.resolution === 'number' ? `${s.resolution.toFixed(2)} Å` : null,
+          s.method ?? null,
+          s.title ?? null,
+        ].filter(Boolean);
+        // A row with nothing past its ID is already in the list above.
+        if (details.length === 0 && !s.hostEntities) continue;
+        lines.push([`- ${s.id}`, ...details].join(' — '));
+        for (const h of s.hostEntities ?? []) {
+          lines.push(
+            `  - host entity ${h.entityId}${h.description ? `: ${h.description}` : ''}${h.organisms ? ` (${h.organisms.join(', ')})` : ''}`,
+          );
+        }
       }
     }
     if (result.bindingSites?.length) {

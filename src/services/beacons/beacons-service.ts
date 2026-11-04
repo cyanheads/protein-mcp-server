@@ -1,10 +1,12 @@
 /**
  * @fileoverview 3D-Beacons service — wraps the EMBL-EBI federated structure API
- * (`/uniprot/summary/{accession}.json`), which fronts experimental (PDBe) and
- * predicted (AlphaFold DB, AlphaFill, SWISS-MODEL, BFVD, …) models behind one
- * UniProt-keyed interface. Backs the predicted half of `protein_search_structures`
- * and `best_available` resolution in `protein_get_structure`. A 404 returns an
- * empty object upstream — treated as "no models", distinct from a transport error.
+ * (`/uniprot/summary/{accession}.json`), which fronts experimental (PDBe,
+ * SASBDB) and predicted (AlphaFold DB, AlphaFill, SWISS-MODEL, BFVD, …) models
+ * behind one UniProt-keyed interface. Backs `best_available` resolution in
+ * `protein_get_structure`. A federated response can arrive without one
+ * provider's models, so a summary can be narrowed to a single provider to
+ * confirm what that provider holds. A 404 returns an empty object upstream —
+ * treated as "no models", distinct from a transport error.
  * @module services/beacons/beacons-service
  */
 
@@ -34,6 +36,10 @@ export interface BeaconModel {
   provider?: string;
   /** Resolution in Å (experimental models only). */
   resolution?: number;
+  /** Last UniProt residue of the model's mapped span. */
+  uniprotEnd?: number;
+  /** First UniProt residue of the model's mapped span. */
+  uniprotStart?: number;
 }
 
 /** A UniProt accession's federated model set. */
@@ -61,6 +67,8 @@ interface RawModelSummary {
   model_url?: string;
   provider?: string;
   resolution?: number;
+  uniprot_end?: number;
+  uniprot_start?: number;
 }
 
 export class BeaconsService {
@@ -70,10 +78,14 @@ export class BeaconsService {
     this.baseUrl = serverConfig.beaconsBaseUrl;
   }
 
-  /** Fetch the federated model summary for a UniProt accession. */
-  async getSummary(accession: string, ctx: Context): Promise<BeaconSummary> {
+  /**
+   * Fetch the federated model summary for a UniProt accession, or with
+   * `provider` only that provider's models (3D-Beacons' `provider` query value).
+   */
+  async getSummary(accession: string, ctx: Context, provider?: 'pdbe'): Promise<BeaconSummary> {
     const acc = accession.toUpperCase();
-    const url = `${this.baseUrl}/uniprot/summary/${encodeURIComponent(acc)}.json`;
+    const query = provider ? `?provider=${provider}` : '';
+    const url = `${this.baseUrl}/uniprot/summary/${encodeURIComponent(acc)}.json${query}`;
     const res = await fetchResponse(url, ctx, {
       operation: 'BeaconsService.getSummary',
       baseDelayMs: 500,
@@ -100,6 +112,8 @@ function normalizeModel(raw: RawModelSummary): BeaconModel {
     ...(raw.provider ? { provider: raw.provider } : {}),
     ...(raw.model_url ? { modelUrl: raw.model_url } : {}),
     ...(typeof raw.coverage === 'number' ? { coverage: raw.coverage } : {}),
+    ...(typeof raw.uniprot_start === 'number' ? { uniprotStart: raw.uniprot_start } : {}),
+    ...(typeof raw.uniprot_end === 'number' ? { uniprotEnd: raw.uniprot_end } : {}),
     ...(typeof raw.resolution === 'number' ? { resolution: raw.resolution } : {}),
     ...(raw.experimental_method ? { experimentalMethod: raw.experimental_method } : {}),
     ...(raw.confidence_type ? { confidenceType: raw.confidence_type } : {}),

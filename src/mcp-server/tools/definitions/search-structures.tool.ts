@@ -10,14 +10,17 @@ import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getServerConfig } from '@/config/server-config.js';
 import { buildFacetSpec, FACET_DIMENSION_NAMES } from '@/services/rcsb/facets.js';
-import { getRcsbService } from '@/services/rcsb/rcsb-service.js';
+import { getRcsbService, METHOD_VOCABULARY } from '@/services/rcsb/rcsb-service.js';
 import type { EntryMeta, SearchHit } from '@/services/rcsb/types.js';
 import { entryIdOf, isComputedModelId } from '@/services/shared/identifiers.js';
 import { normalizeProteinSequence } from '@/services/shared/protein-sequence.js';
 import {
+  alignmentLine,
   CONTENT_TYPE_SCOPES,
   coverageNotices,
   flatFacetDimensionSchema,
+  matchedEntityOrganisms,
+  oneWordOrganismNotice,
   renderFacets,
   toFacetOutput,
 } from './_schemas.js';
@@ -34,6 +37,62 @@ const ZERO_HIT_NOTICE = {
     'No predicted models matched. Predicted search covers computed models indexed by RCSB; widen content_type to "all" to include experimental structures.',
   all: 'No structures matched in either the experimental or computed-model universe — content_type "all" is already the widest scope. Broaden the query or drop filters.',
 } satisfies Record<'experimental' | 'predicted' | 'all', string>;
+
+/** Zero-hit pointer for a ligand filter, which matches one exact component ID and nothing near it. */
+const LIGAND_ZERO_HIT_NOTICE =
+  'The ligand filter matches one exact chemical component ID held as a bound copy; resolve a ligand name to its ID, or confirm an ID, with protein_track_ligands mode "find_ligand".';
+
+/**
+ * Filters that select on data no computed model carries, with what each selects
+ * on: RCSB indexes no experimental method, resolution, or non-polymer entity for
+ * one, so under content_type "predicted" each can only match nothing.
+ */
+const EXPERIMENTAL_ONLY_FILTERS = [
+  ['method', 'experimental method'],
+  ['max_resolution', 'resolution'],
+  ['ligand', 'bound ligands'],
+] as const;
+
+/**
+ * Zero-hit advice under content_type "predicted" when experimental-only filters
+ * were supplied: they emptied the result, whatever the rest of the request was.
+ */
+function computedModelNotice(filters: ReadonlyArray<(typeof EXPERIMENTAL_ONLY_FILTERS)[number]>) {
+  const many = filters.length > 1;
+  const lacking = new Intl.ListFormat('en', { type: 'disjunction' }).format(
+    filters.map(([, selects]) => selects),
+  );
+  const named = new Intl.ListFormat('en').format(filters.map(([name]) => name));
+  return `No predicted models matched: computed models carry no ${lacking}, so ${named} ${many ? 'match' : 'matches'} nothing under content_type "predicted". Drop ${many ? 'them' : 'it'}, or set content_type to "experimental" or "all".`;
+}
+
+/**
+ * Why a search matched nothing, and the next move: the computed-model advice
+ * when experimental-only filters emptied a predicted search, otherwise the
+ * scope's own advice, plus the one-word organism advice and the find_ligand
+ * pointer when those filters were set.
+ */
+function zeroHitNotice(input: {
+  content_type: keyof typeof ZERO_HIT_NOTICE;
+  ligand?: string | undefined;
+  max_resolution?: number | undefined;
+  method?: string | undefined;
+  organism?: string | undefined;
+}): string {
+  const experimentalOnly = EXPERIMENTAL_ONLY_FILTERS.filter(
+    ([name]) => input[name] !== undefined && input[name] !== '',
+  );
+  if (input.content_type === 'predicted' && experimentalOnly.length > 0) {
+    return computedModelNotice(experimentalOnly);
+  }
+  return [
+    ZERO_HIT_NOTICE[input.content_type],
+    input.organism ? oneWordOrganismNotice(input.organism) : undefined,
+    input.ligand ? LIGAND_ZERO_HIT_NOTICE : undefined,
+  ]
+    .filter(Boolean)
+    .join(' ');
+}
 
 /** Pull a UniProt accession out of a computed-model identifier when present (`AF_AFP69905F1` → `P69905`). */
 function accessionFromCsm(id: string): string | undefined {
@@ -55,14 +114,14 @@ function accessionFromCsm(id: string): string | undefined {
 function truncationNotice(dimensions: string[], cap: number, sequenceSearch: boolean): string {
   const named = `${dimensions.join(' and ')} ${dimensions.length > 1 ? 'were' : 'was'} capped at ${cap} buckets`;
   return sequenceSearch
-    ? `${named}. protein_analyze_collection cannot reproduce a sequence search, so narrow this request instead: drop sequence, or add organism, method, max_resolution, or query filters to shrink the distribution before the cap.`
+    ? `${named}. protein_analyze_collection cannot reproduce a sequence search, so narrow this request instead: drop sequence, or add organism, method, max_resolution, ligand, or query filters to shrink the distribution before the cap.`
     : `${named}. Call protein_analyze_collection with ${dimensions.length > 1 ? 'each dimension' : 'that dimension'} in group_by and a bucket_limit above ${cap} (up to 500) to reach the long tail.`;
 }
 
 export const searchStructures = tool('protein_search_structures', {
   title: 'protein-mcp-server: search structures',
   description:
-    'Search experimental (PDB) and predicted (computed-model) protein structures by free text, protein sequence (triggers an mmseqs2 similarity search), and/or organism, method, and resolution filters. Returns ranked hits; the experimental page is enriched with title, method, resolution, and organism. Chain hit IDs into protein_get_structure. Optionally returns a facet breakdown (counts by method / organism / release year / …) alongside the hits in the same response. A facet on a dimension you are already filtering (e.g. the organism facet while organism is set) lists unfiltered alternatives by design — it does not constrain by its own active filter, so you can see sibling values to pivot to. Numeric histogram buckets (resolution, molecular weight) carry explicit rangeFrom/rangeTo bounds so a boundary label is unambiguous.',
+    'Search experimental (PDB) and predicted (computed-model) protein structures by free text, protein sequence (triggers an mmseqs2 similarity search), and/or organism, method, resolution, and bound-ligand filters. Returns ranked hits; the experimental page is enriched with title, method, resolution, and source organisms (for a sequence hit, those of the matched entity), and every sequence hit carries its identity, E-value, bit score, and aligned range against the query. Chain hit IDs into protein_get_structure. Optionally returns a facet breakdown (counts by method / organism / release year / …) alongside the hits in the same response. Facets count the filtered result set, so an active organism or method filter also constrains its own facet: the facet lists only the values found in the matching entries (other organisms in the same complexes, other methods deposited with the same entries), never the alternatives the filter excluded. Numeric histogram buckets (resolution, molecular weight) carry explicit rangeFrom/rangeTo bounds so a boundary label is unambiguous.',
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   errors: [
@@ -77,9 +136,17 @@ export const searchStructures = tool('protein_search_structures', {
     {
       reason: 'no_criteria',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'No query, sequence, organism, method, or maximum resolution was provided — nothing to search on.',
+      when: 'No query, sequence, organism, method, maximum resolution, or ligand was provided — nothing to search on.',
       recovery:
-        'Provide a free-text query, protein sequence, organism name, experimental method, or maximum resolution.',
+        'Provide a free-text query, protein sequence, organism, experimental method, maximum resolution, or bound-ligand component ID.',
+    },
+    {
+      reason: 'unknown_method',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'method is neither one of the 13 RCSB experimental methods nor an accepted alias, so it could only ever match nothing.',
+      recovery:
+        'Pass one of the experimental methods the error lists, in any letter case, or an alias such as cryo-EM, X-ray, or NMR; omit method to search every method.',
+      thrownBy: 'service',
     },
     {
       reason: 'sequence_modifier_without_sequence',
@@ -110,16 +177,26 @@ export const searchStructures = tool('protein_search_structures', {
     organism: z
       .string()
       .optional()
-      .describe('Filter by source organism scientific name (e.g. "Homo sapiens").'),
+      .describe(
+        'Filter by source organism: a scientific name ("Homo sapiens"), an NCBI common name ("human", "E. coli"), or an NCBI taxon ID ("9606"), in any letter case. Matches that taxon and every taxon under it (strains, subspecies); a multi-word name also matches scientific names that contain it, such as "Escherichia coli (strain K12)". A word fragment ("coli") matches nothing.',
+      ),
     method: z
       .string()
       .optional()
-      .describe('Filter by experimental method (e.g. "X-RAY DIFFRACTION", "ELECTRON MICROSCOPY").'),
+      .describe(
+        `Filter by experimental method: ${METHOD_VOCABULARY}. Any other value is rejected. Computed models carry no method, so under content_type "predicted" this filter matches nothing.`,
+      ),
     max_resolution: z
       .number()
       .positive()
       .optional()
       .describe('Maximum resolution in Å (lower is sharper); applies to experimental structures.'),
+    ligand: z
+      .string()
+      .optional()
+      .describe(
+        'Filter by bound ligand: an exact chemical component ID (e.g. "STI" for imatinib, "HEM"), in any letter case. Keeps structures holding the component as a bound (non-polymer) copy, not as a residue inside a polymer chain. Resolve a ligand name to its ID with protein_track_ligands mode "find_ligand". Computed models carry no ligands, so under content_type "predicted" this filter matches nothing.',
+      ),
     min_identity: z
       .number()
       .min(0)
@@ -171,7 +248,50 @@ export const searchStructures = tool('protein_search_structures', {
             source: z
               .enum(['experimental', 'predicted'])
               .describe('Which universe the hit came from.'),
-            score: z.number().optional().describe('RCSB relevance score.'),
+            score: z
+              .number()
+              .optional()
+              .describe(
+                "RCSB relevance score, relative to the other hits of this search rather than a similarity measure; a sequence hit's similarity is in identity, evalue, and bitscore.",
+              ),
+            identity: z
+              .number()
+              .optional()
+              .describe(
+                'Sequence identity 0–1 over the alignment, to 4 decimal places (sequence hits).',
+              ),
+            evalue: z.number().optional().describe('Alignment E-value (sequence hits).'),
+            bitscore: z.number().optional().describe('Alignment bit score (sequence hits).'),
+            alignmentLength: z
+              .number()
+              .optional()
+              .describe('Alignment length in columns, gaps included (sequence hits).'),
+            queryStart: z
+              .number()
+              .optional()
+              .describe('First aligned residue of the query, 1-based, inclusive (sequence hits).'),
+            queryEnd: z
+              .number()
+              .optional()
+              .describe('Last aligned residue of the query, 1-based, inclusive (sequence hits).'),
+            targetStart: z
+              .number()
+              .optional()
+              .describe(
+                "First aligned residue of the hit, 1-based, inclusive, in the matched entity's sequence — not author residue numbering (sequence hits).",
+              ),
+            targetEnd: z
+              .number()
+              .optional()
+              .describe(
+                'Last aligned residue of the hit, 1-based, inclusive, in the same entity sequence as targetStart (sequence hits).',
+              ),
+            targetLength: z
+              .number()
+              .optional()
+              .describe(
+                'Length in residues of the entity sequence that targetStart and targetEnd index into (sequence hits).',
+              ),
             uniprotAccession: z
               .string()
               .optional()
@@ -185,14 +305,22 @@ export const searchStructures = tool('protein_search_structures', {
               .number()
               .optional()
               .describe('Resolution in Å (enriched experimental hits).'),
-            organism: z
-              .string()
+            organisms: z
+              .array(z.string())
               .optional()
-              .describe('Primary source organism (enriched experimental hits).'),
+              .describe(
+                "Source organisms (enriched experimental hits): for a sequence hit, those of the matched entity (entityId); otherwise every distinct source organism of the entry, in entity-number order. Omitted when unknown, including a sequence hit whose matched entity the entry's metadata lacks.",
+              ),
           })
           .describe('A ranked structure hit with optional enrichment metadata.'),
       )
       .describe('Ranked structure hits.'),
+    queryLength: z
+      .number()
+      .optional()
+      .describe(
+        "Length in residues of the query sequence that every hit's queryStart and queryEnd index into (sequence searches whose hits carry an alignment).",
+      ),
     facets: z
       .array(flatFacetDimensionSchema)
       .optional()
@@ -223,11 +351,12 @@ export const searchStructures = tool('protein_search_structures', {
       !input.sequence &&
       !input.organism &&
       !input.method &&
-      typeof input.max_resolution !== 'number'
+      typeof input.max_resolution !== 'number' &&
+      !input.ligand
     ) {
       throw ctx.fail(
         'no_criteria',
-        'Provide a query, sequence, organism, method, or maximum resolution to search on.',
+        'Provide a query, sequence, organism, method, maximum resolution, or ligand to search on.',
       );
     }
     // buildQuery() reads these two only inside its sequence branch, so without a
@@ -267,6 +396,7 @@ export const searchStructures = tool('protein_search_structures', {
         ...(typeof input.max_resolution === 'number'
           ? { maxResolution: input.max_resolution }
           : {}),
+        ...(input.ligand ? { ligand: input.ligand } : {}),
         ...(typeof input.min_identity === 'number' ? { minIdentity: input.min_identity } : {}),
         ...(typeof input.max_evalue === 'number' ? { maxEvalue: input.max_evalue } : {}),
         contentType: CONTENT_TYPE_SCOPES[input.content_type],
@@ -304,7 +434,7 @@ export const searchStructures = tool('protein_search_structures', {
     if (hits.length === 0)
       notices.push(
         result.total === 0
-          ? ZERO_HIT_NOTICE[input.content_type]
+          ? zeroHitNotice(input)
           : `start ${input.start} is past the end of the ${result.total} matches. Re-call with a lower start to read a populated page.`,
       );
     if (facets) {
@@ -315,11 +445,18 @@ export const searchStructures = tool('protein_search_structures', {
     }
     if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
 
-    return { hits, ...(facets ? { facets } : {}) };
+    return {
+      hits,
+      ...(result.queryLength !== undefined ? { queryLength: result.queryLength } : {}),
+      ...(facets ? { facets } : {}),
+    };
   },
 
   format: (result) => {
     const lines: string[] = [`## Structure search — ${result.hits.length} hits`];
+    if (typeof result.queryLength === 'number') {
+      lines.push(`**Query length:** ${result.queryLength}`);
+    }
     for (const h of result.hits) {
       lines.push(`\n### ${h.id} _(${h.source})_`);
       if (h.title) lines.push(h.title);
@@ -327,11 +464,16 @@ export const searchStructures = tool('protein_search_structures', {
         h.entityId ? `**Entity:** ${h.entityId}` : null,
         h.method ? `**Method:** ${h.method}` : null,
         typeof h.resolution === 'number' ? `**Resolution:** ${h.resolution} Å` : null,
-        h.organism ? `**Organism:** ${h.organism}` : null,
+        h.organisms ? `**Organisms:** ${h.organisms.join(', ')}` : null,
         h.uniprotAccession ? `**UniProt:** ${h.uniprotAccession}` : null,
         typeof h.score === 'number' ? `**Score:** ${h.score.toFixed(3)}` : null,
+        typeof h.identity === 'number' ? `**Identity:** ${h.identity}` : null,
+        typeof h.evalue === 'number' ? `**E-value:** ${h.evalue}` : null,
+        typeof h.bitscore === 'number' ? `**Bit score:** ${h.bitscore}` : null,
       ].filter(Boolean);
       if (meta.length > 0) lines.push(meta.join(' | '));
+      const alignment = alignmentLine(h);
+      if (alignment) lines.push(alignment);
     }
     if (result.facets && result.facets.length > 0) {
       lines.push('\n## Facets');
@@ -343,30 +485,38 @@ export const searchStructures = tool('protein_search_structures', {
 
 /** Build one output hit, folding in enrichment metadata when available. */
 function toHit(hit: SearchHit, metaById: Map<string, EntryMeta>, sequenceSearch: boolean) {
+  // A sequence hit's identity, E-value, bit score, and aligned range; the
+  // service sets only the fields upstream sent, so the spread defaults nothing.
+  const { id: hitId, score, ...alignment } = hit;
   // A sequence search returns polymer entities in both universes (4HHB_1,
   // AF_AFP69905F1_1); `id` is the chainable entry and `entityId` the matched entity.
-  const entryId = entryIdOf(hit.id);
+  const entryId = entryIdOf(hitId);
   const identity = {
-    id: sequenceSearch ? entryId : hit.id,
-    ...(sequenceSearch ? { entityId: hit.id } : {}),
+    id: sequenceSearch ? entryId : hitId,
+    ...(sequenceSearch ? { entityId: hitId } : {}),
   };
-  if (isComputedModelId(hit.id)) {
+  if (isComputedModelId(hitId)) {
     const accession = accessionFromCsm(identity.id);
     return {
       ...identity,
       source: 'predicted' as const,
-      score: hit.score,
+      score,
+      ...alignment,
       ...(accession ? { uniprotAccession: accession } : {}),
     };
   }
   const meta = metaById.get(entryId);
+  // A sequence hit names the organisms of the entity it matched: the entry's
+  // other entities can come from other species (an antibody bound to a viral protein).
+  const organisms = meta && (sequenceSearch ? matchedEntityOrganisms(meta, hitId) : meta.organisms);
   return {
     ...identity,
     source: 'experimental' as const,
-    score: hit.score,
+    score,
+    ...alignment,
     ...(meta?.title ? { title: meta.title } : {}),
     ...(meta?.methods && meta.methods.length > 0 ? { method: meta.methods.join(', ') } : {}),
     ...(typeof meta?.resolution === 'number' ? { resolution: meta.resolution } : {}),
-    ...(meta?.organisms && meta.organisms.length > 0 ? { organism: meta.organisms[0] } : {}),
+    ...(organisms && organisms.length > 0 ? { organisms } : {}),
   };
 }

@@ -6,7 +6,11 @@
  * explanation that replaces a bare empty-dimension heading), coverageNotices
  * (the materiality filter that decides which gaps earn prose), truncationNotices
  * (one advisory per capped dimension position, top-level and nested), and
- * countBuckets (the realized bucket total across every dimension position).
+ * countBuckets (the realized bucket total across every dimension position). Also
+ * the entry-level record schemas (a polymer entity's organism list, the ligand
+ * schema keeping internal author chains off the wire), matchedEntityOrganisms
+ * (a sequence hit's organisms, read off the entity it matched), and the zero-match
+ * advice for a one-word organism.
  * @module tests/tools/_schemas.test
  */
 
@@ -14,11 +18,15 @@ import { describe, expect, it } from 'vitest';
 import {
   countBuckets,
   coverageNotices,
+  ligandSchema,
+  matchedEntityOrganisms,
+  oneWordOrganismNotice,
+  polymerEntitySchema,
   renderFacets,
   toFacetOutput,
   truncationNotices,
 } from '@/mcp-server/tools/definitions/_schemas.js';
-import type { FacetDimension } from '@/services/rcsb/types.js';
+import type { EntryMeta, FacetDimension } from '@/services/rcsb/types.js';
 
 const dim = (buckets: FacetDimension['buckets']): FacetDimension => ({
   dimension: 'method',
@@ -842,4 +850,72 @@ describe('countBuckets (#36)', () => {
       ]),
     ).toBe(3);
   });
+});
+
+describe('entry-level record schemas', () => {
+  it('carries every source organism of a polymer entity (2RH1_1 chimera, #85)', () => {
+    const entity = {
+      entityId: '2RH1_1',
+      description: 'beta-2-adrenergic receptor/T4-lysozyme chimera',
+      organisms: ['Homo sapiens', 'Tequatrovirus T4'],
+      authAsymIds: ['A'],
+    };
+    expect(polymerEntitySchema.parse(entity)).toEqual(entity);
+    expect(polymerEntitySchema.shape).not.toHaveProperty('organism');
+  });
+
+  it("drops a ligand's internal author chains from the shared output shape (#92)", () => {
+    expect(
+      ligandSchema.parse({ compId: 'STI', name: 'IMATINIB', authAsymIds: ['A', 'B'] }),
+    ).toEqual({ compId: 'STI', name: 'IMATINIB' });
+  });
+});
+
+describe('matchedEntityOrganisms (#85)', () => {
+  /** Live 7BZ5: the SARS-CoV-2 spike RBD (entity 1) bound by a human antibody (entities 2, 3). */
+  const META_7BZ5: EntryMeta = {
+    id: '7BZ5',
+    organisms: ['Severe acute respiratory syndrome coronavirus 2', 'Homo sapiens'],
+    polymerEntities: [
+      {
+        entityId: '7BZ5_1',
+        description: 'Spike protein S1',
+        organisms: ['Severe acute respiratory syndrome coronavirus 2'],
+      },
+      { entityId: '7BZ5_2', description: 'Heavy chain of B38', organisms: ['Homo sapiens'] },
+      { entityId: '7BZ5_3', description: 'Light chain of B38' },
+    ],
+    ligands: [],
+  };
+
+  it("returns the matched entity's organisms, not the entry's", () => {
+    expect(matchedEntityOrganisms(META_7BZ5, '7BZ5_1')).toEqual([
+      'Severe acute respiratory syndrome coronavirus 2',
+    ]);
+    expect(matchedEntityOrganisms(META_7BZ5, '7BZ5_2')).toEqual(['Homo sapiens']);
+  });
+
+  it('returns undefined for an entity the metadata lacks or one naming no organism', () => {
+    expect(matchedEntityOrganisms(META_7BZ5, '7BZ5_9')).toBeUndefined();
+    expect(matchedEntityOrganisms(META_7BZ5, '7BZ5_3')).toBeUndefined();
+  });
+});
+
+describe('oneWordOrganismNotice (#86)', () => {
+  it('explains that a one-word organism matches only an exactly named taxon', () => {
+    expect(oneWordOrganismNotice(' Zika ')).toBe(
+      'organism "Zika" matches only a taxon with exactly that name, scientific or NCBI common (such as "human"), never a word inside a longer name; for a species, pass its full name (such as "Zika virus") or its NCBI taxon ID.',
+    );
+  });
+
+  it('escapes the organism it echoes', () => {
+    expect(oneWordOrganismNotice('Influenza*')).toContain('organism "Influenza\\*" matches only');
+  });
+
+  it.each(['Zika virus', 'Homo sapiens', '9606', ' 562 '])(
+    'has nothing to add for %j, which is not a one-word name',
+    (organism) => {
+      expect(oneWordOrganismNotice(organism)).toBeUndefined();
+    },
+  );
 });

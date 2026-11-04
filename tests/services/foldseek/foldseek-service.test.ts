@@ -1,18 +1,22 @@
 /**
  * @fileoverview Tests for the Foldseek service: ticket submit → poll → result
- * flow, target-header parsing (AF-/PDB-/other), hit normalization across the real
- * nested results shape (including the percentage-scale `seqId` → 0–1
- * `sequenceIdentity` conversion), the `{ total, hits }` paging contract (limit cap,
- * start slicing, past-end and zero-hit pages, re-paging a completed ticket),
- * query selection on multichain tickets (default query 0, explicit query,
- * `queryCount`, out-of-range rejection), the combined score ordering across
- * databases, the COMPLETE/ERROR/pending status branches, and the never-throws
- * degrade-to-failed contract. HTTP mocked, routed by URL.
+ * flow, per-database target classification (source, id, chain, accession) over
+ * one real hit per registered database, hit normalization across the real
+ * nested results shape (title, taxonomy, aligned span, query length, and the
+ * percentage-scale `seqId` → 0–1 `sequenceIdentity` conversion), the
+ * `{ total, hits }` paging contract (limit cap, start slicing, past-end and
+ * zero-hit pages, re-paging a completed ticket), query selection on multichain
+ * tickets (default query 0, explicit query, `queryCount`, out-of-range
+ * rejection), the combined score ordering across databases, the
+ * COMPLETE/ERROR/pending status branches, a submit refused with HTTP 400, and
+ * the never-throws degrade-to-failed contract (carrying the ticket once
+ * Foldseek accepted the job). HTTP mocked, routed by URL; the
+ * refused-submit case runs the real HTTP helper over a fetch fake.
  * @module tests/services/foldseek/foldseek-service.test
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('@/services/shared/http.js', async (importOriginal) => {
@@ -22,11 +26,14 @@ vi.mock('@/services/shared/http.js', async (importOriginal) => {
 
 import { FoldseekService } from '@/services/foldseek/foldseek-service.js';
 import { fetchJson } from '@/services/shared/http.js';
+import { isPdbId, isUniProtAccession } from '@/services/shared/identifiers.js';
 import {
   QUERIES_1CRN,
   QUERIES_4HHB,
+  RESULT_1CRN_PER_DB,
   RESULT_1CRN_Q0,
   RESULT_4HHB_Q0,
+  RESULT_4HHB_Q0_CHAINS,
   RESULT_4HHB_Q1,
   RESULT_EMPTY_QUERY,
 } from '../../fixtures/foldseek-captures.js';
@@ -42,7 +49,9 @@ const service = () =>
     } as never,
   );
 
-const params = (over: Partial<Parameters<FoldseekService['search']>[0]> = {}) => ({
+type SearchParams = Parameters<FoldseekService['search']>[0];
+
+const params = (over: Partial<SearchParams> = {}): SearchParams => ({
   fileContent: 'ATOM ...',
   fileName: '4HHB.pdb',
   databases: ['pdb100', 'afdb50'],
@@ -64,7 +73,14 @@ const RESULT = {
       db: 'pdb100',
       alignments: [
         [
-          { target: '2HHB-A', seqId: 99, alnLength: 141, prob: 1, eval: 1e-30, score: 800 },
+          {
+            target: '2hhb-assembly1.cif.gz_A',
+            seqId: 99,
+            alnLength: 141,
+            prob: 1,
+            eval: 1e-30,
+            score: 800,
+          },
           { target: '1A3N_B', seqId: 95, score: 750 },
         ],
       ],
@@ -115,12 +131,12 @@ describe('FoldseekService.search — complete flow', () => {
     if (out.status !== 'complete') throw new Error('expected complete');
     expect(out.hits).toHaveLength(3);
 
-    // PDB target with full scores
+    // PDB assembly-file target with full scores
     expect(out.hits[0]).toMatchObject({
-      target: '2HHB-A',
+      target: '2hhb-assembly1.cif.gz_A',
       database: 'pdb100',
-      targetType: 'pdb',
-      pdbId: '2HHB',
+      source: 'experimental',
+      id: '2HHB',
       chain: 'A',
       sequenceIdentity: 0.99,
       alignmentLength: 141,
@@ -128,19 +144,20 @@ describe('FoldseekService.search — complete flow', () => {
       evalue: 1e-30,
       score: 800,
     });
-    // PDB target with underscore separator, sparse scores (omitted, not zeroed)
+    // Bare PDB target, sparse scores (omitted, not zeroed)
     expect(out.hits[1]).toMatchObject({
-      pdbId: '1A3N',
+      id: '1A3N',
       chain: 'B',
-      targetType: 'pdb',
+      source: 'experimental',
       sequenceIdentity: 0.95,
     });
     expect(out.hits[1]).not.toHaveProperty('evalue');
-    // AlphaFold target → uniprot accession
+    // AlphaFold target → uniprot accession, which is also the chainable id
     expect(out.hits[2]).toMatchObject({
       target: 'AF-P69905-F1',
       database: 'afdb50',
-      targetType: 'alphafold',
+      source: 'predicted',
+      id: 'P69905',
       uniprotAccession: 'P69905',
     });
   });
@@ -153,21 +170,22 @@ describe('FoldseekService.search — complete flow', () => {
     // Headers carry a title after the identifier; PDB targets arrive as assembly files.
     const byTarget = new Map(out.hits.map((h) => [h.target.split(' ')[0], h]));
     expect(byTarget.get('AF-A0A1K0GXZ1-F1-model_v6')).toMatchObject({
-      targetType: 'alphafold',
+      source: 'predicted',
+      id: 'A0A1K0GXZ1',
       uniprotAccession: 'A0A1K0GXZ1',
       database: 'afdb50',
       sequenceIdentity: 1,
       score: 876,
     });
     expect(byTarget.get('1y45-assembly1.cif.gz_C')).toMatchObject({
-      targetType: 'pdb',
-      pdbId: '1Y45',
+      source: 'experimental',
+      id: '1Y45',
       database: 'pdb100',
       evalue: 4.985e-18,
       score: 920,
     });
     expect(out.total).toBe(4);
-    expect(byTarget.get('1bab-assembly1.cif.gz_A')).toMatchObject({ pdbId: '1BAB', chain: 'A' });
+    expect(byTarget.get('1bab-assembly1.cif.gz_A')).toMatchObject({ id: '1BAB', chain: 'A' });
     expect(byTarget.get('1y45-assembly1.cif.gz_C')?.chain).toBe('C');
     // With no query requested, the ticket's first query is the one read.
     expect(resultUrls()).toEqual(['https://foldseek.test/api/result/t/0']);
@@ -221,7 +239,7 @@ describe('FoldseekService.search — complete flow', () => {
     const out = await service().search(params({ limit: 1 }), createMockContext());
     if (out.status !== 'complete') throw new Error('expected complete');
     expect(out.hits).toHaveLength(1);
-    expect(out.hits[0]?.target).toBe('2HHB-A');
+    expect(out.hits[0]?.target).toBe('2hhb-assembly1.cif.gz_A');
     // The whole parsed set is counted before slicing, so a capped page still
     // discloses how many hits the completed job actually holds.
     expect(out.total).toBe(3);
@@ -253,15 +271,15 @@ describe('FoldseekService.search — complete flow', () => {
     expect(out).toMatchObject({ hits: [], total: 0 });
   });
 
-  it('classifies a non-AF, non-PDB target header as "other"', async () => {
+  it('labels a non-AF, non-PDB target from an unregistered database predicted, with no id (#87)', async () => {
     routeFoldseek({
       results: { 0: { results: [{ db: 'x', alignments: [[{ target: 'MGYP00123' }]] }] } },
     });
 
     const out = await service().search(params(), createMockContext());
     if (out.status !== 'complete') throw new Error('expected complete');
-    expect(out.hits[0]).toMatchObject({ target: 'MGYP00123', targetType: 'other' });
-    expect(out.hits[0]).not.toHaveProperty('pdbId');
+    expect(out.hits[0]).toMatchObject({ target: 'MGYP00123', source: 'predicted' });
+    expect(out.hits[0]).not.toHaveProperty('id');
     expect(out.hits[0]).not.toHaveProperty('uniprotAccession');
   });
 
@@ -276,6 +294,314 @@ describe('FoldseekService.search — complete flow', () => {
     if (out.status !== 'complete') throw new Error('expected complete');
     expect(out.hits).toHaveLength(1);
     expect(out.hits[0]?.target).toBe('4HHB_A');
+  });
+});
+
+describe('FoldseekService — per-database target classification (#87)', () => {
+  /** A completed 1CRN search over the nine databases, every hit on one page. */
+  const searchAllDatabases = async () => {
+    routeFoldseek({ results: { 0: RESULT_1CRN_PER_DB } });
+    const out = await service().search(params({ limit: 100 }), createMockContext());
+    if (out.status !== 'complete') throw new Error('expected complete');
+    return out;
+  };
+  /** The identity fields a target name resolves to, absent keys left absent. */
+  const identityOf = (hit: object) =>
+    Object.fromEntries(
+      Object.entries(hit).filter(([key]) =>
+        ['source', 'id', 'uniprotAccession', 'chain', 'title'].includes(key),
+      ),
+    );
+
+  it.each([
+    [
+      'afdb-proteome',
+      'AF-Q9C8D6-F1-model_v6',
+      {
+        source: 'predicted',
+        id: 'Q9C8D6',
+        uniprotAccession: 'Q9C8D6',
+        title: 'Probable thionin-2.4',
+      },
+    ],
+    [
+      'afdb-swissprot',
+      'AF-P01542-F1-model_v6',
+      { source: 'predicted', id: 'P01542', uniprotAccession: 'P01542', title: 'Crambin' },
+    ],
+    [
+      'afdb50',
+      'AF-P01541-F1-model_v6',
+      { source: 'predicted', id: 'P01541', uniprotAccession: 'P01541', title: 'Denclatoxin-B' },
+    ],
+    ['bfmd', 'LevyLab_Q8U2A3_V1_4_relaxed_B', { source: 'predicted' }],
+    [
+      'bfvd_v3',
+      'U5P0K0',
+      { source: 'predicted', uniprotAccession: 'U5P0K0', title: 'Uncharacterized protein' },
+    ],
+    ['cath50', '1cbnA00', { source: 'experimental', id: '1CBN', chain: 'A' }],
+    [
+      'cath50',
+      'af_Q8VZK8_26_71_3.30.1350.10',
+      { source: 'predicted', id: 'Q8VZK8', uniprotAccession: 'Q8VZK8' },
+    ],
+    ['gmgcl_id', 'GMGC10.211_012_347.UNKNOWN_trun_1.pdb', { source: 'predicted' }],
+    ['mgnify_esm30', 'MGYP001043648370.pdb.gz', { source: 'predicted' }],
+    [
+      'pdb100',
+      '1crn-assembly1.cif.gz_A',
+      {
+        source: 'experimental',
+        id: '1CRN',
+        chain: 'A',
+        title:
+          'WATER STRUCTURE OF A HYDROPHOBIC PROTEIN AT ATOMIC RESOLUTION. PENTAGON RINGS OF WATER MOLECULES IN CRYSTALS OF CRAMBIN',
+      },
+    ],
+  ])('classifies a %s hit (%s) from its target name', async (database, target, expected) => {
+    const out = await searchAllDatabases();
+    const hit = out.hits.find((h) => h.target === target);
+    expect(hit?.database).toBe(database);
+    expect(identityOf(hit ?? {})).toEqual(expected);
+  });
+
+  it('emits only ids protein_get_structure resolves, and a target on every hit', async () => {
+    const out = await searchAllDatabases();
+    expect(out.hits).toHaveLength(11);
+    const ids = out.hits.flatMap((h) => (h.id ? [h.id] : []));
+    expect(ids.length).toBeGreaterThan(0);
+    for (const id of ids) {
+      expect(isPdbId(id) || isUniProtAccession(id)).toBe(true);
+      expect(id).not.toMatch(/\s|\.(pdb|cif|gz)/);
+    }
+    for (const hit of out.hits) expect(hit.target).toMatch(/^\S+$/);
+  });
+
+  it('reads a CATH domain whose chain character is 0 as an entry with no chain', async () => {
+    routeFoldseek({
+      results: {
+        0: {
+          results: [
+            {
+              db: 'cath50',
+              alignments: [
+                [
+                  { target: '2hsf000', score: 90 },
+                  { target: '1abca01', score: 80 },
+                ],
+              ],
+            },
+          ],
+        },
+      },
+    });
+
+    const out = await service().search(params(), createMockContext());
+
+    if (out.status !== 'complete') throw new Error('expected complete');
+    expect(identityOf(out.hits[0] ?? {})).toEqual({ source: 'experimental', id: '2HSF' });
+    // A lowercase chain character is a real chain ID, kept as written.
+    expect(identityOf(out.hits[1] ?? {})).toEqual({
+      source: 'experimental',
+      id: '1ABC',
+      chain: 'a',
+    });
+  });
+
+  it('classifies hits from a database outside the registry by target grammar alone', async () => {
+    // Reachable only by resuming a ticket submitted elsewhere with another database.
+    routeFoldseek({
+      results: {
+        0: {
+          results: [
+            {
+              db: 'pdb_interface',
+              alignments: [
+                [
+                  { target: '3zpl-assembly2_E_F_F', score: 30 },
+                  { target: 'AF-P69905-F1-model_v6', score: 20 },
+                  { target: 'Predictome_123_A_B', score: 10 },
+                ],
+              ],
+            },
+          ],
+        },
+      },
+    });
+
+    const out = await service().search(params(), createMockContext());
+
+    if (out.status !== 'complete') throw new Error('expected complete');
+    expect(out.hits.map(identityOf)).toEqual([
+      { source: 'experimental', id: '3ZPL' },
+      { source: 'predicted', id: 'P69905', uniprotAccession: 'P69905' },
+      { source: 'predicted' },
+    ]);
+  });
+});
+
+describe('FoldseekService — per-hit chain, title, taxonomy, and aligned span (#88)', () => {
+  it('keeps the whole pdb100 chain label, so every row of one entry stays distinct', async () => {
+    routeFoldseek({ queries: QUERIES_4HHB, results: { 0: RESULT_4HHB_Q0_CHAINS } });
+
+    const out = await service().search(params(), createMockContext());
+
+    if (out.status !== 'complete') throw new Error('expected complete');
+    expect(out.hits.map((h) => [h.target, h.id, h.chain])).toEqual([
+      ['6kai-assembly2.cif.gz_E', '6KAI', 'E'],
+      ['6kai-assembly1.cif.gz_A', '6KAI', 'A'],
+      ['6kai-assembly2.cif.gz_G', '6KAI', 'G'],
+      ['1ibe-assembly1.cif.gz_A-2', '1IBE', 'A-2'],
+      ['7vlf-assembly1.cif.gz_G-2', '7VLF', 'G-2'],
+      ['7vlf-assembly1.cif.gz_G-3', '7VLF', 'G-3'],
+      ['7vea-assembly1.cif.gz_dM', '7VEA', 'dM'],
+    ]);
+    const rows = out.hits.map((h) => `${h.id}:${h.chain}`);
+    expect(new Set(rows).size).toBe(rows.length);
+    expect(out.hits[0]?.title).toBe(
+      'Crosslinked alpha(Ni)-beta(Fe) human hemoglobin A in the T quaternary structure at 95 K: Light',
+    );
+  });
+
+  it('carries probability and the aligned span from each alignment, and qLen once per query', async () => {
+    routeFoldseek({ results: { 0: RESULT_1CRN_PER_DB } });
+
+    const out = await service().search(params({ limit: 100 }), createMockContext());
+
+    if (out.status !== 'complete') throw new Error('expected complete');
+    const raw = RESULT_1CRN_PER_DB.results.flatMap((block) => block.alignments.flat());
+    expect(out.hits).toHaveLength(raw.length);
+    for (const aln of raw) {
+      const hit = out.hits.find((h) => h.target === aln.target.split(' ')[0]);
+      expect(hit).toMatchObject({
+        probability: aln.prob,
+        alignmentLength: aln.alnLength,
+        queryStart: aln.qStartPos,
+        queryEnd: aln.qEndPos,
+        targetStart: aln.dbStartPos,
+        targetEnd: aln.dbEndPos,
+        targetLength: aln.dbLen,
+      });
+    }
+    expect(out.queryLength).toBe(46);
+  });
+
+  it('keeps queryLength on a page past the end of the hits', async () => {
+    routeFoldseek({ results: { 0: RESULT_1CRN_PER_DB } });
+    const out = await service().search(params({ start: 99, limit: 5 }), createMockContext());
+    expect(out).toMatchObject({ status: 'complete', hits: [], total: 11, queryLength: 46 });
+  });
+
+  it('omits the span fields and queryLength when upstream sends none', async () => {
+    routeFoldseek({ queries: QUERIES_4HHB, results: { 1: RESULT_4HHB_Q1 } });
+
+    const out = await service().search(params({ query: 1 }), createMockContext());
+
+    if (out.status !== 'complete') throw new Error('expected complete');
+    expect(out.hits).toHaveLength(4);
+    for (const hit of out.hits) {
+      for (const key of ['queryStart', 'queryEnd', 'targetStart', 'targetEnd', 'targetLength']) {
+        expect(hit).not.toHaveProperty(key);
+      }
+    }
+    expect(out).not.toHaveProperty('queryLength');
+  });
+
+  it('reads taxonomy where upstream has it, and drops the unclassified placeholder', async () => {
+    routeFoldseek({ results: { 0: RESULT_1CRN_PER_DB } });
+
+    const out = await service().search(params({ limit: 100 }), createMockContext());
+
+    if (out.status !== 'complete') throw new Error('expected complete');
+    const byTarget = new Map(out.hits.map((h) => [h.target, h]));
+    expect(byTarget.get('1crn-assembly1.cif.gz_A')).toMatchObject({
+      taxId: 3721,
+      taxName: 'Crambe hispanica subsp. abyssinica',
+    });
+    expect(byTarget.get('U5P0K0')).toMatchObject({
+      taxId: 1354510,
+      taxName: 'Mycobacterium phage Fredward',
+    });
+    for (const target of [
+      '2fd7-assembly1.cif.gz_A', // taxId 0, taxName "unclassified"
+      'MGYP001043648370.pdb.gz', // database without taxonomy
+      'GMGC10.211_012_347.UNKNOWN_trun_1.pdb',
+    ]) {
+      expect(byTarget.get(target)).not.toHaveProperty('taxId');
+      expect(byTarget.get(target)).not.toHaveProperty('taxName');
+    }
+  });
+
+  it('has no title on targets whose header carries none', async () => {
+    routeFoldseek({ results: { 0: RESULT_1CRN_PER_DB } });
+
+    const out = await service().search(params({ limit: 100 }), createMockContext());
+
+    if (out.status !== 'complete') throw new Error('expected complete');
+    const untitled = out.hits.filter((h) => !h.title).map((h) => h.database);
+    expect(untitled.sort()).toEqual(['bfmd', 'cath50', 'cath50', 'gmgcl_id', 'mgnify_esm30']);
+  });
+
+  it.each([
+    [42.2, 0.422],
+    [37.7, 0.377],
+    [99.2, 0.992],
+    [81.4, 0.814],
+  ])('rounds seqId %s to identity %s, with no float noise', async (seqId, identity) => {
+    routeFoldseek({
+      results: { 0: { results: [{ db: 'pdb100', alignments: [[{ target: '1AAA_A', seqId }]] }] } },
+    });
+
+    const out = await service().search(params(), createMockContext());
+
+    if (out.status !== 'complete') throw new Error('expected complete');
+    expect(out.hits[0]?.sequenceIdentity).toBe(identity);
+  });
+});
+
+describe('FoldseekService.search — a refused submit (#87)', () => {
+  const isSubmit = (req: Request) => {
+    const url = new URL(req.url);
+    return url.hostname === 'foldseek.test' && url.pathname === '/api/ticket';
+  };
+
+  it('reports an HTTP 400 on submit as rejected, without retrying or polling', async () => {
+    // Run the real HTTP helper so the 400 → InvalidParams mapping and the retry
+    // predicate are part of what this test exercises.
+    const actual = await vi.importActual<typeof import('@/services/shared/http.js')>(
+      '@/services/shared/http.js',
+    );
+    fetchJsonMock.mockImplementation(actual.fetchJson);
+    const http = createFetchMock([
+      {
+        method: 'POST',
+        match: isSubmit,
+        respond: new Response('selected databases are not valid\n', {
+          status: 400,
+          statusText: 'Bad Request',
+        }),
+      },
+    ]);
+    http.install();
+    try {
+      const out = await service().search(params(), createMockContext());
+      expect(out).toEqual({
+        status: 'rejected',
+        upstreamMessage: 'selected databases are not valid',
+      });
+      expect(http.calls).toHaveLength(1);
+    } finally {
+      http.restore();
+    }
+  });
+
+  it('keeps any other submit failure as failed', async () => {
+    fetchJsonMock.mockRejectedValueOnce(
+      new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Foldseek returned HTTP 503.'),
+    );
+    const out = await service().search(params(), createMockContext());
+    expect(out).toEqual({ status: 'failed', error: 'Foldseek returned HTTP 503.' });
   });
 });
 
@@ -463,13 +789,34 @@ describe('FoldseekService.search — async / failure branches', () => {
     expect(out).toEqual({ status: 'computing', ticketId: 'pending-7' });
   });
 
-  it('degrades to failed when the ticket reports ERROR', async () => {
-    routeFoldseek({ status: 'ERROR', results: {} });
+  it('degrades to failed when the ticket reports ERROR, keeping the ticket it submitted', async () => {
+    routeFoldseek({ ticketId: 'tkt-err', status: 'ERROR', results: {} });
 
     const out = await service().search(params(), createMockContext());
-    expect(out).toMatchObject({ status: 'failed' });
+    expect(out).toMatchObject({ status: 'failed', ticketId: 'tkt-err' });
     if (out.status !== 'failed') throw new Error('expected failed');
     expect(out.error).toMatch(/error/i);
+  });
+
+  it('keeps the ticket when the call’s deadline stops the poll after a successful submit', async () => {
+    const controller = new AbortController();
+    fetchJsonMock.mockImplementation(async (url: string) => {
+      if (url === 'https://foldseek.test/api/ticket') return { id: 'tkt-late' };
+      // The call's budget runs out while the ticket poll is in flight.
+      controller.abort(new DOMException('Call budget spent.', 'TimeoutError'));
+      throw controller.signal.reason;
+    });
+    const out = await service().search(
+      params({ timeoutMs: 30_000 }),
+      createMockContext({ signal: controller.signal }),
+    );
+
+    expect(out).toMatchObject({ status: 'failed', ticketId: 'tkt-late' });
+    // Submitted once, polled once: the stopped poll is not retried into a second job.
+    expect(fetchJsonMock.mock.calls.map((call) => call[0])).toEqual([
+      'https://foldseek.test/api/ticket',
+      'https://foldseek.test/api/ticket/tkt-late',
+    ]);
   });
 
   it('degrades to failed when submit returns no ticket id', async () => {
@@ -541,9 +888,9 @@ describe('FoldseekService.resume — poll an existing ticket without resubmittin
     expect(out.error).toMatch(/error/i);
   });
 
-  it('degrades to failed (not not_found) on a non-400 upstream error', async () => {
+  it('degrades to failed (not not_found) on a non-400 upstream error, keeping the ticket', async () => {
     fetchJsonMock.mockRejectedValue(new Error('network boom'));
     const out = await service().resume(resumeParams, createMockContext());
-    expect(out).toEqual({ status: 'failed', error: 'network boom' });
+    expect(out).toEqual({ status: 'failed', ticketId: 'ticket-1', error: 'network boom' });
   });
 });

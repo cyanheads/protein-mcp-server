@@ -2,7 +2,8 @@
  * @fileoverview Shared HTTP layer for the protein data providers. Wraps the
  * framework's `fetchWithTimeout` + `withRetry` (retry covers the full fetch +
  * parse pipeline) and centralizes HTML-error-page / empty-body detection so each
- * service stays thin.
+ * service stays thin. Bounded text reads stream a body and cancel it once the
+ * caller holds what it needs, for files too large to download whole.
  * @module services/shared/http
  */
 
@@ -134,6 +135,93 @@ export function fetchText(url: string, ctx: Context, opts: FetchOptions): Promis
       signal: ctx.signal,
     },
   );
+}
+
+/**
+ * Stream a text body to `onChunk`, decoded as UTF-8, until the body ends or
+ * `onChunk` returns `false`; the rest of the body is then cancelled, never
+ * downloaded. Upstreams that ignore `Range` and send no `Content-Length` can
+ * only be bounded this way. Retries cover reaching a 2xx response: chunks
+ * already handed to `onChunk` cannot be taken back, so a body that fails
+ * mid-read rejects. Throws a status-mapped `McpError` on non-2xx.
+ */
+export async function streamText(
+  url: string,
+  ctx: Context,
+  opts: FetchOptions,
+  onChunk: (chunk: string) => boolean,
+): Promise<void> {
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const res = await withRetry(
+    () =>
+      fetchWithTimeout(url, timeoutMs, ctx, {
+        method: opts.method ?? 'GET',
+        ...(opts.body !== undefined && { body: opts.body }),
+        ...(opts.expectedStatuses && { expectedStatuses: opts.expectedStatuses }),
+        headers: withDefaultHeaders(opts.headers),
+        signal: ctx.signal,
+      }),
+    {
+      operation: opts.operation,
+      context: ctx,
+      baseDelayMs: opts.baseDelayMs ?? 400,
+      ...(opts.maxRetries !== undefined && { maxRetries: opts.maxRetries }),
+      signal: ctx.signal,
+    },
+  );
+  if (!res.body) return;
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      const tail = decoder.decode();
+      if (tail) onChunk(tail);
+      return;
+    }
+    const chunk = decoder.decode(value, { stream: true });
+    if (chunk && !onChunk(chunk)) {
+      await reader.cancel();
+      return;
+    }
+  }
+}
+
+/**
+ * One window of a text body: characters `[offset, offset + length)`, shorter or
+ * empty where the body ends first. A window the body ends within (`more: false`)
+ * was read to the end, so it also knows the body's length in characters.
+ */
+export type TextWindow =
+  | { more: true; text: string }
+  | { more: false; text: string; totalLength: number };
+
+/**
+ * Read characters `[offset, offset + length)` of a text body. The read stops
+ * once it has seen one character past the window — enough to say whether the
+ * body continues — and keeps only the window's characters, so the download ends
+ * near `offset + length + 1` characters and memory stays at the window,
+ * whatever the size of the file. Retry semantics follow {@link streamText}.
+ */
+export async function fetchTextWindow(
+  url: string,
+  ctx: Context,
+  opts: FetchOptions & { length: number; offset: number },
+): Promise<TextWindow> {
+  const stopAt = opts.offset + opts.length + 1;
+  let seen = 0;
+  let held = '';
+  await streamText(url, ctx, opts, (chunk) => {
+    const start = seen;
+    seen += chunk.length;
+    if (seen > opts.offset) held += chunk.slice(Math.max(0, opts.offset - start), stopAt - start);
+    return seen < stopAt;
+  });
+  // Holding the character past the window means the body reached it; otherwise
+  // the body ended first and `seen` is its whole length.
+  return held.length > opts.length
+    ? { more: true, text: held.slice(0, opts.length) }
+    : { more: false, text: held, totalLength: seen };
 }
 
 /**

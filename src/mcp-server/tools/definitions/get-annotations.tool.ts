@@ -1,29 +1,42 @@
 /**
  * @fileoverview protein_get_annotations — sequence & functional annotation for a
- * protein: UniProt features (domains, binding sites, PTMs, variants) and InterPro
- * domain/family memberships with GO terms. Keyed by UniProt accession; resolves a
- * PDB ID to its accession when needed — deterministically by default, by author
- * chain when a multi-chain entry is ambiguous. Carries upstream data attribution.
+ * protein: UniProt positional features (domains, sites, PTMs, topology,
+ * processing, mutagenesis), natural variants, and InterPro domain/family
+ * memberships with GO terms. Keyed by canonical UniProt accession; resolves a PDB
+ * ID to its accession when needed — deterministically by default, by author chain
+ * when a multi-chain entry is ambiguous. A merged accession answers for its
+ * successor with a notice; a demerged or deleted one fails with its replacements.
+ * Every upstream request shares one call budget. Carries upstream data attribution.
  * @module mcp-server/tools/definitions/get-annotations.tool
  */
 
-import { tool, z } from '@cyanheads/mcp-ts-core';
+import { type Context, tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { getRcsbService } from '@/services/rcsb/rcsb-service.js';
 import type { UniProtXref } from '@/services/rcsb/types.js';
 import { attributionsFor, type CuratedSource } from '@/services/shared/attribution.js';
-import { isUniProtAccession } from '@/services/shared/identifiers.js';
+import { withCallBudget } from '@/services/shared/call-budget.js';
+import {
+  canonicalAccessionOf,
+  isUniProtAccession,
+  isUniProtIsoform,
+} from '@/services/shared/identifiers.js';
 import type {
   AnnotationInclude,
-  InterProEntry,
+  InterProMemberships,
   SequenceFeature,
+  UniProtEntry,
 } from '@/services/uniprot/uniprot-service.js';
-import { getUniProtService } from '@/services/uniprot/uniprot-service.js';
+import { getUniProtService, mergedAccessionNotice } from '@/services/uniprot/uniprot-service.js';
 import { attributionSchema, renderAttribution } from './_schemas.js';
 
 const featureSchema = z
   .object({
-    type: z.string().describe('Feature type (e.g. Domain, Binding site, Modified residue).'),
+    type: z
+      .string()
+      .describe(
+        'Feature type as UniProt names it (e.g. Domain, Binding site, Modified residue, Cross-link, Lipidation, Topological domain, Chain, Mutagenesis, Non-standard residue).',
+      ),
     description: z.string().optional().describe('Feature description.'),
     start: z.number().optional().describe('Start residue (1-based).'),
     end: z.number().optional().describe('End residue (1-based).'),
@@ -127,7 +140,7 @@ type AnnotationAmbiguity = z.infer<typeof ambiguitySchema>;
 
 export const getAnnotations = tool('protein_get_annotations', {
   title: 'protein-mcp-server: get annotations',
-  description: `Sequence and functional annotation for a protein: UniProt features (domains, binding sites, PTMs), natural variants, and InterPro domain/family memberships (Pfam, PROSITE, …) with GO terms. Provide a UniProt accession directly, or a PDB ID — it is resolved to its UniProt accession via the structure's sequence cross-reference. A multi-chain PDB entry can map to several accessions; the default pick is deterministic (lowest author chain ID) and the alternatives are listed in "ambiguity" — pass "chain" to select a specific one. Use "include" to scope which annotation classes are fetched. Every response carries an "attribution" block with the upstream data licenses and citations.`,
+  description: `Sequence and functional annotation for a protein: UniProt positional features (domains, binding and active sites, PTMs including cross-links and lipidation, topology, DNA binding, processing products such as chains and signal peptides, mutagenesis), natural variants, and InterPro domain/family memberships (Pfam, PROSITE, …) with GO terms. Provide a canonical UniProt accession directly, or a PDB ID — it is resolved to its UniProt accession via the structure's sequence cross-reference. A multi-chain PDB entry can map to several accessions; the default pick is deterministic (lowest author chain ID) and the alternatives are listed in "ambiguity" — pass "chain" to select a specific one. An accession UniProt merged into another entry answers for that successor with a notice; a demerged or deleted one fails with its replacement accessions. Use "include" to scope which annotation classes are fetched. Every response carries an "attribution" block with the upstream data licenses and citations.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   errors: [
@@ -141,9 +154,24 @@ export const getAnnotations = tool('protein_get_annotations', {
     {
       reason: 'invalid_accession',
       code: JsonRpcErrorCode.InvalidParams,
-      when: 'The supplied uniprot value is not a syntactically valid UniProt accession.',
+      when: 'The supplied uniprot value is not a canonical UniProt accession: malformed, or an isoform accession (e.g. P04637-2), which UniProt does not annotate apart from its canonical entry.',
       recovery:
-        'Pass a UniProt accession in its 6- or 10-character form (e.g. P69905, A0A024R161), or supply pdb_id instead.',
+        'Pass a canonical UniProt accession in its 6- or 10-character form (e.g. P69905, A0A024R161) — for an isoform, the accession before its dash — or supply pdb_id instead.',
+    },
+    {
+      reason: 'accession_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'UniProtKB has no entry for a well-formed accession: it was never assigned.',
+      recovery:
+        'Check the accession for a typo, or supply pdb_id for a structure of the protein instead.',
+    },
+    {
+      reason: 'inactive_accession',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'UniProt lists the accession as inactive: demerged into several entries, or deleted.',
+      recovery:
+        'Retry uniprot with an accession from data.replacements; an empty list means UniProt deleted the entry without a replacement.',
+      thrownBy: 'service',
     },
     {
       reason: 'no_uniprot_mapping',
@@ -165,7 +193,9 @@ export const getAnnotations = tool('protein_get_annotations', {
     uniprot: z
       .string()
       .optional()
-      .describe('UniProt accession (e.g. P69905). Takes precedence over pdb_id.'),
+      .describe(
+        'Canonical UniProt accession (e.g. P69905). Isoform accessions (e.g. P04637-2) are rejected; UniProt annotates the canonical entry. Takes precedence over pdb_id.',
+      ),
     pdb_id: z
       .string()
       .optional()
@@ -214,27 +244,38 @@ export const getAnnotations = tool('protein_get_annotations', {
   }),
 
   output: z.object({
-    accession: z.string().describe('UniProt accession the annotations describe.'),
+    accession: z
+      .string()
+      .describe(
+        'UniProt accession the annotations describe — the successor when UniProt merged the requested accession, which the notice names.',
+      ),
     proteinName: z.string().optional().describe('Recommended protein name.'),
     geneNames: z.array(z.string()).describe('Gene names.'),
     organism: z.string().optional().describe('Source organism scientific name.'),
     function: z.string().optional().describe('UniProt function summary.'),
     sequenceLength: z.number().optional().describe('Sequence length in residues.'),
-    features: z.array(featureSchema).optional().describe('Structural/functional features.'),
+    features: z
+      .array(featureSchema)
+      .optional()
+      .describe(
+        'Positional features other than natural variants, in UniProt order (grouped by type). Secondary structure, isoform sequences, and sequence-record notes are not included.',
+      ),
     variants: z.array(featureSchema).optional().describe('Natural sequence variants.'),
     domains: z.array(domainSchema).optional().describe('InterPro domain/family memberships.'),
     featuresTotal: z
       .number()
       .optional()
-      .describe('Total fetched functional features; present only when requested.'),
+      .describe('Total positional features in the entry; present only when requested.'),
     variantsTotal: z
       .number()
       .optional()
-      .describe('Total fetched natural variants; present only when requested.'),
+      .describe('Total natural variants in the entry; present only when requested.'),
     domainsTotal: z
       .number()
       .optional()
-      .describe('Total fetched InterPro memberships; present only when requested.'),
+      .describe(
+        "InterPro's membership count for the protein; present only when requested. When InterPro paging stopped short of it, the notice names how many memberships domains_offset can reach.",
+      ),
     ambiguity: ambiguitySchema
       .optional()
       .describe(
@@ -256,20 +297,17 @@ export const getAnnotations = tool('protein_get_annotations', {
       .boolean()
       .optional()
       .describe(
-        'True when at least one requested class has records after its returned page; the notice gives its next offset.',
+        'True when at least one requested class has records past its returned page (the notice gives the next offset), or InterPro paging stopped before retrieving every membership.',
       ),
     notice: z
       .string()
       .optional()
       .describe(
-        'Per-class totals and next offsets, or advice to lower an exhausted offset; genuine absence is reported separately.',
+        'The merge when UniProt merged the requested accession into another entry, first; then per class: the next offset, advice to lower an exhausted offset, an empty class, or an InterPro walk that stopped short of its count.',
       ),
   },
 
   async handler(input, ctx) {
-    const uniprot = getUniProtService();
-    const rcsb = getRcsbService();
-
     // Reject unusable input up front, before any upstream call: a caller that
     // omitted both parameters or mistyped an accession has an input problem, not a
     // lookup that found nothing, and the two are different next moves. Guarded
@@ -278,109 +316,147 @@ export const getAnnotations = tool('protein_get_annotations', {
     if (!input.uniprot && !input.pdb_id) {
       throw ctx.fail('missing_identifier', 'Provide uniprot (e.g. P69905) or pdb_id (e.g. 4HHB).');
     }
-    if (input.uniprot && !isUniProtAccession(input.uniprot)) {
-      throw ctx.fail('invalid_accession', `"${input.uniprot}" is not a valid UniProt accession.`);
-    }
-
-    let accession = input.uniprot?.toUpperCase();
-    let resolvedFrom: string | undefined;
-    let ambiguity: AnnotationAmbiguity | undefined;
-
-    if (!accession && input.pdb_id) {
-      const entities = await rcsb.resolveUniprotEntities(input.pdb_id, ctx);
-      resolvedFrom = input.pdb_id.toUpperCase();
-      const chain = input.chain?.trim();
-      if (chain) {
-        const match = entities.find((e) => e.chains.includes(chain));
-        if (!match) {
-          const available = entities.flatMap((e) => e.chains);
-          throw ctx.fail(
-            'chain_not_found',
-            `Chain "${chain}" matches no UniProt-mapped polymer entity in ${resolvedFrom}.`,
-            {
-              recovery: {
-                hint: available.length
-                  ? `Author chains in ${resolvedFrom}: ${available.join(', ')}. Pass one of these, or omit chain for the deterministic default mapping.`
-                  : `${resolvedFrom} exposes no UniProt-mapped protein chains. Pass a UniProt accession directly.`,
-              },
-            },
-          );
-        }
-        accession = match.accession;
-      } else {
-        // Deterministic default: order entities by their lowest author chain ID and
-        // take the first, so the same entry always yields the same accession
-        // regardless of upstream GraphQL entity ordering. When more than one distinct
-        // accession exists, surface the alternatives so the caller can pick a chain.
-        const ordered = orderByLowestChain(entities);
-        accession = ordered[0]?.accession;
-        const distinct = new Set(entities.map((e) => e.accession));
-        if (accession && distinct.size > 1) {
-          ambiguity = buildAmbiguity(resolvedFrom, accession, ordered, distinct.size);
-        }
-      }
-    }
-
-    // Both checks below are upstream-resolution outcomes now: an absent or
-    // malformed `uniprot` input was rejected before any lookup ran, so reaching
-    // either means a supplied pdb_id resolved to nothing usable.
-    if (!accession) {
+    const requested = input.uniprot?.trim();
+    if (requested && isUniProtIsoform(requested)) {
+      // UniProt carries no features for an isoform accession and InterPro no memberships.
+      const canonical = canonicalAccessionOf(requested);
       throw ctx.fail(
-        'no_uniprot_mapping',
-        'The supplied PDB ID carries no UniProt-mapped protein chain.',
+        'invalid_accession',
+        `"${requested}" is an isoform of ${canonical}; UniProt annotates the canonical entry, so pass ${canonical}.`,
       );
     }
-    if (!isUniProtAccession(accession)) {
-      throw ctx.fail('no_uniprot_mapping', `"${accession}" is not a valid UniProt accession.`);
+    if (requested && !isUniProtAccession(requested)) {
+      throw ctx.fail('invalid_accession', `"${requested}" is not a valid UniProt accession.`);
     }
 
     const include = input.include as AnnotationInclude;
+    const wantFeatures = include === 'features' || include === 'all';
+    const wantVariants = include === 'variants' || include === 'all';
     const wantInterPro = include === 'domains' || include === 'all';
-    const [entry, interpro] = await Promise.all([
-      uniprot.getEntry(accession, include, ctx),
-      wantInterPro ? uniprot.getInterPro(accession, ctx) : Promise.resolve<InterProEntry[]>([]),
-    ]);
+
+    // One budget across the PDB lookup, the UniProt entry, and every InterPro page.
+    const { entry, memberships, resolvedFrom, ambiguity } = await withCallBudget(
+      ctx,
+      async (call) => {
+        let accession = requested?.toUpperCase();
+        let resolvedFrom: string | undefined;
+        let ambiguity: AnnotationAmbiguity | undefined;
+
+        if (!accession && input.pdb_id) {
+          const entities = await getRcsbService().resolveUniprotEntities(input.pdb_id, call);
+          resolvedFrom = input.pdb_id.toUpperCase();
+          const chain = input.chain?.trim();
+          if (chain) {
+            const match = entities.find((e) => e.chains.includes(chain));
+            if (!match) {
+              const available = entities.flatMap((e) => e.chains);
+              throw ctx.fail(
+                'chain_not_found',
+                `Chain "${chain}" matches no UniProt-mapped polymer entity in ${resolvedFrom}.`,
+                {
+                  recovery: {
+                    hint: available.length
+                      ? `Author chains in ${resolvedFrom}: ${available.join(', ')}. Pass one of these, or omit chain for the deterministic default mapping.`
+                      : `${resolvedFrom} exposes no UniProt-mapped protein chains. Pass a UniProt accession directly.`,
+                  },
+                },
+              );
+            }
+            accession = match.accession;
+          } else {
+            // Deterministic default: order entities by their lowest author chain ID and
+            // take the first, so the same entry always yields the same accession
+            // regardless of upstream GraphQL entity ordering. When more than one distinct
+            // accession exists, surface the alternatives so the caller can pick a chain.
+            const ordered = orderByLowestChain(entities);
+            accession = ordered[0]?.accession;
+            const distinct = new Set(entities.map((e) => e.accession));
+            if (accession && distinct.size > 1) {
+              ambiguity = buildAmbiguity(resolvedFrom, accession, ordered, distinct.size);
+            }
+          }
+        }
+
+        // Both checks below are upstream-resolution outcomes now: an absent or
+        // malformed `uniprot` input was rejected before any lookup ran, so reaching
+        // either means a supplied pdb_id resolved to nothing usable.
+        if (!accession) {
+          throw ctx.fail(
+            'no_uniprot_mapping',
+            'The supplied PDB ID carries no UniProt-mapped protein chain.',
+          );
+        }
+        if (!isUniProtAccession(accession)) {
+          throw ctx.fail('no_uniprot_mapping', `"${accession}" is not a valid UniProt accession.`);
+        }
+
+        const fetched = await fetchAnnotations(accession, include, wantInterPro, call);
+        if (!fetched) {
+          throw ctx.fail(
+            'accession_not_found',
+            `UniProtKB has no entry for ${accession}${resolvedFrom ? ` (mapped from ${resolvedFrom})` : ''}.`,
+            { accession },
+          );
+        }
+        return { ...fetched, resolvedFrom, ambiguity };
+      },
+    );
 
     const features = entry.features.filter((f) => f.category === 'feature');
     const variants = entry.features.filter((f) => f.category === 'variant');
-    const wantFeatures = include === 'features' || include === 'all';
-    const wantVariants = include === 'variants' || include === 'all';
+    const domains = memberships?.entries ?? [];
 
-    /** Each class pages independently. Compose once because enrichment notices are last-wins. */
+    /**
+     * Each class pages independently over what was retrieved. Only InterPro can
+     * hold back records (`total` past what its walk retrieved). Compose once
+     * because enrichment notices are last-wins; the merge notice leads.
+     */
     const { limit } = input;
-    const notices: string[] = [];
+    const notices = entry.mergedFrom
+      ? [mergedAccessionNotice(entry.mergedFrom, entry.accession)]
+      : [];
     let truncated = false;
-    for (const cls of [
+    for (const { want, count, total, label, offset } of [
       {
         want: wantFeatures,
         count: features.length,
+        total: features.length,
         label: 'features',
         offset: input.features_offset,
       },
       {
         want: wantVariants,
         count: variants.length,
+        total: variants.length,
         label: 'variants',
         offset: input.variants_offset,
       },
       {
         want: wantInterPro,
-        count: interpro.length,
+        count: domains.length,
+        total: memberships?.total ?? 0,
         label: 'domains',
         offset: input.domains_offset,
       },
     ]) {
-      if (!cls.want) continue;
-      if (cls.count === 0) {
-        notices.push(`No ${cls.label} present.`);
-      } else if (cls.offset >= cls.count) {
-        notices.push(
-          `No ${cls.label} at offset ${cls.offset} (total ${cls.count}); use a lower ${cls.label}_offset, such as 0.`,
-        );
-      } else if (cls.offset + limit < cls.count) {
+      if (!want) continue;
+      const short = count < total;
+      if (short) {
         truncated = true;
         notices.push(
-          `Showing ${limit} of ${cls.count} ${cls.label} at offset ${cls.offset}; continue with ${cls.label}_offset: ${cls.offset + limit}.`,
+          `Retrieved ${count} of ${total} ${label}; paging stopped early, so ${label}_offset reaches only those ${count}.`,
+        );
+      }
+      if (count === 0) {
+        if (!short) notices.push(`No ${label} present.`);
+      } else if (offset >= count) {
+        notices.push(
+          `No ${label} at offset ${offset} (${short ? `${count} retrieved of ${total}` : `total ${count}`}); use a lower ${label}_offset, such as 0.`,
+        );
+      } else if (offset + limit < count) {
+        truncated = true;
+        notices.push(
+          `Showing ${limit} of ${count}${short ? ' retrieved' : ''} ${label} at offset ${offset}; continue with ${label}_offset: ${offset + limit}.`,
         );
       }
     }
@@ -390,8 +466,8 @@ export const getAnnotations = tool('protein_get_annotations', {
     // GO terms. InterPro (CC0) and GO (CC BY 4.0) are gated independently — an
     // InterPro entry can exist with zero GO terms.
     const sources = new Set<CuratedSource>(['UniProt']);
-    if (interpro.length > 0) sources.add('InterPro');
-    if (interpro.some((d) => d.goTerms.length > 0)) sources.add('GO');
+    if (domains.length > 0) sources.add('InterPro');
+    if (domains.some((d) => d.goTerms.length > 0)) sources.add('GO');
 
     if (resolvedFrom) ctx.enrich({ resolvedFrom });
     if (truncated) ctx.enrich({ truncated: true });
@@ -420,10 +496,10 @@ export const getAnnotations = tool('protein_get_annotations', {
             variantsTotal: variants.length,
           }
         : {}),
-      ...(wantInterPro
+      ...(memberships
         ? {
-            domains: interpro.slice(input.domains_offset, input.domains_offset + limit),
-            domainsTotal: interpro.length,
+            domains: domains.slice(input.domains_offset, input.domains_offset + limit),
+            domainsTotal: memberships.total,
           }
         : {}),
       ...(ambiguity ? { ambiguity } : {}),
@@ -521,6 +597,61 @@ function buildAmbiguity(
       `Returning ${chosen}, the deterministic lowest-chain pick. ` +
       'Re-call with chain set to a specific author chain ID to select another.',
   };
+}
+
+/**
+ * The UniProt entry and, when `wantInterPro`, its InterPro memberships. InterPro
+ * starts beside the entry request under its own abort controller, so an active
+ * accession pays no extra latency. Its answer is kept only when the entry is
+ * live under the requested accession; otherwise the read is aborted and awaited
+ * before anything returns or throws, so no InterPro request outlives the call,
+ * and a merged accession then reads InterPro for its successor. `null` when
+ * UniProt has no entry; the service throws `inactive_accession` for a demerged or
+ * deleted accession.
+ */
+async function fetchAnnotations(
+  accession: string,
+  include: AnnotationInclude,
+  wantInterPro: boolean,
+  ctx: Context,
+): Promise<{ entry: UniProtEntry; memberships?: InterProMemberships } | null> {
+  const uniprot = getUniProtService();
+  if (!wantInterPro) {
+    const entry = await uniprot.getEntry(accession, include, ctx);
+    return entry && { entry };
+  }
+
+  const speculation = new AbortController();
+  // allSettled: an InterPro failure waits for the entry's verdict instead of rejecting unhandled.
+  const speculative = Promise.allSettled([
+    uniprot.getInterPro(accession, {
+      ...ctx,
+      signal: AbortSignal.any([ctx.signal, speculation.signal]),
+    }),
+  ]).then(([settled]) => settled);
+  const discardSpeculation = async () => {
+    speculation.abort();
+    await speculative;
+  };
+
+  let entry: UniProtEntry | null;
+  try {
+    entry = await uniprot.getEntry(accession, include, ctx);
+  } catch (err) {
+    await discardSpeculation();
+    throw err;
+  }
+  if (!entry) {
+    await discardSpeculation();
+    return null;
+  }
+  if (entry.mergedFrom) {
+    await discardSpeculation();
+    return { entry, memberships: await uniprot.getInterPro(entry.accession, ctx) };
+  }
+  const settled = await speculative;
+  if (settled.status === 'rejected') throw settled.reason;
+  return { entry, memberships: settled.value };
 }
 
 function toFeatureOutput(features: SequenceFeature[]) {

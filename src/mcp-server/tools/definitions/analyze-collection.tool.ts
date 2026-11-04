@@ -17,12 +17,13 @@ import {
   INTERVAL_DIMENSION_NAMES,
   intervalTarget,
 } from '@/services/rcsb/facets.js';
-import { getRcsbService } from '@/services/rcsb/rcsb-service.js';
+import { getRcsbService, METHOD_VOCABULARY } from '@/services/rcsb/rcsb-service.js';
 import {
   CONTENT_TYPE_SCOPES,
   countBuckets,
   coverageNotices,
   facetDimensionSchema,
+  oneWordOrganismNotice,
   renderFacets,
   toFacetOutput,
   truncationNotices,
@@ -47,6 +48,43 @@ const ZERO_MATCH_NOTICE = {
   all: `No structures matched this scope in either the experimental or computed-model universe — content_type "all" is already the widest scope. Broaden or drop the query, organism, method, and max_resolution filters.`,
 } satisfies Record<'experimental' | 'predicted' | 'all', string>;
 
+/**
+ * Scope filters that select on data no computed model carries, with what each
+ * selects on: RCSB indexes no experimental method or resolution for one, so
+ * under content_type "predicted" each can only match nothing.
+ */
+const EXPERIMENTAL_ONLY_SCOPES = [
+  ['method', 'experimental method'],
+  ['max_resolution', 'resolution'],
+] as const;
+
+/**
+ * Why a scope matched nothing, and the next move: the computed-model advice when
+ * a method or resolution scope emptied a predicted profile, otherwise the scope's
+ * own advice, plus the one-word organism advice when that scope was set.
+ */
+function zeroMatchNotice(input: {
+  content_type: keyof typeof ZERO_MATCH_NOTICE;
+  max_resolution?: number | undefined;
+  method?: string | undefined;
+  organism?: string | undefined;
+}): string {
+  const experimentalOnly = EXPERIMENTAL_ONLY_SCOPES.filter(
+    ([name]) => input[name] !== undefined && input[name] !== '',
+  );
+  if (input.content_type !== 'predicted' || experimentalOnly.length === 0) {
+    const organism = input.organism ? oneWordOrganismNotice(input.organism) : undefined;
+    const scope = ZERO_MATCH_NOTICE[input.content_type];
+    return organism ? `${scope} ${organism}` : scope;
+  }
+  const many = experimentalOnly.length > 1;
+  const lacking = new Intl.ListFormat('en', { type: 'disjunction' }).format(
+    experimentalOnly.map(([, selects]) => selects),
+  );
+  const named = new Intl.ListFormat('en').format(experimentalOnly.map(([name]) => name));
+  return `No predicted models matched this scope: computed models carry no ${lacking}, so ${named} ${many ? 'match' : 'matches'} nothing under content_type "predicted", and every requested dimension aggregated to nothing. Drop ${many ? 'them' : 'it'}, or set content_type to "experimental" or "all".`;
+}
+
 export const analyzeCollection = tool('protein_analyze_collection', {
   title: 'protein-mcp-server: analyze collection',
   description:
@@ -67,6 +105,14 @@ export const analyzeCollection = tool('protein_analyze_collection', {
       recovery:
         'List each dimension at most once: one dimension for a breakdown, or two distinct dimensions for a cross-tab.',
     },
+    {
+      reason: 'unknown_method',
+      code: JsonRpcErrorCode.InvalidParams,
+      when: 'method is neither one of the 13 RCSB experimental methods nor an accepted alias, so it could only ever match nothing.',
+      recovery:
+        'Pass one of the experimental methods the error lists, in any letter case, or an alias such as cryo-EM, X-ray, or NMR; omit method to profile every method.',
+      thrownBy: 'service',
+    },
   ],
 
   input: z.object({
@@ -81,8 +127,18 @@ export const analyzeCollection = tool('protein_analyze_collection', {
       .string()
       .optional()
       .describe('Optional free-text scope (e.g. "kinase"); omit to profile the whole PDB.'),
-    organism: z.string().optional().describe('Optional source-organism scope.'),
-    method: z.string().optional().describe('Optional experimental-method scope.'),
+    organism: z
+      .string()
+      .optional()
+      .describe(
+        'Optional source-organism scope: a scientific name ("Homo sapiens"), an NCBI common name ("human"), or an NCBI taxon ID ("9606"), in any letter case. Matches that taxon and every taxon under it; a multi-word name also matches scientific names that contain it. A word fragment ("coli") matches nothing.',
+      ),
+    method: z
+      .string()
+      .optional()
+      .describe(
+        `Optional experimental-method scope: ${METHOD_VOCABULARY}. Any other value is rejected.`,
+      ),
     max_resolution: z.coerce
       .number()
       .positive()
@@ -212,7 +268,7 @@ export const analyzeCollection = tool('protein_analyze_collection', {
     if (total === 0) {
       // A scope that matched nothing explains every empty dimension by itself.
       // Stacking the predicted-content caveat on top would misattribute the cause.
-      notices.push(ZERO_MATCH_NOTICE[input.content_type]);
+      notices.push(zeroMatchNotice(input));
     } else if (input.content_type === 'predicted') {
       const blind = input.group_by.filter((d) => EXPERIMENTAL_ONLY_DIMENSIONS.has(d));
       if (blind.length > 0) {

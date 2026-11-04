@@ -1,14 +1,17 @@
 /**
- * @fileoverview Tests for parseJson — the HTML-error-page / empty-body guard that
- * keeps an HTML rate-limit page or a blank response from reaching JSON.parse.
- * Asserts the transient-vs-permanent error classification each branch produces.
+ * @fileoverview Tests for the shared HTTP layer: parseJson — the
+ * HTML-error-page / empty-body guard that keeps an HTML rate-limit page or a
+ * blank response from reaching JSON.parse, with the transient-vs-permanent
+ * error classification each branch produces — fetchJson's empty-body handling,
+ * and the bounded text reads (streamText, fetchTextWindow) that stop a download
+ * once the caller holds what it needs.
  * @module tests/services/shared/http.test
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fetchJson, parseJson } from '@/services/shared/http.js';
+import { fetchJson, fetchTextWindow, parseJson, streamText } from '@/services/shared/http.js';
 
 describe('parseJson', () => {
   it('parses a well-formed JSON object', () => {
@@ -98,5 +101,152 @@ describe('fetchJson — onEmptyBody (204 / empty search response)', () => {
         maxRetries: 0,
       }),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
+  });
+});
+
+describe('bounded text reads', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const FILE_URL = 'https://files.test/download/1ABC.cif';
+  const READ = { operation: 'test', label: 'Coordinate file', maxRetries: 0 };
+
+  /**
+   * A body of `bytes` served in `chunkSize` pieces with no read-ahead, recording
+   * how many bytes the reader pulled and whether it cancelled the rest.
+   */
+  function trackedBody(bytes: Uint8Array, chunkSize: number) {
+    const state = { pulled: 0, cancelled: false };
+    const stream = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          if (state.pulled >= bytes.length) {
+            controller.close();
+            return;
+          }
+          const chunk = bytes.slice(state.pulled, state.pulled + chunkSize);
+          state.pulled += chunk.length;
+          controller.enqueue(chunk);
+        },
+        cancel() {
+          state.cancelled = true;
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    return { stream, state };
+  }
+
+  /** Serve `body` for the file host only; any other host is an unrouted request. */
+  function serve(body: ReadableStream<Uint8Array> | string, status = 200) {
+    return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.hostname !== 'files.test') throw new Error(`Unrouted request: ${url.href}`);
+      return new Response(body, { status });
+    });
+  }
+
+  const encode = (text: string) => new TextEncoder().encode(text);
+  /** Distinct characters at every position, so a misplaced slice cannot pass. */
+  const sample = (length: number) =>
+    Array.from({ length }, (_, i) => String.fromCharCode(33 + (i % 90))).join('');
+
+  it('returns the window and stops reading one character past it', async () => {
+    const text = sample(1_000_000);
+    const body = trackedBody(encode(text), 1_000);
+    serve(body.stream);
+    const window = await fetchTextWindow(FILE_URL, createMockContext(), {
+      ...READ,
+      offset: 48_000,
+      length: 24_000,
+    });
+
+    expect(window).toEqual({ more: true, text: text.slice(48_000, 72_000) });
+    expect(body.state.cancelled).toBe(true);
+    // Downloaded through the chunk holding character 72,001, plus at most one
+    // chunk the fetch layer's pass-through pulls ahead.
+    expect(body.state.pulled).toBeGreaterThanOrEqual(72_001);
+    expect(body.state.pulled).toBeLessThanOrEqual(72_001 + 2 * 1_000);
+  });
+
+  it('returns a final short window with the body length, reading to the end', async () => {
+    const text = sample(69_506);
+    const body = trackedBody(encode(text), 4_096);
+    serve(body.stream);
+    const window = await fetchTextWindow(FILE_URL, createMockContext(), {
+      ...READ,
+      offset: 48_000,
+      length: 24_000,
+    });
+
+    expect(window).toEqual({ more: false, text: text.slice(48_000), totalLength: 69_506 });
+    expect(body.state.pulled).toBe(69_506);
+  });
+
+  it('reports a body exactly the window long as complete, not continuing', async () => {
+    const text = sample(24_000);
+    serve(text);
+    const window = await fetchTextWindow(FILE_URL, createMockContext(), {
+      ...READ,
+      offset: 0,
+      length: 24_000,
+    });
+    expect(window).toEqual({ more: false, text, totalLength: 24_000 });
+  });
+
+  it.each([69_506, 90_000])(
+    'returns no text and the body length at offset %i, at or past the end',
+    async (offset) => {
+      serve(sample(69_506));
+      const window = await fetchTextWindow(FILE_URL, createMockContext(), {
+        ...READ,
+        offset,
+        length: 24_000,
+      });
+      expect(window).toEqual({ more: false, text: '', totalLength: 69_506 });
+    },
+  );
+
+  it('decodes a multi-byte character split across chunks intact', async () => {
+    // "Å" is two bytes in UTF-8; a 3-byte chunk size splits it.
+    const text = 'Resolution 1.5 Å\nÅÅÅ end';
+    serve(trackedBody(encode(text), 3).stream);
+    const window = await fetchTextWindow(FILE_URL, createMockContext(), {
+      ...READ,
+      offset: 0,
+      length: 1_000,
+    });
+    expect(window).toEqual({ more: false, text, totalLength: text.length });
+  });
+
+  it('throws the status-mapped error for a non-2xx file without reading a body', async () => {
+    const fetchSpy = serve('missing', 404);
+    await expect(
+      fetchTextWindow(FILE_URL, createMockContext(), { ...READ, offset: 0, length: 10 }),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCode.NotFound });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('streamText cancels the body as soon as the consumer stops, and reads to the end otherwise', async () => {
+    const text = sample(50_000);
+    const stopped = trackedBody(encode(text), 1_000);
+    serve(stopped.stream);
+    let seen = 0;
+    await streamText(FILE_URL, createMockContext(), READ, (chunk) => {
+      seen += chunk.length;
+      return seen < 5_000;
+    });
+    expect(stopped.state.cancelled).toBe(true);
+    expect(stopped.state.pulled).toBeLessThanOrEqual(5_000 + 2 * 1_000);
+
+    vi.restoreAllMocks();
+    const whole = trackedBody(encode(text), 1_000);
+    serve(whole.stream);
+    const parts: string[] = [];
+    await streamText(FILE_URL, createMockContext(), READ, (chunk) => {
+      parts.push(chunk);
+      return true;
+    });
+    expect(parts.join('')).toBe(text);
+    expect(whole.state.cancelled).toBe(false);
   });
 });
