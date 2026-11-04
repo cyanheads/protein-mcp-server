@@ -1,0 +1,35 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "protein-mcp-server",
+  "version": "0.8.7",
+  "description": "Federated protein structure & annotation across experimental (PDB) and predicted (AlphaFold) models via MCP. STDIO or Streamable HTTP.",
+  "author": {
+    "name": "Casey Hand",
+    "email": "casey@caseyjhand.com",
+    "url": "https://caseyjhand.com"
+  },
+  "homepage": "https://github.com/cyanheads/protein-mcp-server#readme",
+  "repository": "https://github.com/cyanheads/protein-mcp-server",
+  "license": "Apache-2.0",
+  "keywords": [
+    "protein",
+    "protein-structure",
+    "structural-biology",
+    "pdb",
+    "alphafold",
+    "uniprot",
+    "interpro",
+    "foldseek",
+    "rcsb",
+    "bioinformatics",
+    "drug-discovery",
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "typescript",
+    "bun",
+    "stdio",
+    "streamable-http",
+    "ai-agent"
+  ]
+}
