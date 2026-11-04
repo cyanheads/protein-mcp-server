@@ -1,6 +1,6 @@
 # protein-mcp-server - Directory Structure
 
-Generated on: 2026-10-16 15:32:24
+Generated on: 2026-11-04 03:28:21
 
 ```text
 protein-mcp-server/
@@ -32,6 +32,7 @@ protein-mcp-server/
 │   ├── 0.6.x/
 │   ├── 0.7.x/
 │   ├── 0.8.x/
+│   ├── 0.9.x/
 │   └── template.md
 ├── docs/
 │   ├── design.md
@@ -44,6 +45,8 @@ protein-mcp-server/
 │   ├── add-resource/
 │   │   └── SKILL.md
 │   ├── add-service/
+│   │   └── SKILL.md
+│   ├── add-skill/
 │   │   └── SKILL.md
 │   ├── add-test/
 │   │   └── SKILL.md
@@ -141,6 +144,9 @@ protein-mcp-server/
 │   ├── prune-musl-packages.ts
 │   ├── release-github.ts
 │   └── tree.ts
+├── skills/
+│   └── protein-guide/
+│       └── SKILL.md
 ├── src/
 │   ├── config/
 │   │   └── server-config.ts
@@ -179,9 +185,11 @@ protein-mcp-server/
 │   │   ├── shared/
 │   │   │   ├── async.ts
 │   │   │   ├── attribution.ts
+│   │   │   ├── call-budget.ts
 │   │   │   ├── http.ts
 │   │   │   ├── identifiers.ts
-│   │   │   └── protein-sequence.ts
+│   │   │   ├── protein-sequence.ts
+│   │   │   └── text-budget.ts
 │   │   └── uniprot/
 │   │       └── uniprot-service.ts
 │   └── index.ts
@@ -193,6 +201,8 @@ protein-mcp-server/
 │   ├── resources/
 │   │   ├── af-summary.resource.test.ts
 │   │   └── pdb-summary.resource.test.ts
+│   ├── scripts/
+│   │   └── clean-mcpb.test.ts
 │   ├── services/
 │   │   ├── alignment/
 │   │   │   └── alignment-service.test.ts
@@ -208,8 +218,10 @@ protein-mcp-server/
 │   │   │   └── rcsb-service.test.ts
 │   │   ├── shared/
 │   │   │   ├── async.test.ts
+│   │   │   ├── call-budget.test.ts
 │   │   │   ├── http.test.ts
-│   │   │   └── identifiers.test.ts
+│   │   │   ├── identifiers.test.ts
+│   │   │   └── text-budget.test.ts
 │   │   └── uniprot/
 │   │       └── uniprot-service.test.ts
 │   └── tools/
@@ -239,7 +251,9 @@ protein-mcp-server/
 ├── Dockerfile
 ├── LICENSE
 ├── manifest.json
+├── mcp.json
 ├── package.json
+├── plugin.json
 ├── README.md
 ├── server.json
 ├── tsconfig.build.json

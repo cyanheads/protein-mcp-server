@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.9.0](changelog/0.9.x/0.9.0.md) — 2026-11-03 · ⚠️ Breaking · 🛡️ Security
+
+Source organisms are now lists, Foldseek hits and sequence hits carry alignments, and best_available, isoforms, merged accessions, InterPro paging, and coordinate windows are corrected. Ships the protein-guide skill; three call shapes are newly rejected.
+
 ## [0.8.7](changelog/0.8.x/0.8.7.md) — 2026-10-16
 
 Reach the full annotation set with independent class paging and source-preserved variant and domain records.

@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "protein-mcp-server",
-  "version": "0.8.7",
+  "version": "0.9.0",
   "description": "Federated protein structure & annotation across experimental (PDB) and predicted (AlphaFold) models via MCP. STDIO or Streamable HTTP.",
   "author": {
     "name": "Casey Hand",
