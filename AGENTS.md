@@ -2,9 +2,9 @@
 
 **Server:** protein-mcp-server
 **Version:** 0.8.7
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.15`
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
 **Engines:** Bun ≥1.4.0, Node ≥24.0.0
-**MCP SDK:** `@modelcontextprotocol/server` ^2.3.1
+**MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
 **Zod:** ^4.6.7
 **TypeScript:** ^7.0.2
 
@@ -67,6 +67,12 @@ export const getAnnotations = tool('protein_get_annotations', {
       when: 'A supplied PDB ID resolved to no usable UniProt cross-reference.',
       recovery: 'Pass a UniProt accession directly, or use protein_search_structures to find a modeled protein chain.',
     },
+    {
+      reason: 'accession_not_found',
+      code: JsonRpcErrorCode.NotFound,
+      when: 'UniProtKB has no entry for a well-formed accession.',
+      recovery: 'Check the accession for a typo, or supply pdb_id for a structure of the protein instead.',
+    },
   ],
   input: z.object({
     uniprot: z.string().optional().describe('UniProt accession (e.g. P69905). Takes precedence over pdb_id.'),
@@ -88,7 +94,9 @@ export const getAnnotations = tool('protein_get_annotations', {
     if (!accession || !isUniProtAccession(accession)) {
       throw ctx.fail('no_uniprot_mapping', 'Provide a UniProt accession, or a PDB ID with a modeled protein chain.');
     }
+    // getEntry() returns null when UniProtKB has no entry for the accession.
     const entry = await getUniProtService().getEntry(accession, input.include, ctx);
+    if (!entry) throw ctx.fail('accession_not_found', `UniProtKB has no entry for ${accession}.`);
     return { accession: entry.accession, geneNames: entry.geneNames };
   },
 
@@ -173,14 +181,15 @@ await createApp({
   tools: [/* … */],
   resources: [pdbSummaryResource, afSummaryResource],
   prompts: [],
+  skills: 'skills',                // serves root skills/ (protein-guide) over MCP
   landing: { requireAuth: false }, // public, keyless data server
   sessionMode: 'stateless',        // no tool gates on ctx.requestInput
-  instructions: 'Find structures with protein_search_structures, then pass the returned IDs to protein_get_structure … A PDB ID also chains into … A Foldseek search or structural alignment still running … re-call with it to resume that job rather than resubmitting.',
+  instructions: 'Find structures with protein_search_structures, then pass the returned IDs to protein_get_structure … A PDB ID also chains into … A Foldseek search or structural alignment still running … re-call with it to resume that job rather than resubmitting. The protein-guide skill (skill://protein-guide/SKILL.md) carries the identifier forms each tool takes, author versus label chain IDs, residue numbering, and the gates for reading best_available picks, sequence and Foldseek hits, ligand counts, and PDB profiles.',
   setup(core) { /* init the six provider services */ },
 });
 ```
 
-`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. Write it as two to three cohesive sentences in one string literal, addressed to the calling agent: here, where a workflow starts (search, then `protein_get_structure`), what a PDB ID chains into, and how an async job resumes. Skip a per-tool inventory — the catalog already carries one — and keep operator configuration (base URLs, tuning limits) in the README and `.env.example`, where the agent cannot act on it anyway. Client adoption is uneven, but there's no downside when set.
+`instructions` is optional server-level orientation, sent on every `initialize` as session-level context. Write it as a few cohesive sentences in one string literal, addressed to the calling agent: here, where a workflow starts (search, then `protein_get_structure`), what a PDB ID chains into, how an async job resumes, and where the published `protein-guide` skill lives. Skip a per-tool inventory — the catalog already carries one — and keep operator configuration (base URLs, tuning limits) in the README and `.env.example`, where the agent cannot act on it anyway. Client adoption is uneven, but there's no downside when set.
 
 ### Session posture and shutdown
 
@@ -215,7 +224,7 @@ Handlers throw — the framework catches, classifies, and formats.
 
 **Recommended: typed error contract.** Declare `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` on `tool()` / `resource()` to receive `ctx.fail(reason, …)` typed against the reason union. TypeScript catches typos at compile time, `data.reason` is auto-populated for observability, linter enforces conformance against the handler body. `recovery` is required (≥ 5 words, lint-validated) — the single source of truth for the agent's next move. The framework puts it on the wire whenever a failure carrying that `reason` arrives without a hint — a bare `ctx.fail('reason')` or a service throw with `data: { reason }` — as `data.recovery.hint`, mirrored into `content[]` text unless the message already contains it verbatim; override with an explicit `{ recovery: { hint: '...' } }` when dynamic runtime context matters. Every error envelope also carries `data.requestId`, the id the server's log records for that call carry, and `content[]` closes with `(reason … · request <id>)`. Mark an entry the service layer throws with `thrownBy: 'service'` so `error-contract-unthrown` skips it — lint-only metadata, nothing at runtime reads it. Baseline codes (`InternalError`, `ServiceUnavailable`, `Timeout`, `ValidationError`, `SerializationError`, `RequestCancelled`) bubble freely and don't need declaring.
 
-`error-contract-unthrown` reads only the handler body, so a failure in a module-level helper is invisible to it. `protein_find_similar` throws every declared reason from helpers (the mode guard, sequence validation, the sequence/coordinate resolvers, `runStructure`), so its entries carry `thrownBy: 'service'`; the helpers pass no recovery — the framework attaches the declared one. Both RCSB sequence-search tools declare `invalid_sequence` for the shared sequence validator.
+`error-contract-unthrown` reads only the handler body, so a failure in a module-level helper is invisible to it. `protein_find_similar` throws every declared reason from helpers (the mode guard, the accession shape check, sequence validation, the sequence/coordinate resolvers, the bounded coordinate download, `runStructure`), so its entries carry `thrownBy: 'service'`; helpers pass a `recovery.hint` only where the message needs runtime context (the author chain list, the ticket's query count, the `by: structure` identifier hint), and the framework attaches the declared one otherwise. Both RCSB sequence-search tools declare `invalid_sequence` for the shared sequence validator.
 
 ```ts
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
@@ -259,7 +268,7 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ```text
 src/
-  index.ts                              # createApp() entry point — registers 7 tools + 2 resources, inits 6 services
+  index.ts                              # createApp() entry point — registers 7 tools + 2 resources, serves skills/, inits 6 services
   config/
     server-config.ts                    # Server-specific env vars (Zod schema) — provider base URLs + tuning limits, all optional
   services/
@@ -269,13 +278,15 @@ src/
     uniprot/                           # UniProt features/variants + InterPro domains/GO terms
     alignment/                         # RCSB Structural Comparison (TM-align / jFATCAT) async jobs
     foldseek/                          # Foldseek fold-similarity async search
-    shared/                            # http.ts, async.ts (mapWithConcurrency), identifiers.ts (PDB/UniProt ID checks)
+    shared/                            # http.ts, async.ts (mapWithConcurrency), identifiers.ts (PDB/UniProt ID checks), call-budget.ts (withCallBudget: one 50 s budget per call), text-budget.ts (TextBudget: several reads held under one shared character budget)
   mcp-server/
     tools/definitions/
       *.tool.ts                        # 7 tool definitions + _schemas.ts (shared facet schema/render) + index.ts barrel
     resources/definitions/
       pdb-summary.resource.ts          # pdb://{entry_id}
       af-summary.resource.ts           # af://{uniprot}
+skills/
+  protein-guide/SKILL.md                # Published agent skill — identifier chains and gates; served as skill://protein-guide/SKILL.md
 ```
 
 ---
@@ -293,9 +304,18 @@ src/
 
 ## Skills
 
-Skills are modular instructions in `framework-skills/` at the project root. Read them directly when a task matches — e.g., `framework-skills/add-tool/SKILL.md` when adding a tool. `bun run list-skills` prints the full registry. The directory is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, so a server that ships `.claude-plugin/` or `.codex-plugin/` would hand these development skills to every agent that installs it. Keep `skills/` free for skills meant for those agents.
+Two skill trees live at the project root, written for different readers:
 
-**Agent skill directory:** Copy skills into the directory your agent discovers (Claude Code: `.claude/skills/`, others: equivalent). Skills then load as context without referencing `framework-skills/` paths. After framework updates, run the `maintenance` skill — Phase B re-syncs the agent directory.
+| Tree | For | Written by |
+|:-----|:----|:-----------|
+| `framework-skills/` | The agent developing this server — framework skills (`metadata.audience: external`) plus any development-time skills of the server's own | `init` and the `maintenance` sync (framework skills); you (your own) |
+| `skills/` | The agents that install the server and call its tools — tool chains, identifier sources, gates | You, deliberately, with the `add-skill` skill. Absent by default; usually none is needed |
+
+Development skills are modular instructions. Read them directly when a task matches — e.g., `framework-skills/add-tool/SKILL.md` when adding a tool. `bun run list-skills` prints the full registry. Their directory is deliberately not `skills/`: Claude Code and Codex auto-load a plugin's root `skills/`, so a server that ships `.claude-plugin/` or `.codex-plugin/` would hand them to every agent that installs it.
+
+A published skill in root `skills/` reaches plugin installs and the `.mcpb` bundle as-is, ships in the npm package and the Docker image, and reaches MCP clients when the server opts in with `createApp({ skills: 'skills' })`. `lint:packaging` validates the tree.
+
+**Agent skill directory:** Copy `framework-skills/` into the directory your agent discovers (Claude Code: `.claude/skills/`, others: equivalent). Skills then load as context without referencing `framework-skills/` paths. After framework updates, run the `maintenance` skill — Phase B re-syncs the agent directory.
 
 Available skills:
 
@@ -307,6 +327,7 @@ Available skills:
 | `add-app-tool` | Scaffold an MCP App tool + paired UI resource |
 | `add-resource` | Scaffold a new resource definition |
 | `add-prompt` | Scaffold a new prompt definition |
+| `add-skill` | Author a skill the server publishes in root `skills/` for the agents that use it — when one earns its place, structure, validation, delivery |
 | `add-service` | Scaffold a new service integration |
 | `add-test` | Scaffold test file for a tool, resource, or service |
 | `field-test` | Exercise tools/resources/prompts with real inputs, verify behavior, report issues |
@@ -354,7 +375,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 | `bun run audit:fix` | `bun audit fix` — upgrade vulnerable packages to the lowest safe version within existing ranges (`--dry-run` previews, `--latest` rewrites ranges). First response when `devcheck` flags a transitive advisory; then `bun update <name>`, then `bun dedupe` |
 | `bun run audit:refresh` | Delete `bun.lock` and reinstall. Last resort after `audit:fix`, `bun update <name>`, and `bun dedupe` — re-resolves every ranged dep (the framework pin included) and rewrites the lockfile as `lockfileVersion: 2` |
 | `bun run lint:mcp` | Run the MCP definition linter standalone (rule catalog: `api-linter` skill) |
-| `bun run lint:packaging` | Packaging surface checks — `server.json`/`manifest.json` env-var parity (run by devcheck) |
+| `bun run lint:packaging` | Packaging surface checks — `server.json`/`manifest.json` env-var parity, `.mcpbignore` coverage, plugin manifests, the published `skills/` tree (run by devcheck) |
 | `bun run list-skills` | Print the skill registry |
 | `bun run tree` | Generate directory structure doc |
 | `bun run format` | Auto-fix formatting (safe fixes only) |
@@ -372,7 +393,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`bun run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips two classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/`, `SKILL.md`) and platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+`bun run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/` at a package root, and `SKILL.md` files — a nested runtime `skills/` such as the MCP SDK's `dist/ext/skills/` stays); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, `CLAUDE.md`, `AGENTS.md`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 
@@ -439,7 +460,10 @@ import { getMyService } from '@/services/my-domain/my-service.js';
 - [ ] If wrapping external API: tests include at least one sparse payload case with omitted upstream fields
 - [ ] Registered in `createApp()` arrays (directly or via barrel exports)
 - [ ] Tests use `createMockContext()` from `@cyanheads/mcp-ts-core/testing`
+- [ ] `plugin.json` + `mcp.json` (Agent Plugins 1.0.0 — read by Codex, Cursor, GitHub Copilot, VS Code, Kiro) populated — `plugin.json` `name` = the unscoped repo name (lowercase `a-z`, `0-9`, `-`, `.` only); `version`, `description`, `author`, `homepage`, `repository`, `license`, `keywords` from `package.json`; no other top-level field, `extensions` included. `mcp.json` holds one `"type": "stdio"` entry keyed by the unscoped name, `npx -y <full package name>`, and the same fixed `env` as `.codex-plugin/mcp.json`. Neither file carries a user-supplied variable (no `""`, no `${…}` besides `${PLUGIN_ROOT}`/`${PLUGIN_DATA}`): keys reach Codex through `.codex-plugin/mcp.json` `env_vars`, which works only while `.codex-plugin/plugin.json` keeps `"mcpServers": "./.codex-plugin/mcp.json"`
 - [ ] `.codex-plugin/plugin.json` populated — `name`, `version`, `description`, `repository`, `license` from `package.json`; `interface.displayName` = the unscoped repo name (never the npm scope — `lint:packaging` enforces this); `interface.shortDescription` from `package.json` description
 - [ ] `.codex-plugin/mcp.json` updated — server name key is the unscoped repo name; every user-supplied variable (API key, contact email, instance URL) is listed in `env_vars` so Codex forwards it from the user's environment. Never write `"KEY": ""` into `env` — an empty value replaces the user's exported key and is read as unset
 - [ ] `.claude-plugin/plugin.json` populated — `name`, `version`, `description`, `author`, `repository`, `license`, `keywords` from `package.json`; inline `mcpServers` entry keyed by the unscoped repo name. Every user-supplied variable is declared under `userConfig` (`type`, `title`, `description`; `sensitive: true` for keys and tokens; `required: true` or `default: ""`) and referenced from `env` as `"KEY": "${user_config.<option>}"` — mirror the `user_config` block in `manifest.json`. Never write `"KEY": ""` into `env`
+- [ ] Any new root dev path has a root-anchored line in `.mcpbignore`; `bun run bundle` and `lint:packaging` pass
+- [ ] If the server publishes a skill in root `skills/`: `lint:packaging` passes, and `field-test` verified every gate and identifier claim in it against live tool behavior
 - [ ] `npm run devcheck` passes
