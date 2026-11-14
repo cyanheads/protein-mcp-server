@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.9.1](changelog/0.9.x/0.9.1.md) — 2026-11-14
+
+Sequence search under content_type all runs per universe, best_available confirms PDB entries against PDBe SIFTS, protein_compare_structures and other long calls stop inside a 50 s budget, chain-ID lists cap at 100 per entity, and binding_site misses name what the entry holds.
+
 ## [0.9.0](changelog/0.9.x/0.9.0.md) — 2026-11-03 · ⚠️ Breaking · 🛡️ Security
 
 Source organisms are now lists, Foldseek hits and sequence hits carry alignments, and best_available, isoforms, merged accessions, InterPro paging, and coordinate windows are corrected. Ships the protein-guide skill; three call shapes are newly rejected.

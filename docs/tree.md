@@ -1,6 +1,6 @@
 # protein-mcp-server - Directory Structure
 
-Generated on: 2026-11-04 03:28:21
+Generated on: 2026-11-14 20:18:55
 
 ```text
 protein-mcp-server/
@@ -178,6 +178,8 @@ protein-mcp-server/
 │   │   │   └── beacons-service.ts
 │   │   ├── foldseek/
 │   │   │   └── foldseek-service.ts
+│   │   ├── pdbe/
+│   │   │   └── pdbe-service.ts
 │   │   ├── rcsb/
 │   │   │   ├── facets.ts
 │   │   │   ├── rcsb-service.ts
@@ -212,6 +214,8 @@ protein-mcp-server/
 │   │   │   └── beacons-service.test.ts
 │   │   ├── foldseek/
 │   │   │   └── foldseek-service.test.ts
+│   │   ├── pdbe/
+│   │   │   └── pdbe-service.test.ts
 │   │   ├── rcsb/
 │   │   │   ├── facets.test.ts
 │   │   │   ├── rcsb-normalizers.test.ts
