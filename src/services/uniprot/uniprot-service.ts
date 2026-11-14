@@ -3,10 +3,11 @@
  * function, variants, accession status) and the InterPro REST API (domain/family
  * memberships across Pfam, PROSITE, … with GO terms). Backs
  * `protein_get_annotations`, and decides accession status for every surface
- * keyed by a UniProt accession: UniProt redirects a merged accession to its
- * successor, answers a demerged or deleted one with an `Inactive` entry, and
- * 404s one it never assigned. Field selection trims UniProt payloads to what the
- * requested `include` scope needs.
+ * keyed by a UniProt accession: UniProt answers a merged accession, and an entry
+ * name, with a 303 naming the live entry (read here, never followed), answers a
+ * demerged or deleted one with an `Inactive` entry, and 404s one it never
+ * assigned. Field selection trims UniProt payloads to what the requested
+ * `include` scope needs.
  * @module services/uniprot/uniprot-service
  */
 
@@ -21,7 +22,7 @@ import {
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import type { ServerConfig } from '@/config/server-config.js';
 import { fetchJson } from '../shared/http.js';
-import { isUniProtEntryName } from '../shared/identifiers.js';
+import { isPredictionAccession, isUniProtEntryName } from '../shared/identifiers.js';
 
 /** Which annotation classes to fetch. */
 export type AnnotationInclude = 'features' | 'domains' | 'variants' | 'all';
@@ -84,7 +85,7 @@ export interface InactiveAccession {
  * UniProt's verdict on an accession, from one lightweight lookup:
  * - `active` — a live entry under the requested accession (canonical or isoform),
  *   or the accession of the entry a requested entry name names;
- * - `merged` — UniProt merged it into `successor` and redirects there;
+ * - `merged` — UniProt merged it into `successor`, which its 303 names;
  * - `inactive` — demerged or deleted, with its replacements;
  * - `unknown` — UniProt has no entry (never assigned, or an isoform number the
  *   entry lacks).
@@ -173,10 +174,15 @@ const INTERPRO_PAGE_SIZE = 200;
 /** Ceiling on InterPro pages per walk (1,000 memberships). */
 const MAX_INTERPRO_PAGES = 5;
 
-/** One UniProtKB entry request, classified; `raw` rides only on an active answer. */
+/**
+ * One UniProtKB entry request, classified. `raw` rides only on an entry UniProt
+ * served; a `redirect` is a 303 read rather than followed, whose `target` names
+ * the live entry by accession without serving it.
+ */
 type EntryAnswer =
-  | Exclude<AccessionStatus, { kind: 'active' }>
-  | { kind: 'active'; accession: string; raw: RawUniProtEntry };
+  | Exclude<AccessionStatus, { kind: 'active' | 'merged' }>
+  | { kind: 'active'; accession: string; raw: RawUniProtEntry }
+  | { kind: 'redirect'; accession: string; target: string };
 
 export class UniProtService {
   private readonly uniprotBase: string;
@@ -242,7 +248,14 @@ export class UniProtService {
       'UniProtService.resolveAccession',
       ctx,
     );
-    return answer.kind === 'active' ? { kind: 'active', accession: answer.accession } : answer;
+    switch (answer.kind) {
+      case 'active':
+        return { kind: 'active', accession: answer.accession };
+      case 'redirect':
+        return redirectStatus(answer);
+      default:
+        return answer;
+    }
   }
 
   /**
@@ -325,10 +338,11 @@ export class UniProtService {
   }
 
   /**
-   * The live entry behind an accession: a merge is followed to the successor,
-   * which is requested again with `fields` because UniProt's redirect drops them.
-   * Throws `inactive_accession` for a demerged or deleted accession; `null` when
-   * UniProt has no entry.
+   * The live entry behind an accession or entry name. A 303 names that entry
+   * without serving it, so its target is requested once, with `fields`;
+   * `mergedFrom` is set only when the 303 was a merge. Throws
+   * `inactive_accession` for a demerged or deleted accession; `null` when UniProt
+   * has no entry.
    */
   private async liveEntry(
     accession: string,
@@ -338,27 +352,36 @@ export class UniProtService {
   ): Promise<{ accession: string; raw: RawUniProtEntry; mergedFrom?: string } | null> {
     const first = await this.request(accession, fields, operation, ctx);
     const answer =
-      first.kind === 'merged' ? await this.request(first.successor, fields, operation, ctx) : first;
+      first.kind === 'redirect' ? await this.request(first.target, fields, operation, ctx) : first;
     switch (answer.kind) {
-      case 'active':
+      case 'active': {
+        const status = first.kind === 'redirect' ? redirectStatus(first) : undefined;
         return {
           accession: answer.accession,
           raw: answer.raw,
-          ...(first.kind === 'merged' ? { mergedFrom: first.accession } : {}),
+          ...(status?.kind === 'merged' ? { mergedFrom: status.accession } : {}),
         };
+      }
       case 'inactive':
         throw inactiveAccessionError(answer);
       case 'unknown':
         return null;
-      case 'merged':
-        // UniProt redirects a merged accession straight to the live entry.
+      case 'redirect':
+        // UniProt redirects straight to the live entry, so its target never redirects again.
         throw serviceUnavailable(
-          `UniProt redirected ${first.accession} to ${answer.accession}, which redirects again to ${answer.successor}.`,
+          `UniProt redirected ${first.accession} to ${answer.accession}, which redirects again to ${answer.target}.`,
         );
     }
   }
 
-  /** One UniProtKB entry request, classified by UniProt's verdict on the accession. */
+  /**
+   * One UniProtKB entry request, classified by UniProt's verdict on the accession.
+   * Redirects are read, never followed: UniProt answers a merged accession and an
+   * entry name with a 303 whose `Location` names the live entry, and following it
+   * would download that whole entry with `fields` dropped. The 303 is classified
+   * by its status and `Location` alone, since its body reads a merged accession
+   * as `Inactive`.
+   */
   private async request(
     accession: string,
     fields: readonly string[],
@@ -373,12 +396,23 @@ export class UniProtService {
         operation,
         label: 'UniProt',
         baseDelayMs: 400,
-        expectedStatuses: [404],
+        expectedStatuses: [303, 404],
+        redirect: 'manual',
+        errorHeaders: ['location'],
       });
     } catch (err) {
-      // UniProt 404s an accession it never assigned, and an isoform number the entry lacks.
-      if (err instanceof McpError && err.code === JsonRpcErrorCode.NotFound) {
-        return { kind: 'unknown', accession: requested };
+      if (err instanceof McpError) {
+        // UniProt 404s an accession it never assigned, and an isoform number the entry lacks.
+        if (err.code === JsonRpcErrorCode.NotFound) {
+          return { kind: 'unknown', accession: requested };
+        }
+        if (err.data?.status === 303) {
+          return {
+            kind: 'redirect',
+            accession: requested,
+            target: this.redirectTarget(requested, err),
+          };
+        }
       }
       throw err;
     }
@@ -392,15 +426,41 @@ export class UniProtService {
         replacements: why?.mergeDemergeTo ?? [],
       };
     }
-    // UniProt answers a merged accession with a 303 to its successor, which fetch
-    // follows (dropping `fields`), so the entry that arrives names the successor.
-    // An entry name always differs from the accession of the entry it names.
-    const primary = raw.primaryAccession?.toUpperCase();
-    if (primary && primary !== requested && !isUniProtEntryName(requested)) {
-      return { kind: 'merged', accession: requested, successor: primary };
-    }
-    return { kind: 'active', accession: primary ?? requested, raw };
+    return { kind: 'active', accession: raw.primaryAccession?.toUpperCase() ?? requested, raw };
   }
+
+  /**
+   * The accession an unfollowed 303's `Location` names
+   * (`/uniprotkb/P69905?from=Q1HDT5` → `P69905`). A 303 that names no UniProtKB
+   * entry cannot be classified, so it fails as an outage.
+   */
+  private redirectTarget(requested: string, redirect: McpError): string {
+    const headers = redirect.data?.headers;
+    const location =
+      typeof headers === 'object' && headers !== null && 'location' in headers
+        ? headers.location
+        : undefined;
+    const target =
+      typeof location === 'string'
+        ? /\/uniprotkb\/([^/]+)$/.exec(URL.parse(location, this.uniprotBase)?.pathname ?? '')?.[1]
+        : undefined;
+    if (!target || !isPredictionAccession(target)) {
+      throw serviceUnavailable(
+        `UniProt answered ${requested} with a redirect that names no UniProtKB entry.`,
+      );
+    }
+    return target.toUpperCase();
+  }
+}
+
+/**
+ * UniProt's verdict on a 303: a merge into `target` for an accession, but for an
+ * entry name (`HBA_HUMAN`) only the accession of the entry it names.
+ */
+function redirectStatus(redirect: Extract<EntryAnswer, { kind: 'redirect' }>): AccessionStatus {
+  return isUniProtEntryName(redirect.accession)
+    ? { kind: 'active', accession: redirect.target }
+    : { kind: 'merged', accession: redirect.accession, successor: redirect.target };
 }
 
 /** One sentence naming an inactive accession, its reason, and its replacements or their absence. */

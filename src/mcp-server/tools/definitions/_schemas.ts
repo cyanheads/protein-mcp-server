@@ -8,17 +8,24 @@
  * position also reports its coverage gap, so buckets that sum to less than the
  * stated total say so. Also holds the entry-level polymer-entity and ligand
  * schemas shared by `protein_get_structure` and the `pdb://{entry_id}` resource,
- * so tool and resource representations of the same record stay identical, the
- * matched-entity organism lookup and the alignment line the two
- * similarity-search tools share, and the one-word organism advice the two
+ * and the projection that counts a polymer entity's chains (and caps its chain
+ * lists for the tool), so tool and resource representations of the same record
+ * stay identical, the matched-entity organism lookup and the alignment line the
+ * two similarity-search tools share, and the one-word organism advice the two
  * organism-filtered tools add to a zero-match notice.
  * @module mcp-server/tools/definitions/_schemas
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
 import { escapeMarkdownInline } from '@cyanheads/mcp-ts-core/utils';
+import { MAX_FACET_BUCKETS } from '@/config/server-config.js';
 import { organismForm } from '@/services/rcsb/rcsb-service.js';
-import type { ContentType, EntryMeta, FacetDimension } from '@/services/rcsb/types.js';
+import type {
+  ContentType,
+  EntryMeta,
+  FacetDimension,
+  PolymerEntityMeta,
+} from '@/services/rcsb/types.js';
 
 /**
  * The agent-facing `content_type` scope → the RCSB content universes it selects.
@@ -350,7 +357,9 @@ export function coverageNotices(facets: FacetDimensionOutput[], total: number): 
  * A single fragment naming one dimension would misstate all three cases.
  *
  * The list closes with the cap itself and the way past it, so a caller reading
- * only `notice` has the recovery without re-deriving it per position.
+ * only `notice` has the recovery without re-deriving it per position. At the
+ * {@link MAX_FACET_BUCKETS} ceiling a higher `bucket_limit` is no way past it,
+ * so only scoping is offered.
  */
 export function truncationNotices(facets: FacetDimensionOutput[], cap: number): string[] {
   const notices: string[] = [];
@@ -379,7 +388,9 @@ export function truncationNotices(facets: FacetDimensionOutput[], cap: number): 
   }
   if (notices.length === 0) return [];
   notices.push(
-    `Each dimension level is capped at ${cap} buckets independently; raise bucket_limit (up to 500) or scope the query tighter to reach the long tail.`,
+    cap < MAX_FACET_BUCKETS
+      ? `Each dimension level is capped at ${cap} buckets independently; raise bucket_limit (up to ${MAX_FACET_BUCKETS}) or scope the query tighter to reach the long tail.`
+      : `Each dimension level is capped at ${cap} buckets independently, the most bucket_limit allows; scope the query tighter to reach the long tail.`,
   );
   return notices;
 }
@@ -442,17 +453,46 @@ export const polymerEntitySchema = z
       .array(z.string())
       .optional()
       .describe(
-        'Author-assigned chain IDs (auth_asym_id, e.g. ["A","C"]) — the namespace protein_get_annotations.chain takes. Omitted when upstream does not report them.',
+        'Author-assigned chain IDs (auth_asym_id, e.g. ["A","C"]) — the namespace protein_get_annotations.chain takes. Every chain on pdb://{entry_id}; on protein_get_structure the first 100, in RCSB order, unless all_chains is set. Omitted when upstream does not report them.',
       ),
     labelAsymIds: z
       .array(z.string())
       .optional()
       .describe(
-        'mmCIF label_asym_id chain IDs (e.g. ["I","OB"]) — the namespace protein_compare_structures.chain takes. Not derivable from authAsymIds: for 6QNR_9 the label chains are I/OB against author chains 82/8E. Omitted when upstream does not report them.',
+        'mmCIF label_asym_id chain IDs (e.g. ["I","OB"]) — the namespace protein_compare_structures.chain takes. Not derivable from authAsymIds: for 6QNR_9 the label chains are I/OB against author chains 82/8E. Every chain on pdb://{entry_id}; on protein_get_structure the first 100, in RCSB order, unless all_chains is set. Omitted when upstream does not report them.',
+      ),
+    chainCount: z
+      .number()
+      .optional()
+      .describe(
+        "The entity's chain count, one ID per chain in each namespace — more than authAsymIds and labelAsymIds hold when protein_get_structure capped them. Omitted when upstream reports no chain IDs.",
       ),
     sequenceLength: z.number().optional().describe('Residue count of the sample sequence.'),
   })
   .describe('A modeled polymer entity (chain group), with both chain namespaces.');
+
+export type PolymerEntityOutput = z.infer<typeof polymerEntitySchema>;
+
+/**
+ * A polymer entity in its output shape: `chainCount` is the longer of its two
+ * chain-ID lists (each holds one ID per chain), and with `limit` each list keeps
+ * only its first `limit` IDs, in RCSB's order. Returns copies, so the
+ * `EntryMeta` lists other tools read stay complete. An entity upstream reports
+ * no chain IDs for carries neither lists nor a count.
+ */
+export function polymerEntityOutput(
+  entity: PolymerEntityMeta,
+  limit?: number,
+): PolymerEntityOutput {
+  const { authAsymIds, labelAsymIds, ...rest } = entity;
+  const chainCount = Math.max(authAsymIds?.length ?? 0, labelAsymIds?.length ?? 0);
+  return {
+    ...rest,
+    ...(authAsymIds ? { authAsymIds: authAsymIds.slice(0, limit) } : {}),
+    ...(labelAsymIds ? { labelAsymIds: labelAsymIds.slice(0, limit) } : {}),
+    ...(chainCount > 0 ? { chainCount } : {}),
+  };
+}
 
 /**
  * Source organisms of the polymer entity a sequence hit matched. A sequence hit

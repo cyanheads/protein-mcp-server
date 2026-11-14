@@ -4,18 +4,24 @@
  * content_type → content-universe scoping (including the "all" union),
  * computed-model (AlphaFold) ID parsing into a UniProt accession, experimental
  * metadata enrichment, the total/echo/empty-notice enrichment, the capped-facet
- * advisory and its sequence-search variant, the flat facet contract (no
+ * advisory, its sequence-search variant, and its variant for a cap already at
+ * protein_analyze_collection's largest bucket_limit, the flat facet contract (no
  * cross-tab child requested or advertised), the repeated-facet-dimension
  * rejection, the empty-facet-dimension rendering across both consumption
  * surfaces, the unknown_method contract, the ligand filter and its zero-hit
  * pointer, the computed-model notice for experimental-only filters under
- * predicted content, and the per-hit sequence alignment with the query length.
- * The RCSB service instance is mocked; its query builders run for real.
+ * predicted content, the per-hit sequence alignment with the query length, and
+ * the sequence search over both universes: the left-out-universe and hit-ceiling
+ * notices, and — through the real service behind the mock — merged paging,
+ * facets summed before the cap, a failed universe, a universe still searching
+ * at the service's deadline (with the metadata lookup run for real after it),
+ * and cancellation. The RCSB service instance is mocked; its query builders run
+ * for real.
  * @module tests/tools/search-structures.tool.test
  */
 
 import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const search = vi.fn();
 const getEntries = vi.fn();
@@ -25,9 +31,24 @@ vi.mock('@/services/rcsb/rcsb-service.js', async (importOriginal) => ({
   getRcsbService: () => ({ search, getEntries }),
 }));
 
+/** A facet bucket cap a test sets in place of the configured one; undefined keeps the configuration. */
+let facetBucketCapOverride: number | undefined;
+vi.mock('@/config/server-config.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/config/server-config.js')>();
+  return {
+    ...actual,
+    getServerConfig: () => {
+      const config = actual.getServerConfig();
+      return facetBucketCapOverride === undefined
+        ? config
+        : { ...config, facetBucketCap: facetBucketCapOverride };
+    },
+  };
+});
+
 import { getServerConfig } from '@/config/server-config.js';
 import { searchStructures } from '@/mcp-server/tools/definitions/search-structures.tool.js';
-import { buildQuery } from '@/services/rcsb/rcsb-service.js';
+import { buildQuery, RcsbService } from '@/services/rcsb/rcsb-service.js';
 import type { StructureSearchParams } from '@/services/rcsb/types.js';
 
 const ctx = () => createMockContext({ errors: searchStructures.errors });
@@ -918,6 +939,47 @@ describe('protein_search_structures', () => {
     expect(notice).not.toMatch(/bucket_limit/);
   });
 
+  describe('the capped-facet advice against protein_analyze_collection’s largest bucket_limit', () => {
+    afterEach(() => {
+      facetBucketCapOverride = undefined;
+    });
+
+    /** A text search whose organism facet holds one bucket more than `cap`, under that configured cap. */
+    const searchPastCap = async (cap: number) => {
+      facetBucketCapOverride = cap;
+      search.mockResolvedValue({
+        total: cap + 1,
+        hits: [{ id: '4HHB', score: 1 }],
+        facets: [
+          {
+            dimension: 'organism',
+            attribute: 'rcsb_entity_source_organism.ncbi_scientific_name',
+            buckets: Array.from({ length: cap + 1 }, (_, i) => ({ label: `org${i}`, count: 1 })),
+          },
+        ],
+      });
+      getEntries.mockResolvedValue([]);
+      const result = await run({ query: 'kinase', facets: ['organism'] });
+      return [String(result.structuredContent.notice), allText(result)];
+    };
+
+    it('routes a cap below 500 to a larger bucket_limit, on both surfaces', async () => {
+      for (const surface of await searchPastCap(499)) {
+        expect(surface).toContain('organism was capped at 499 buckets.');
+        expect(surface).toContain('a bucket_limit above 499 (up to 500) to reach the long tail');
+      }
+    });
+
+    it('tells a cap already at 500 to narrow the request, on both surfaces', async () => {
+      for (const surface of await searchPastCap(500)) {
+        expect(surface).toContain(
+          "organism was capped at 500 buckets. protein_analyze_collection's bucket_limit also stops at 500, so narrow this request instead: add organism, method, max_resolution, ligand, or query filters",
+        );
+        expect(surface).not.toContain('bucket_limit above');
+      }
+    });
+  });
+
   it('adds no truncation fragment when no requested facet was capped (#52)', async () => {
     search.mockResolvedValue({
       total: 500,
@@ -1365,5 +1427,461 @@ describe('protein_search_structures sequence alignment (#89)', () => {
     expect(text).not.toMatch(/Query length|Identity|E-value|Bit score/);
     expect(text).toContain('**Alignment:** query 5–?');
     expect(text.match(/\*\*Alignment:\*\*/g)).toHaveLength(1);
+  });
+});
+
+describe('protein_search_structures sequence search over both universes (#96)', () => {
+  const SEQUENCE = 'MVLSPADKTNVKAAWGKVGA';
+  // RCSB can keep failing one sequence search across re-calls hours apart, so
+  // the notice offers a re-call without promising it answers.
+  const LEFT_OUT_PREDICTED =
+    'The predicted-model search failed upstream, so hits and totalCount cover experimental structures only. A re-call retries it, but RCSB can keep failing the same sequence search, so the re-call may leave it out again.';
+  const LEFT_OUT_EXPERIMENTAL =
+    'The experimental-structure search failed upstream, so hits and totalCount cover predicted models only. A re-call retries it, but RCSB can keep failing the same sequence search, so the re-call may leave it out again.';
+  const CEILING = 'RCSB stops a sequence search at 2,000 hits';
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  /** Both surfaces' text: the structured notice and every content[] block. */
+  const noticeAndText = (result: ContractResult) => [
+    String(result.structuredContent.notice),
+    allText(result),
+  ];
+
+  describe('notices from the universes the service reports', () => {
+    it('names the universe a failed search left out, on both surfaces', async () => {
+      search.mockResolvedValue({
+        total: 1383,
+        hits: [{ id: '4HHB_1', score: 1, bitscore: 291 }],
+        universes: [
+          { contentType: 'experimental', status: 'answered', total: 1383 },
+          { contentType: 'computational', status: 'failed' },
+        ],
+      });
+      getEntries.mockResolvedValue([]);
+      const result = await run({ sequence: SEQUENCE, limit: 1 });
+      expect(result.structuredContent).toMatchObject({ totalCount: 1383, nextStart: 1 });
+      for (const surface of noticeAndText(result)) expect(surface).toContain(LEFT_OUT_PREDICTED);
+
+      search.mockResolvedValue({
+        total: 925,
+        hits: [{ id: 'AF_AFP69905F1_1', score: 1, bitscore: 291 }],
+        universes: [
+          { contentType: 'experimental', status: 'failed' },
+          { contentType: 'computational', status: 'answered', total: 925 },
+        ],
+      });
+      for (const surface of noticeAndText(await run({ sequence: SEQUENCE, limit: 1 }))) {
+        expect(surface).toContain(LEFT_OUT_EXPERIMENTAL);
+      }
+    });
+
+    it('says only the answered universe matched nothing when the other was left out', async () => {
+      search.mockResolvedValue({
+        total: 0,
+        hits: [],
+        universes: [
+          { contentType: 'experimental', status: 'answered', total: 0 },
+          { contentType: 'computational', status: 'failed' },
+        ],
+      });
+      const result = await run({ sequence: SEQUENCE, organism: 'Zika' });
+      const notice = String(result.structuredContent.notice);
+      expect(notice).toContain(LEFT_OUT_PREDICTED);
+      expect(notice).toContain('No experimental structures matched.');
+      // "all" was not searched in full, so the widest-scope advice would be false.
+      expect(notice).not.toMatch(/either the experimental or computed-model universe/);
+      expect(notice).toContain('organism "Zika" matches only a taxon with exactly that name');
+    });
+
+    const atCeiling = (contentType: string) => ({ contentType, status: 'answered', total: 2000 });
+    it.each([
+      [
+        'an experimental search',
+        'experimental',
+        [atCeiling('experimental')],
+        'experimental-structure search reached',
+      ],
+      [
+        'a predicted search',
+        'predicted',
+        [atCeiling('computational')],
+        'predicted-model search reached',
+      ],
+      [
+        'both universes',
+        'all',
+        [atCeiling('experimental'), atCeiling('computational')],
+        'experimental-structure search and predicted-model search each reached',
+      ],
+    ] as const)(
+      'flags %s at the 2,000-hit ceiling on both surfaces',
+      async (_, scope, universes, named) => {
+        search.mockResolvedValue({
+          total: 2000 * universes.length,
+          hits: [{ id: '1UBQ_1', score: 1 }],
+          universes,
+        });
+        getEntries.mockResolvedValue([]);
+        const result = await run({ sequence: SEQUENCE, content_type: scope, limit: 1 });
+        for (const surface of noticeAndText(result)) {
+          expect(surface).toContain(CEILING);
+          expect(surface).toContain(named);
+          expect(surface).toContain('not a complete count');
+        }
+      },
+    );
+
+    it('names only the universe at the ceiling, and none below it or without a sequence', async () => {
+      search.mockResolvedValue({
+        total: 2635,
+        hits: [{ id: '1UBQ_1', score: 1 }],
+        universes: [
+          { contentType: 'experimental', status: 'answered', total: 2000 },
+          { contentType: 'computational', status: 'answered', total: 635 },
+        ],
+      });
+      getEntries.mockResolvedValue([]);
+      const notice = String((await run({ sequence: SEQUENCE, limit: 1 })).structuredContent.notice);
+      expect(notice).toContain('the experimental-structure search reached it, so its count');
+      expect(notice).not.toContain('predicted-model search');
+
+      search.mockResolvedValue({
+        total: 1999,
+        hits: [{ id: '1UBQ_1', score: 1 }],
+        universes: [
+          { contentType: 'experimental', status: 'answered', total: 1999 },
+          { contentType: 'computational', status: 'answered', total: 0 },
+        ],
+      });
+      expect((await run({ sequence: SEQUENCE, limit: 1 })).structuredContent).not.toHaveProperty(
+        'notice',
+      );
+
+      search.mockResolvedValue({ total: 2000, hits: [{ id: '1UBQ', score: 1 }] });
+      expect((await run({ query: 'ubiquitin', limit: 1 })).structuredContent).not.toHaveProperty(
+        'notice',
+      );
+    });
+  });
+
+  describe('through the real service', () => {
+    const real = new RcsbService(
+      {} as never,
+      {} as never,
+      {
+        rcsbSearchBaseUrl: 'https://search.test',
+        rcsbDataBaseUrl: 'https://data.test',
+        rcsbFilesBaseUrl: 'https://files.test',
+      } as never,
+    );
+    beforeEach(() => {
+      search.mockImplementation((...args: Parameters<RcsbService['search']>) =>
+        real.search(...args),
+      );
+      getEntries.mockResolvedValue([]);
+    });
+
+    type FakeHit = { id: string; bitscore: number };
+    const toRow = (hit: FakeHit) => ({
+      identifier: hit.id,
+      score: 1,
+      services: [
+        {
+          service_type: 'sequence',
+          nodes: [{ match_context: [{ bitscore: hit.bitscore, query_length: 142 }] }],
+        },
+      ],
+    });
+    const contentTypeOf = (init: RequestInit | undefined): string =>
+      JSON.parse(String(init?.body)).request_options.results_content_type.join('+');
+
+    /**
+     * Each universe's own search: hits paged by the request's window, or a status
+     * (with Retry-After 0, so the retry loop runs its attempts without waiting).
+     */
+    const serve = (
+      universes: Record<string, { hits: FakeHit[]; facets?: unknown[] } | { status: number }>,
+    ) =>
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+        const universe = universes[contentTypeOf(init)];
+        if (!universe) return new Response(null, { status: 204 });
+        if ('status' in universe) {
+          return Response.json(
+            { status: universe.status, message: 'upstream failure' },
+            { status: universe.status, headers: { 'Retry-After': '0' } },
+          );
+        }
+        const { start, rows } = JSON.parse(String(init?.body)).request_options.paginate;
+        return Response.json({
+          total_count: universe.hits.length,
+          result_set: universe.hits.slice(start, start + rows).map(toRow),
+          ...(universe.facets ? { facets: universe.facets } : {}),
+        });
+      });
+
+    const EXPERIMENTAL = {
+      hits: [
+        { id: '4HHB_1', bitscore: 291 },
+        { id: '1A3N_1', bitscore: 250 },
+        { id: '2DN2_1', bitscore: 120 },
+      ],
+    };
+    const COMPUTATIONAL = {
+      hits: [
+        { id: 'AF_AFP69905F1_1', bitscore: 291 },
+        { id: 'AF_AFP01942F1_1', bitscore: 200 },
+      ],
+    };
+
+    it('pages the merged hits with summed totals on both surfaces, then past the end', async () => {
+      serve({ experimental: EXPERIMENTAL, computational: COMPUTATIONAL });
+      const result = await run({ sequence: SEQUENCE, start: 1, limit: 2 });
+      expect(result.structuredContent.hits?.map((h) => [h.id, h.source])).toEqual([
+        ['AF_AFP69905F1', 'predicted'],
+        ['1A3N', 'experimental'],
+      ]);
+      expect(result.structuredContent).toMatchObject({ totalCount: 5, start: 1, nextStart: 3 });
+      const text = allText(result);
+      expect(text).toContain('### AF_AFP69905F1 _(predicted)_');
+      expect(text).toContain('### 1A3N _(experimental)_');
+      expect(text).toContain('**5 total**');
+      expect(text).toContain('**nextStart:** 3');
+
+      const last = await run({ sequence: SEQUENCE, start: 3, limit: 2 });
+      expect(last.structuredContent.hits?.map((h) => h.id)).toEqual(['AF_AFP01942F1', '2DN2']);
+      expect(last.structuredContent).not.toHaveProperty('nextStart');
+
+      const pastEnd = await run({ sequence: SEQUENCE, start: 5, limit: 2 });
+      expect(pastEnd.structuredContent.hits).toEqual([]);
+      for (const surface of noticeAndText(pastEnd)) {
+        expect(surface).toContain('start 5 is past the end of the 5 matches');
+      }
+    });
+
+    it('sums the facet buckets of both universes before the bucket cap', async () => {
+      // The experimental list fills the cap, so its own tail bucket would be cut
+      // before a sum; summed first, that bucket leads with both universes' count.
+      const head = Array.from({ length: FACET_CAP }, (_, i) => ({
+        label: `Species ${i}`,
+        population: FACET_CAP + 10 - i,
+      }));
+      serve({
+        experimental: {
+          hits: EXPERIMENTAL.hits,
+          facets: [
+            { name: 'organism', buckets: [...head, { label: 'Homo sapiens', population: 1 }] },
+          ],
+        },
+        computational: {
+          hits: COMPUTATIONAL.hits,
+          facets: [{ name: 'organism', buckets: [{ label: 'Homo sapiens', population: 1000 }] }],
+        },
+      });
+      const result = await run({ sequence: SEQUENCE, facets: ['organism'] });
+      const [organism] = (result.structuredContent.facets ?? []) as Array<{
+        buckets: Array<{ label: string; count: number }>;
+        truncated?: boolean;
+      }>;
+      expect(organism?.buckets[0]).toEqual({ label: 'Homo sapiens', count: 1001 });
+      expect(organism?.buckets).toHaveLength(FACET_CAP);
+      expect(organism?.truncated).toBe(true);
+      expect(allText(result)).toContain('Homo sapiens: 1001');
+    });
+
+    it('returns the experimental hits when the predicted search fails, naming it on both surfaces', async () => {
+      serve({ experimental: EXPERIMENTAL, computational: { status: 500 } });
+      const result = await run({ sequence: SEQUENCE });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent.hits?.map((h) => h.id)).toEqual(['4HHB', '1A3N', '2DN2']);
+      expect(result.structuredContent.totalCount).toBe(3);
+      for (const surface of noticeAndText(result)) expect(surface).toContain(LEFT_OUT_PREDICTED);
+    });
+
+    it("cuts a universe's hung search at its deadline and returns the other universe", async () => {
+      vi.useFakeTimers();
+      let hung = 0;
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+        if (contentTypeOf(init) === 'computational') {
+          return Response.json({
+            total_count: COMPUTATIONAL.hits.length,
+            result_set: COMPUTATIONAL.hits.map(toRow),
+          });
+        }
+        hung += 1;
+        // Never answers: settles only when an abort reaches the request.
+        return new Promise<Response>((_, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+            once: true,
+          });
+        });
+      });
+      const pending = run({ sequence: SEQUENCE });
+      await vi.advanceTimersByTimeAsync(50_000);
+      const result = await pending;
+      expect(result.isError).not.toBe(true);
+      // The first attempt hit its own 30 s timeout and was retried; the deadline cut the retry.
+      expect(hung).toBe(2);
+      expect(result.structuredContent.hits?.map((h) => h.id)).toEqual([
+        'AF_AFP69905F1',
+        'AF_AFP01942F1',
+      ]);
+      for (const surface of noticeAndText(result)) expect(surface).toContain(LEFT_OUT_EXPERIMENTAL);
+    });
+
+    describe('with the experimental metadata lookup run through the real service', () => {
+      /** The 50 s call budget the search and the metadata lookup share. */
+      const CALL_BUDGET_MS = 50_000;
+
+      /**
+       * The experimental search answers at once, and the Data API answers the
+       * metadata lookup with a title per entry. The predicted search hangs, or
+       * answers each attempt with a 500 after `slow500AfterMs`, settling early
+       * only when an abort reaches it.
+       */
+      const servePredictedStalled = (predicted: 'hang' | { slow500AfterMs: number }) => {
+        getEntries.mockImplementation((...args: Parameters<RcsbService['getEntries']>) =>
+          real.getEntries(...args),
+        );
+        return vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+          if (String(input) === 'https://data.test/graphql') {
+            const { ids } = JSON.parse(String(init?.body)).variables as { ids: string[] };
+            return Promise.resolve(
+              Response.json({
+                data: {
+                  entries: ids.map((id) => ({ rcsb_id: id, struct: { title: `${id} title` } })),
+                },
+              }),
+            );
+          }
+          if (contentTypeOf(init) === 'experimental') {
+            return Promise.resolve(
+              Response.json({
+                total_count: EXPERIMENTAL.hits.length,
+                result_set: EXPERIMENTAL.hits.map(toRow),
+              }),
+            );
+          }
+          return new Promise<Response>((resolve, reject) => {
+            const answer =
+              predicted === 'hang'
+                ? undefined
+                : setTimeout(
+                    () =>
+                      resolve(
+                        Response.json(
+                          { status: 500, message: 'did not complete ticketId within 30000 ms' },
+                          { status: 500 },
+                        ),
+                      ),
+                    predicted.slow500AfterMs,
+                  );
+            init?.signal?.addEventListener(
+              'abort',
+              () => {
+                clearTimeout(answer);
+                reject(init.signal?.reason);
+              },
+              { once: true },
+            );
+          });
+        });
+      };
+
+      it.each([
+        ['hangs', 'hang' as const],
+        ['keeps answering a slow 500', { slow500AfterMs: 25_000 }],
+      ])(
+        'returns the enriched experimental hits before the call budget when the predicted search %s',
+        async (_, predicted) => {
+          vi.useFakeTimers();
+          servePredictedStalled(predicted);
+          let settled = false;
+          const pending = run({ sequence: SEQUENCE }).finally(() => {
+            settled = true;
+          });
+          await vi.advanceTimersByTimeAsync(CALL_BUDGET_MS - 1);
+          expect(settled).toBe(true);
+          const result = await pending;
+          expect(result.isError).not.toBe(true);
+          expect(result.structuredContent.hits?.map((h) => [h.id, h.title])).toEqual([
+            ['4HHB', '4HHB title'],
+            ['1A3N', '1A3N title'],
+            ['2DN2', '2DN2 title'],
+          ]);
+          expect(result.structuredContent.totalCount).toBe(3);
+          expect(allText(result)).toContain('4HHB title');
+          for (const surface of noticeAndText(result)) {
+            expect(surface).toContain(LEFT_OUT_PREDICTED);
+          }
+          expect(getEntries).toHaveBeenCalledOnce();
+        },
+      );
+
+      it('fails with a Timeout on both surfaces when both universes are still searching at the deadline', async () => {
+        vi.useFakeTimers();
+        vi.spyOn(globalThis, 'fetch').mockImplementation(
+          (_input, init) =>
+            new Promise<Response>((_, reject) => {
+              init?.signal?.addEventListener('abort', () => reject(init.signal?.reason), {
+                once: true,
+              });
+            }),
+        );
+        let settled = false;
+        const pending = run({ sequence: SEQUENCE }).finally(() => {
+          settled = true;
+        });
+        await vi.advanceTimersByTimeAsync(CALL_BUDGET_MS);
+        expect(settled).toBe(true);
+        const result = await pending;
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent.error?.code).toBe(-32004);
+        expect(allText(result)).toMatch(/timed out/);
+        expect(getEntries).not.toHaveBeenCalled();
+      });
+    });
+
+    /**
+     * Answer the experimental search; once the predicted one is in flight, abort
+     * `controller` and reject that request the way fetch does.
+     */
+    const cancelDuringPredicted = (controller: AbortController) =>
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+        if (contentTypeOf(init) === 'experimental') {
+          return Response.json({
+            total_count: 1,
+            result_set: [toRow({ id: '4HHB_1', bitscore: 291 })],
+          });
+        }
+        controller.abort();
+        throw init?.signal?.reason;
+      });
+
+    it("rethrows the caller's cancellation rather than returning the universe that answered", async () => {
+      const controller = new AbortController();
+      cancelDuringPredicted(controller);
+      await expect(
+        searchStructures.handler(
+          searchStructures.input.parse({ sequence: SEQUENCE }),
+          createMockContext({ errors: searchStructures.errors, signal: controller.signal }),
+        ),
+      ).rejects.toThrow(/was aborted/);
+
+      const contract = new AbortController();
+      cancelDuringPredicted(contract);
+      const result = (await runToolContract(
+        searchStructures,
+        { sequence: SEQUENCE },
+        { context: { signal: contract.signal } },
+      )) as ContractResult;
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent.error?.code).toBe(-32011);
+      expect(allText(result)).toMatch(/was aborted/);
+      expect(allText(result)).not.toContain('4HHB');
+    });
   });
 });

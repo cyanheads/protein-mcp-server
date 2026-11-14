@@ -8,9 +8,10 @@
  * zero-hit pages, re-paging a completed ticket), query selection on multichain
  * tickets (default query 0, explicit query, `queryCount`, out-of-range
  * rejection), the combined score ordering across databases, the
- * COMPLETE/ERROR/pending status branches, a submit refused with HTTP 400, and
- * the never-throws degrade-to-failed contract (carrying the ticket once
- * Foldseek accepted the job). HTTP mocked, routed by URL; the
+ * COMPLETE/ERROR/pending status branches, a submit refused with HTTP 400, the
+ * degrade-to-failed contract (carrying the ticket once Foldseek accepted the
+ * job, a call-budget stop included), and a caller's cancellation rethrown from
+ * the submit, a poll, or between polls. HTTP mocked, routed by URL; the
  * refused-submit case runs the real HTTP helper over a fetch fake.
  * @module tests/services/foldseek/foldseek-service.test
  */
@@ -830,6 +831,82 @@ describe('FoldseekService.search — async / failure branches', () => {
     const out = await service().search(params(), createMockContext());
     expect(out).toEqual({ status: 'failed', error: 'submit boom' });
   });
+});
+
+describe('FoldseekService — a caller cancellation is never an outcome', () => {
+  type Phase = 'submit' | 'poll' | 'between polls';
+
+  /**
+   * Route the fetchJson mock so `abort` fires at `phase`: while the submit or a
+   * ticket poll is in flight — that request then fails with the abort reason, as
+   * the HTTP layer does — or right after a poll that found the job still running.
+   */
+  const abortAt = (phase: Phase, abort: () => DOMException) =>
+    fetchJsonMock.mockImplementation(async (url: string) => {
+      if (url === 'https://foldseek.test/api/ticket') {
+        if (phase === 'submit') throw abort();
+        return { id: 'tkt-x' };
+      }
+      if (phase === 'poll') throw abort();
+      abort();
+      return { status: 'RUNNING' };
+    });
+
+  const call = (method: 'search' | 'resume', signal: AbortSignal) => {
+    const ctx = createMockContext({ signal });
+    return method === 'search'
+      ? service().search(params({ timeoutMs: 30_000 }), ctx)
+      : service().resume(
+          { ticketId: 'tkt-x', query: 0, limit: 25, start: 0, timeoutMs: 30_000 },
+          ctx,
+        );
+  };
+
+  it.each([
+    ['search', 'submit'],
+    ['search', 'poll'],
+    ['search', 'between polls'],
+    ['resume', 'poll'],
+    ['resume', 'between polls'],
+  ] as const)('%s rethrows a caller cancellation during the %s', async (method, phase) => {
+    const caller = new AbortController();
+    const reason = new DOMException('The caller went away.', 'AbortError');
+    abortAt(phase, () => {
+      caller.abort(reason);
+      return reason;
+    });
+    await expect(call(method, caller.signal)).rejects.toBe(reason);
+  });
+
+  // The poll rejects with the signal's reason once it has aborted, so a budget stop
+  // between polls degrades like one mid-request; the tool turns failed-with-ticket
+  // into status computing.
+  it.each([
+    ['search', 'submit', { status: 'failed', error: 'Call budget spent.' }],
+    ['search', 'poll', { status: 'failed', ticketId: 'tkt-x', error: 'Call budget spent.' }],
+    [
+      'search',
+      'between polls',
+      { status: 'failed', ticketId: 'tkt-x', error: 'Call budget spent.' },
+    ],
+    ['resume', 'poll', { status: 'failed', ticketId: 'tkt-x', error: 'Call budget spent.' }],
+    [
+      'resume',
+      'between polls',
+      { status: 'failed', ticketId: 'tkt-x', error: 'Call budget spent.' },
+    ],
+  ] as const)(
+    '%s still degrades a call-budget stop during the %s',
+    async (method, phase, expected) => {
+      const budget = new AbortController();
+      const reason = new DOMException('Call budget spent.', 'TimeoutError');
+      abortAt(phase, () => {
+        budget.abort(reason);
+        return reason;
+      });
+      await expect(call(method, budget.signal)).resolves.toEqual(expected);
+    },
+  );
 });
 
 describe('FoldseekService.resume — poll an existing ticket without resubmitting', () => {

@@ -10,14 +10,23 @@
  * consume the value, the scope enrichment, the realized bucket total across both
  * dimension positions, scope-param forwarding to the facet engine, the
  * unknown_method contract, the computed-model notice for a method or resolution
- * scope under predicted content, and format() rendering. The RCSB service
- * instance is mocked; its query builders run for real.
+ * scope under predicted content, format() rendering, and — through the real
+ * service behind the mock — the 50 s call budget over a hung facet request and
+ * the caller's cancellation. The RCSB service instance is mocked; its query
+ * builders run for real.
  * @module tests/tools/analyze-collection.tool.test
  */
 
 import type { z } from '@cyanheads/mcp-ts-core';
-import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import {
+  createFetchMock,
+  createMockContext,
+  type FetchMockHarness,
+  getEnrichment,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FACET_DIMENSION_NAMES } from '@/services/rcsb/facets.js';
 import type { FacetDimension, StructureSearchParams } from '@/services/rcsb/types.js';
 
@@ -29,7 +38,7 @@ vi.mock('@/services/rcsb/rcsb-service.js', async (importOriginal) => ({
 }));
 
 import { analyzeCollection } from '@/mcp-server/tools/definitions/analyze-collection.tool.js';
-import { buildQuery } from '@/services/rcsb/rcsb-service.js';
+import { buildQuery, RcsbService } from '@/services/rcsb/rcsb-service.js';
 
 const ctx = () => createMockContext({ errors: analyzeCollection.errors });
 
@@ -143,6 +152,41 @@ describe('protein_analyze_collection', () => {
     const notice = String(getEnrichment(c).notice);
     expect(notice).toContain('organism was capped to the 2 highest-count buckets.');
     expect(notice).toMatch(/capped at 2 buckets independently/);
+  });
+
+  it('advises a higher bucket_limit only while the cap is under its 500 ceiling', async () => {
+    const organisms = (n: number) => ({
+      dimension: 'organism',
+      attribute: 'rcsb_entity_source_organism.ncbi_scientific_name',
+      buckets: Array.from({ length: n }, (_, i) => ({ label: `org${i}`, count: 1 })),
+    });
+    type Result = {
+      structuredContent: { notice?: string; truncated?: boolean };
+      content: Array<{ type: string; text: string }>;
+    };
+    const profile = async (bucket_limit: number) => {
+      analyzeFacets.mockResolvedValue({ total: 501, facets: [organisms(501)] });
+      return (await runToolContract(analyzeCollection, {
+        group_by: ['organism'],
+        bucket_limit,
+      })) as Result;
+    };
+
+    const under = await profile(50);
+    expect(under.structuredContent.truncated).toBe(true);
+    expect(under.structuredContent.notice).toContain(
+      'Each dimension level is capped at 50 buckets independently; raise bucket_limit (up to 500) or scope the query tighter to reach the long tail.',
+    );
+
+    const ceiling = await profile(500);
+    const sentence =
+      'Each dimension level is capped at 500 buckets independently, the most bucket_limit allows; scope the query tighter to reach the long tail.';
+    expect(ceiling.structuredContent.truncated).toBe(true);
+    expect(ceiling.structuredContent.notice).toContain(sentence);
+    expect(ceiling.structuredContent.notice).not.toMatch(/raise bucket_limit/);
+    const text = ceiling.content.map((b) => b.text).join('\n');
+    expect(text).toContain(sentence);
+    expect(text).not.toMatch(/raise bucket_limit/);
   });
 
   it('discloses a capped nested child when the parent fits under the cap (#37)', async () => {
@@ -1451,5 +1495,136 @@ describe('protein_analyze_collection method and organism scope (#86)', () => {
       });
       expect(result.structuredContent.notice).toBe(expected);
     }
+  });
+});
+
+describe('protein_analyze_collection under the 50 s call budget, through the real service', () => {
+  const SEARCH = 'https://search.test';
+  const real = new RcsbService(
+    {} as never,
+    {} as never,
+    {
+      rcsbSearchBaseUrl: SEARCH,
+      rcsbDataBaseUrl: 'https://data.test',
+      rcsbFilesBaseUrl: 'https://files.test',
+    } as never,
+  );
+  type Result = {
+    isError?: boolean;
+    structuredContent: { error?: { code: number; message: string } };
+    content: Array<{ type: string; text?: string }>;
+  };
+  const textOf = (result: Result) => result.content.map((b) => b.text ?? '').join('\n');
+
+  let http: FetchMockHarness | undefined;
+  /** Facet requests that reached the fake Search API. */
+  let requests = 0;
+
+  /** A facet request that never answers: it rejects only once its request aborts. */
+  const hang = (req: Request) =>
+    new Promise<Response>((_, reject) => {
+      if (req.signal.aborted) reject(req.signal.reason);
+      req.signal.addEventListener('abort', () => reject(req.signal.reason), { once: true });
+    });
+  /** Answer the Search API's facet POST with `respond`, counting each request. */
+  const serve = (respond: (req: Request) => Promise<Response>) => {
+    http?.restore();
+    http = createFetchMock([
+      {
+        method: 'POST',
+        match: (req) => {
+          const url = new URL(req.url);
+          return url.origin === SEARCH && url.pathname === '/rcsbsearch/v2/query';
+        },
+        respond: (req) => {
+          requests++;
+          return respond(req);
+        },
+      },
+    ]);
+    http.install();
+  };
+
+  beforeEach(() => {
+    requests = 0;
+    analyzeFacets.mockImplementation((...args: Parameters<RcsbService['analyzeFacets']>) =>
+      real.analyzeFacets(...args),
+    );
+  });
+  afterEach(() => {
+    http?.restore();
+    http = undefined;
+    analyzeFacets.mockReset();
+    vi.useRealTimers();
+  });
+
+  it('settles a hung facet request at the budget as a Timeout on both surfaces, across its retries', async () => {
+    vi.useFakeTimers();
+    serve(hang);
+    const caller = new AbortController();
+    let settled = false;
+    const pending = runToolContract(
+      analyzeCollection,
+      { group_by: ['method', 'release_year'] },
+      { context: { signal: caller.signal } },
+    ).finally(() => {
+      settled = true;
+    });
+
+    // The request's own 30 s timeout fires first; the retry it earns is still in
+    // flight when the call budget runs out.
+    await vi.advanceTimersByTimeAsync(49_999);
+    expect(settled).toBe(false);
+    expect(requests).toBeGreaterThanOrEqual(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(settled).toBe(true);
+
+    const result = (await pending) as Result;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({
+      code: JsonRpcErrorCode.Timeout,
+      message: expect.stringContaining("timed out on the caller's signal"),
+    });
+    expect(textOf(result)).toContain("timed out on the caller's signal");
+    // The budget stops the call through a derived signal; the caller's stays live.
+    expect(caller.signal.aborted).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("rejects with the caller's cancellation from a facet request in flight, on both surfaces", async () => {
+    /** Abort `controller` once the facet request under test is in flight. */
+    const cancelInFlight = (controller: AbortController) =>
+      serve((req) => {
+        controller.abort();
+        return hang(req);
+      });
+
+    const direct = new AbortController();
+    cancelInFlight(direct);
+    await expect(
+      analyzeCollection.handler(
+        analyzeCollection.input.parse({ group_by: ['method'] }),
+        createMockContext({ errors: analyzeCollection.errors, signal: direct.signal }),
+      ),
+    ).rejects.toMatchObject({
+      code: JsonRpcErrorCode.RequestCancelled,
+      message: expect.stringContaining('was aborted'),
+    });
+
+    const contract = new AbortController();
+    cancelInFlight(contract);
+    const result = (await runToolContract(
+      analyzeCollection,
+      { group_by: ['method'] },
+      { context: { signal: contract.signal } },
+    )) as Result;
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({
+      code: JsonRpcErrorCode.RequestCancelled,
+      message: expect.stringContaining('was aborted'),
+    });
+    expect(textOf(result)).toContain('was aborted');
+    // One request per call: the cancellation is never retried.
+    expect(requests).toBe(2);
   });
 });

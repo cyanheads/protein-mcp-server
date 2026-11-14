@@ -10,7 +10,7 @@
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const findPrediction = vi.fn();
@@ -19,6 +19,7 @@ vi.mock('@/services/alphafold/alphafold-service.js', () => ({
 }));
 
 import { afSummaryResource } from '@/mcp-server/resources/definitions/af-summary.resource.js';
+import { initUniProtService } from '@/services/uniprot/uniprot-service.js';
 
 const at = (uniprot: string, signal?: AbortSignal) =>
   createMockContext({
@@ -225,6 +226,83 @@ describe('af://{uniprot}', () => {
     expect(signal).not.toBe(caller.signal);
     expect(caller.signal.aborted).toBe(false);
     expect(await reading).toMatchObject({ name: 'TimeoutError' });
+  });
+
+  describe('over the real lookups (AlphaFold DB, then UniProt)', () => {
+    /** Both upstream hosts under stubbed base URLs. Strict: any other request fails the test. */
+    const upstream = createFetchMock();
+    const isUniProt = (req: Request) => new URL(req.url).hostname === 'uniprot';
+
+    /** An answer that never comes: it rejects only once its request aborts. */
+    const hang = (req: Request) =>
+      new Promise<Response>((_, reject) => {
+        if (req.signal.aborted) reject(req.signal.reason);
+        req.signal.addEventListener('abort', () => reject(req.signal.reason), { once: true });
+      });
+
+    beforeEach(async () => {
+      const { AlphaFoldService } = await vi.importActual<
+        typeof import('@/services/alphafold/alphafold-service.js')
+      >('@/services/alphafold/alphafold-service.js');
+      const real = new AlphaFoldService(
+        {} as never,
+        {} as never,
+        { alphafoldBaseUrl: 'https://af' } as never,
+      );
+      findPrediction.mockImplementation((id: string, c: never) => real.findPrediction(id, c));
+      initUniProtService(
+        {} as never,
+        {} as never,
+        { uniprotBaseUrl: 'https://uniprot', interproBaseUrl: 'https://interpro' } as never,
+      );
+      upstream.reset();
+      upstream.install();
+      // AlphaFold DB holds no model under Q1HDT5, so UniProt is asked what it is now.
+      upstream.route({
+        match: 'https://af/api/prediction/Q1HDT5',
+        respond: () => Response.json({}, { status: 404 }),
+      });
+    });
+    afterEach(() => upstream.restore());
+
+    it('settles at the 50 s budget as a Timeout when the chained UniProt lookup hangs', async () => {
+      vi.useFakeTimers();
+      upstream.route({ match: isUniProt, respond: hang });
+      const state = { settled: false };
+      const reading = read('Q1HDT5')
+        .catch((e: unknown) => e)
+        .finally(() => {
+          state.settled = true;
+        });
+
+      await vi.advanceTimersByTimeAsync(49_999);
+      expect(state.settled).toBe(false);
+      expect(upstream.calls.some((c) => isUniProt(c.request))).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(state.settled).toBe(true);
+
+      const err = await reading;
+      expect(err).toBeInstanceOf(McpError);
+      expect(err).toMatchObject({ code: JsonRpcErrorCode.Timeout });
+      expect((err as McpError).message).toContain("timed out on the caller's signal");
+    });
+
+    it('rejects as cancelled, not as a budget Timeout, when the caller cancels mid-lookup', async () => {
+      const caller = new AbortController();
+      upstream.route({
+        match: isUniProt,
+        respond: (req) => {
+          caller.abort();
+          return hang(req);
+        },
+      });
+
+      const err = await read('Q1HDT5', caller.signal).catch((e: unknown) => e);
+      expect(upstream.calls.filter((c) => isUniProt(c.request))).toHaveLength(1);
+      expect(err).toBeInstanceOf(McpError);
+      expect(err).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+      expect((err as McpError).message).toContain('was aborted');
+    });
   });
 
   it('declares every failure it raises, with inactive_accession built in the UniProt service', () => {

@@ -2,16 +2,25 @@
  * @fileoverview Tests for the shared HTTP layer: parseJson — the
  * HTML-error-page / empty-body guard that keeps an HTML rate-limit page or a
  * blank response from reaching JSON.parse, with the transient-vs-permanent
- * error classification each branch produces — fetchJson's empty-body handling,
- * and the bounded text reads (streamText, fetchTextWindow) that stop a download
- * once the caller holds what it needs.
+ * error classification each branch produces — fetchJson's empty-body handling
+ * and its redirect / errorHeaders pass-through, and the bounded text reads (streamText, fetchTextWindow) that stop a download
+ * once the caller holds what it needs; the per-call `isTransient` predicate;
+ * and fetchResponse's per-attempt timeout, on fake timers, over a 2xx body read
+ * and over a non-2xx body it reads before returning.
  * @module tests/services/shared/http.test
  */
 
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { fetchJson, fetchTextWindow, parseJson, streamText } from '@/services/shared/http.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  fetchJson,
+  fetchResponse,
+  fetchText,
+  fetchTextWindow,
+  parseJson,
+  streamText,
+} from '@/services/shared/http.js';
 
 describe('parseJson', () => {
   it('parses a well-formed JSON object', () => {
@@ -101,6 +110,49 @@ describe('fetchJson — onEmptyBody (204 / empty search response)', () => {
         maxRetries: 0,
       }),
     ).rejects.toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
+  });
+});
+
+describe('fetchJson — redirect and errorHeaders pass-through', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  /** The `RequestInit` fetch received on its first call. */
+  const initOf = (spy: { mock: { calls: unknown[][] } }) =>
+    spy.mock.calls[0]?.[1] as RequestInit | undefined;
+
+  it('sends no redirect mode by default, so fetch follows redirects as it always has', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(Response.json({ a: 1 }));
+    await expect(
+      fetchJson('https://api.test/a', createMockContext(), {
+        operation: 'test',
+        label: 'Test API',
+      }),
+    ).resolves.toEqual({ a: 1 });
+    expect(initOf(fetchSpy)).not.toHaveProperty('redirect');
+  });
+
+  it("forwards redirect: 'manual' and errorHeaders: an unfollowed 303 throws InvalidRequest with its Location, unretried", async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('{"entryType":"Inactive"}', {
+        status: 303,
+        headers: { location: '/uniprotkb/P69905?from=Q1HDT5' },
+      }),
+    );
+    const err = await fetchJson('https://uniprot.test/uniprotkb/Q1HDT5', createMockContext(), {
+      operation: 'test',
+      label: 'UniProt',
+      expectedStatuses: [303],
+      redirect: 'manual',
+      errorHeaders: ['location'],
+    }).catch((e: unknown) => e);
+
+    expect(initOf(fetchSpy)?.redirect).toBe('manual');
+    expect(err).toBeInstanceOf(McpError);
+    expect(err).toMatchObject({
+      code: JsonRpcErrorCode.InvalidRequest,
+      data: { status: 303, headers: { location: '/uniprotkb/P69905?from=Q1HDT5' } },
+    });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -248,5 +300,222 @@ describe('bounded text reads', () => {
     });
     expect(parts.join('')).toBe(text);
     expect(whole.state.cancelled).toBe(false);
+  });
+});
+
+describe('isTransient — a per-call retry predicate', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  const unavailable = () => Promise.resolve(new Response('', { status: 503 }));
+  const OPTS = { operation: 'test', label: 'Test API', baseDelayMs: 1 };
+
+  it.each([
+    [
+      'fetchJson',
+      () =>
+        fetchJson('https://api.test/a', createMockContext(), {
+          ...OPTS,
+          isTransient: () => false,
+        }),
+    ],
+    [
+      'fetchText',
+      () =>
+        fetchText('https://api.test/a', createMockContext(), {
+          ...OPTS,
+          isTransient: () => false,
+        }),
+    ],
+    [
+      'streamText',
+      () =>
+        streamText(
+          'https://api.test/a',
+          createMockContext(),
+          {
+            ...OPTS,
+            isTransient: () => false,
+          },
+          () => true,
+        ),
+    ],
+  ] as const)('%s fails at once on a 503 its predicate rejects', async (_name, run) => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(unavailable);
+    await expect(run()).rejects.toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries a 503 by default', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(unavailable);
+    await expect(
+      fetchText('https://api.test/a', createMockContext(), { ...OPTS, maxRetries: 2 }),
+    ).rejects.toMatchObject({ code: JsonRpcErrorCode.ServiceUnavailable });
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('fetchResponse — per-attempt timeout on fake timers', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  const POLL = { operation: 'test', timeoutMs: 15_000, baseDelayMs: 400 };
+  /** An upstream that never answers: rejects only when the request's signal aborts. */
+  const hang = (_input: unknown, init?: RequestInit) =>
+    new Promise<Response>((_, reject) => {
+      const signal = init?.signal as AbortSignal;
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    });
+
+  it('times out a hung attempt at timeoutMs and retries it, leaving no clock behind', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementationOnce(hang)
+      .mockResolvedValueOnce(new Response('ok'));
+    const run = fetchResponse('https://poll.test/x', createMockContext(), POLL);
+
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    // The timeout, then a backoff of at most 400 ms × 1.25.
+    await vi.advanceTimersByTimeAsync(1 + 500);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const res = await run;
+    expect(await res.text()).toBe('ok');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('rejects with the timeout once every attempt has hung', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(hang);
+    const run = fetchResponse('https://poll.test/x', createMockContext(), POLL).catch(
+      (err: unknown) => err,
+    );
+    await vi.advanceTimersByTimeAsync(3 * 15_000 + 2_000);
+    const err = (await run) as Error;
+    expect(err.name).toBe('TimeoutError');
+    expect(err.message).toContain('failed after 3 attempts');
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps the deadline on a 2xx body: a stalled read rejects at timeoutMs', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+      const signal = init?.signal as AbortSignal;
+      // Like a real fetch, the body errors once the request's signal aborts.
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"partial":'));
+          signal.addEventListener('abort', () => controller.error(signal.reason), { once: true });
+        },
+      });
+      return new Response(body);
+    });
+    const res = await fetchResponse('https://poll.test/x', createMockContext(), POLL);
+    const read = res.text().catch((err: unknown) => err);
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(((await read) as Error).name).toBe('TimeoutError');
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('clears the clock when it returns a non-2xx response, whose body the caller may never read', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('No such UUID', { status: 404 }));
+    const res = await fetchResponse('https://poll.test/x', createMockContext(), POLL);
+    expect(res.status).toBe(404);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(await res.text()).toBe('No such UUID');
+  });
+
+  /**
+   * An error body that sends its first bytes and then stalls. Like a real fetch,
+   * it errors once the request's signal aborts. With `highWaterMark: 0`, `pull`
+   * runs only while a read is pending, so `onRead` fires with the read in flight.
+   */
+  const stalledBody = (signal: AbortSignal, onRead?: () => void) =>
+    new ReadableStream<Uint8Array>(
+      {
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"error":'));
+          signal.addEventListener('abort', () => controller.error(signal.reason), { once: true });
+        },
+        pull() {
+          onRead?.();
+        },
+      },
+      { highWaterMark: 0 },
+    );
+
+  it('bounds a non-2xx body read by the same deadline: a stalled error body is dropped at timeoutMs, its status kept', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async (_input, init) =>
+        new Response(stalledBody(init?.signal as AbortSignal), {
+          status: 503,
+          statusText: 'Service Unavailable',
+          headers: { 'retry-after': '120' },
+        }),
+    );
+    let settled = false;
+    const run = fetchResponse('https://poll.test/x', createMockContext(), POLL).finally(() => {
+      settled = true;
+    });
+
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(settled).toBe(true);
+    const res = await run;
+    expect([res.status, res.statusText, res.headers.get('retry-after')]).toEqual([
+      503,
+      'Service Unavailable',
+      '120',
+    ]);
+    expect(await res.text()).toBe('');
+    // A status is an outcome, never retried, even when its body timed out.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('returns a prompt error body whole, with its status, statusText, and headers', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('{"message":"rate limited"}', {
+        status: 429,
+        statusText: 'Too Many Requests',
+        headers: { 'retry-after': '7', 'content-type': 'application/json' },
+      }),
+    );
+    const res = await fetchResponse('https://poll.test/x', createMockContext(), POLL);
+    expect(vi.getTimerCount()).toBe(0);
+    expect([res.status, res.statusText, res.ok]).toEqual([429, 'Too Many Requests', false]);
+    expect(res.headers.get('retry-after')).toBe('7');
+    expect(res.headers.get('content-type')).toBe('application/json');
+    expect(await res.json()).toEqual({ message: 'rate limited' });
+  });
+
+  it("rethrows a caller's cancellation that arrives while an error body is read, without retrying", async () => {
+    const caller = new AbortController();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(
+      async (_input, init) =>
+        new Response(
+          stalledBody(init?.signal as AbortSignal, () => caller.abort('client went away')),
+          { status: 502 },
+        ),
+    );
+    await expect(
+      fetchResponse('https://poll.test/x', createMockContext({ signal: caller.signal }), POLL),
+    ).rejects.toBe('client went away');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("rethrows a caller's cancellation of an attempt in flight without retrying", async () => {
+    const caller = new AbortController();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      queueMicrotask(() => caller.abort('client went away'));
+      return hang(input, init);
+    });
+    await expect(
+      fetchResponse('https://poll.test/x', createMockContext({ signal: caller.signal }), POLL),
+    ).rejects.toBe('client went away');
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

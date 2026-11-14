@@ -21,6 +21,7 @@ import {
   ligandSchema,
   matchedEntityOrganisms,
   oneWordOrganismNotice,
+  polymerEntityOutput,
   polymerEntitySchema,
   renderFacets,
   toFacetOutput,
@@ -735,6 +736,21 @@ describe('truncationNotices (#37)', () => {
     expect(notices[0]).toContain('organism');
   });
 
+  it('points past a cap under 500 with a higher bucket_limit', () => {
+    const notices = truncationNotices([parent('organism', true, 499)], 499);
+    expect(notices.at(-1)).toBe(
+      'Each dimension level is capped at 499 buckets independently; raise bucket_limit (up to 500) or scope the query tighter to reach the long tail.',
+    );
+  });
+
+  it('never advises raising bucket_limit at its 500 ceiling', () => {
+    const notices = truncationNotices([parent('organism', true, 500)], 500);
+    expect(notices.at(-1)).toBe(
+      'Each dimension level is capped at 500 buckets independently, the most bucket_limit allows; scope the query tighter to reach the long tail.',
+    );
+    expect(notices.join(' ')).not.toMatch(/raise bucket_limit/);
+  });
+
   it('appends the cap sentence exactly once across several capped positions', () => {
     const notices = truncationNotices(
       [
@@ -864,10 +880,84 @@ describe('entry-level record schemas', () => {
     expect(polymerEntitySchema.shape).not.toHaveProperty('organism');
   });
 
+  it('round-trips a polymer entity carrying chainCount (#102)', () => {
+    const entity = {
+      entityId: '36ZA_7',
+      authAsymIds: ['A', 'B'],
+      labelAsymIds: ['C', 'D'],
+      chainCount: 1615,
+    };
+    expect(polymerEntitySchema.parse(entity)).toEqual(entity);
+  });
+
   it("drops a ligand's internal author chains from the shared output shape (#92)", () => {
     expect(
       ligandSchema.parse({ compId: 'STI', name: 'IMATINIB', authAsymIds: ['A', 'B'] }),
     ).toEqual({ compId: 'STI', name: 'IMATINIB' });
+  });
+});
+
+describe('polymerEntityOutput (#102)', () => {
+  const ids = (ns: string, n: number) => Array.from({ length: n }, (_, i) => `${ns}${i}`);
+
+  it('counts the chains and keeps both lists whole without a limit', () => {
+    expect(
+      polymerEntityOutput({
+        entityId: '36ZA_7',
+        description: 'Capsid protein',
+        authAsymIds: ids('a', 150),
+        labelAsymIds: ids('l', 150),
+      }),
+    ).toEqual({
+      entityId: '36ZA_7',
+      description: 'Capsid protein',
+      authAsymIds: ids('a', 150),
+      labelAsymIds: ids('l', 150),
+      chainCount: 150,
+    });
+  });
+
+  it('cuts each list to its first `limit` IDs in upstream order, keeping the full count', () => {
+    const out = polymerEntityOutput(
+      { entityId: '36ZA_7', authAsymIds: ids('a', 150), labelAsymIds: ids('l', 150) },
+      100,
+    );
+    expect(out.authAsymIds).toEqual(ids('a', 100));
+    expect(out.labelAsymIds).toEqual(ids('l', 100));
+    expect(out.chainCount).toBe(150);
+  });
+
+  it('leaves a list at or under the limit whole', () => {
+    const out = polymerEntityOutput(
+      { entityId: '9AAV_1', authAsymIds: ids('a', 100), labelAsymIds: ids('l', 100) },
+      100,
+    );
+    expect(out.authAsymIds).toEqual(ids('a', 100));
+    expect(out.chainCount).toBe(100);
+  });
+
+  it('never shortens the entity it was given', () => {
+    const entity = { entityId: '36ZA_7', authAsymIds: ids('a', 150), labelAsymIds: ids('l', 150) };
+    polymerEntityOutput(entity, 100);
+    expect(entity.authAsymIds).toHaveLength(150);
+    expect(entity.labelAsymIds).toHaveLength(150);
+  });
+
+  it('counts the one namespace upstream reported, and adds nothing when it reported neither', () => {
+    expect(polymerEntityOutput({ entityId: '1ABC_1', authAsymIds: ['A', 'B'] })).toEqual({
+      entityId: '1ABC_1',
+      authAsymIds: ['A', 'B'],
+      chainCount: 2,
+    });
+    expect(polymerEntityOutput({ entityId: '1ABC_2', labelAsymIds: ['C'] })).toEqual({
+      entityId: '1ABC_2',
+      labelAsymIds: ['C'],
+      chainCount: 1,
+    });
+    expect(polymerEntityOutput({ entityId: '1ABC_3', sequenceLength: 9 })).toEqual({
+      entityId: '1ABC_3',
+      sequenceLength: 9,
+    });
   });
 });
 

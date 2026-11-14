@@ -1,26 +1,36 @@
 /**
  * @fileoverview Tests for protein_find_similar: the by:sequence path (direct
  * sequence, PDB-derived, UniProt-derived; metadata enrichment; empty-result
- * notice; no_sequence failure), the by:structure path (Foldseek complete /
+ * notice; RCSB's 2,000-hit ceiling notice; no_sequence failure), the by:structure path (Foldseek complete /
  * computing / failed, predicted-source mapping, completed-job paging via
  * totalCount / start / nextStart and a re-usable ticketId), query selection on
  * multichain jobs (query / queryCount, the multi-query notice, out-of-range
- * rejection), the combined cross-database ranking run through the real Foldseek
+ * rejection quoting its ticket as a literal), each ticket recipe (computing notice,
+ * format() ticket line, multi-query notice, out-of-range hint) replayed with only the
+ * arguments it names, the combined cross-database ranking run through the real Foldseek
  * service over captured payloads, the `databases` enum and a refused submit
  * (databases_rejected), structure hit fields (target, chain, title, organisms,
  * taxId, probability, aligned span, queryLength) through the real service, the
  * matched entity's organisms on sequence hits, the missing_query guard, the per-mode field
- * rejection, UniProtKB entry names on `uniprot` in both modes, the call budget
+ * rejection, UniProtKB entry names and a merged accession on `uniprot` (UniProt's
+ * 303 read through the real service and HTTP layer), the call budget
  * (a stalled chain, and a job Foldseek accepted before the budget ran out
- * returned as computing with its ticket), the error envelope each declared
+ * returned as computing with its ticket), a caller's cancellation mid-poll kept a
+ * cancellation through the real service and HTTP layer, the error envelope each declared
  * reason produces on both client surfaces, and format(). Services, HTTP, and the
- * coordinate-file fetch are mocked.
+ * coordinate-file fetch are mocked except where a test runs a real service over a
+ * fetch fake.
  * @module tests/tools/find-similar.tool.test
  */
 
 import type { z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+import {
+  createFetchMock,
+  createMockContext,
+  getEnrichment,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const searchSequence = vi.fn();
@@ -28,13 +38,15 @@ const getEntries = vi.fn();
 const getSequence = vi.fn();
 // Coordinate-URL construction runs the real service code; only upstream calls are faked.
 vi.mock('@/services/rcsb/rcsb-service.js', async (importOriginal) => {
-  const { RcsbService } = await importOriginal<typeof import('@/services/rcsb/rcsb-service.js')>();
+  const { RcsbService, SEQUENCE_HIT_CEILING } =
+    await importOriginal<typeof import('@/services/rcsb/rcsb-service.js')>();
   const real = new RcsbService(
     {} as never,
     {} as never,
     { rcsbFilesBaseUrl: 'https://files', rcsbModelsBaseUrl: 'https://models' } as never,
   );
   return {
+    SEQUENCE_HIT_CEILING,
     getRcsbService: () => ({
       searchSequence,
       getEntries,
@@ -592,6 +604,52 @@ describe('protein_find_similar — by:sequence', () => {
     );
     expect(searchSequence.mock.calls[0]?.[1]).toMatchObject({ maxEvalue: 0.001, minIdentity: 0.6 });
   });
+
+  describe("RCSB's 2,000-hit sequence-search ceiling", () => {
+    const CEILING =
+      'RCSB stops a sequence search at 2,000 hits, and this search reached it, so totalCount is that ceiling, not a complete count. Raise min_identity or lower max_evalue to narrow the search to a complete count.';
+
+    /** One page of a search whose upstream total is `total`; a hit only when `start` is inside it. */
+    const searchWithTotal = async (total: number, start = 0) => {
+      searchSequence.mockResolvedValue({
+        total,
+        hits: start < total ? [{ id: '1UBQ_1', score: 1 }] : [],
+      });
+      getEntries.mockResolvedValue([]);
+      return (await runToolContract(findSimilar, {
+        by: 'sequence',
+        sequence: 'MQIFVKTLTGKTITLEV',
+        start,
+        limit: 1,
+      })) as {
+        structuredContent: { totalCount: number; notice?: string };
+        content: Array<{ text: string }>;
+      };
+    };
+
+    it('says a total at the ceiling is the ceiling, not a complete count, on both surfaces', async () => {
+      const result = await searchWithTotal(2000);
+      expect(result.structuredContent.totalCount).toBe(2000);
+      expect(result.structuredContent.notice).toBe(CEILING);
+      expect(result.content.map((block) => block.text).join('\n')).toContain(CEILING);
+    });
+
+    it('adds no ceiling notice to a total one hit below it', async () => {
+      const result = await searchWithTotal(1999);
+      expect(result.structuredContent.totalCount).toBe(1999);
+      expect(result.structuredContent).not.toHaveProperty('notice');
+      expect(result.content.map((block) => block.text).join('\n')).not.toContain(
+        'RCSB stops a sequence search',
+      );
+    });
+
+    it('joins the ceiling notice with the past-end page notice', async () => {
+      const notice = String((await searchWithTotal(2000, 2000)).structuredContent.notice);
+      expect(notice).toBe(
+        `${CEILING} start 2000 is past the end of the 2000 matches. Re-call with a lower start to read a populated page.`,
+      );
+    });
+  });
 });
 
 /** A tool result as runToolContract returns it, success or error. */
@@ -870,7 +928,7 @@ describe('protein_find_similar — UniProt accessions under by:"sequence" (#83, 
 describe('protein_find_similar — UniProtKB entry names on uniprot', () => {
   const HBA = 'MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFPTTKTYFPHF';
 
-  /** The real UniProtService, whose upstream reads go through the fetchJson mock. */
+  /** The real UniProtService, whose upstream reads run the real HTTP layer over a fetch fake. */
   const realUniProt = () =>
     new UniProtService(
       {} as never,
@@ -880,21 +938,58 @@ describe('protein_find_similar — UniProtKB entry names on uniprot', () => {
       } as never,
     );
 
-  /** Answer the one UniProtKB path; any other upstream request fails the test. */
-  const serveUniProt = (path: string, body: unknown) =>
-    fetchJsonMock.mockImplementation(async (url: string) => {
-      if (new URL(url).pathname === path) return body;
-      throw new Error(`unexpected upstream request ${url}`);
+  let http: ReturnType<typeof createFetchMock>;
+
+  /**
+   * Answer UniProtKB as it answers live (UniProt 2026_04): a 303 naming P69905 for
+   * the entry name HBA_HUMAN and for the merged accession Q1HDT5, and P69905
+   * itself. Any other upstream request fails the test.
+   */
+  const serveUniProt = (p69905: unknown) =>
+    http.route(
+      ...['HBA_HUMAN', 'Q1HDT5'].map((id) => ({
+        match: (req: Request) => {
+          const url = new URL(req.url);
+          return url.hostname === 'uniprot.test' && url.pathname === `/uniprotkb/${id}`;
+        },
+        respond: () =>
+          new Response(null, {
+            status: 303,
+            headers: { location: `/uniprotkb/P69905?from=${id}` },
+          }),
+      })),
+      {
+        match: (req: Request) => {
+          const url = new URL(req.url);
+          return url.hostname === 'uniprot.test' && url.pathname === '/uniprotkb/P69905';
+        },
+        respond: () => Response.json(p69905),
+      },
+    );
+
+  /** Path and `fields` of every UniProt request, each of which must leave redirects unfollowed. */
+  const uniprotRequests = () =>
+    http.calls.map(({ request }) => {
+      expect(request.redirect).toBe('manual');
+      const url = new URL(request.url);
+      return `${url.pathname}?fields=${url.searchParams.get('fields')}`;
     });
 
-  /** The `fields` the one UniProt request selected. */
-  const requestedFields = () =>
-    new URL(String(fetchJsonMock.mock.calls[0]?.[0])).searchParams.get('fields');
-
-  beforeEach(() => {
+  beforeEach(async () => {
+    const actual = await vi.importActual<typeof import('@/services/shared/http.js')>(
+      '@/services/shared/http.js',
+    );
+    fetchJsonMock.mockImplementation(actual.fetchJson);
+    http = createFetchMock();
+    http.install();
     searchSequence.mockResolvedValue({ total: 1, hits: [{ id: '2DN2_1', score: 1 }] });
     getEntries.mockResolvedValue([]);
     foldseekSearch.mockResolvedValue({ status: 'complete', ticketId: 't', total: 0, hits: [] });
+  });
+
+  afterEach(() => {
+    http.restore();
+    fetchJsonMock.mockReset();
   });
 
   it('states the entry-name form where the caller reads the field', () => {
@@ -904,9 +999,9 @@ describe('protein_find_similar — UniProtKB entry names on uniprot', () => {
     expect(entry?.recovery).toContain('HBA_HUMAN');
   });
 
-  it('by:"sequence" searches the sequence of the entry an entry name names, from one request, with no merge notice', async () => {
+  it('by:"sequence" searches the sequence of the entry an entry name names — its 303, then that entry — with no merge notice', async () => {
     uniprotImpl = realUniProt();
-    serveUniProt('/uniprotkb/HBA_HUMAN', {
+    serveUniProt({
       entryType: 'UniProtKB reviewed (Swiss-Prot)',
       primaryAccession: 'P69905',
       sequence: { length: HBA.length, value: HBA },
@@ -915,24 +1010,41 @@ describe('protein_find_similar — UniProtKB entry names on uniprot', () => {
 
     expect(result.isError).not.toBe(true);
     expect(searchSequence.mock.calls[0]?.[0]).toBe(HBA);
-    expect(fetchJsonMock).toHaveBeenCalledOnce();
-    expect(requestedFields()).toBe('sequence');
+    expect(uniprotRequests()).toEqual([
+      '/uniprotkb/HBA_HUMAN?fields=sequence',
+      '/uniprotkb/P69905?fields=sequence',
+    ]);
     expect(result.structuredContent).not.toHaveProperty('notice');
     expect(textOf(result)).not.toMatch(/merged/i);
     expect(result.structuredContent.hits).toMatchObject([{ id: '2DN2' }]);
     expect(textOf(result)).toContain('### 2DN2');
   });
 
-  it('by:"structure" resolves an entry name to its accession before the AlphaFold DB lookup, with no merge notice', async () => {
+  it('by:"sequence" searches a merged accession’s successor, read from its 303, with the merge notice on both surfaces', async () => {
     uniprotImpl = realUniProt();
-    serveUniProt('/uniprotkb/HBA_HUMAN', { primaryAccession: 'P69905' });
+    serveUniProt({ primaryAccession: 'P69905', sequence: { length: HBA.length, value: HBA } });
+    const result = await run({ by: 'sequence', uniprot: 'Q1HDT5' });
+
+    expect(result.isError).not.toBe(true);
+    expect(searchSequence.mock.calls[0]?.[0]).toBe(HBA);
+    expect(uniprotRequests()).toEqual([
+      '/uniprotkb/Q1HDT5?fields=sequence',
+      '/uniprotkb/P69905?fields=sequence',
+    ]);
+    const merged = 'Q1HDT5 was merged into P69905 in UniProtKB; this answer is for P69905.';
+    expect(result.structuredContent.notice).toBe(merged);
+    expect(textOf(result)).toContain(merged);
+  });
+
+  it('by:"structure" resolves an entry name to its accession from its 303 alone, before the AlphaFold DB lookup, with no merge notice', async () => {
+    uniprotImpl = realUniProt();
+    serveUniProt({});
     findPrediction.mockResolvedValue(foundModel('P69905', 'https://af/P69905.pdb'));
     serveCoordinates('ATOM ...');
     const result = await run({ by: 'structure', uniprot: 'HBA_HUMAN' });
 
     expect(result.isError).not.toBe(true);
-    expect(fetchJsonMock).toHaveBeenCalledOnce();
-    expect(requestedFields()).toBe('accession');
+    expect(uniprotRequests()).toEqual(['/uniprotkb/HBA_HUMAN?fields=accession']);
     expect(findPrediction).toHaveBeenCalledExactlyOnceWith('P69905', expect.anything());
     expect(fetchTextWindowMock.mock.calls[0]?.[0]).toBe('https://af/P69905.pdb');
     expect(foldseekSearch.mock.calls[0]?.[0]).toMatchObject({ fileName: 'P69905.pdb' });
@@ -1659,7 +1771,9 @@ describe('protein_find_similar — query selection on multichain jobs (#63)', ()
     expect(String(result.structuredContent.notice)).toContain('these hits are for query 2');
     const text = renderedText(result);
     expect(text).toContain('**Query:** 2 of 4 (0-based)');
-    expect(text).toContain('re-call with ticket_id and query 2 to resume or re-page');
+    expect(text).toContain(
+      're-call by:"structure" with ticket_id and query 2 to resume this job, adding a different start or limit to re-page it.',
+    );
   });
 
   it('keeps the query across a ticket_id resume at a different start', async () => {
@@ -1771,6 +1885,145 @@ describe('protein_find_similar — query selection on multichain jobs (#63)', ()
         },
       },
     });
+  });
+
+  it('quotes the ticket as a literal on both surfaces, so the caller can send it back as written', async () => {
+    // Markdown-special characters: escaped text would read \_EywG0b\*x, a ticket Foldseek rejects.
+    const ticketId = '_EywG0b*x';
+    foldseekResume.mockResolvedValue({
+      status: 'query_out_of_range',
+      ticketId,
+      query: 9,
+      queryCount: 4,
+    });
+    const result = await run({ by: 'structure', ticket_id: ticketId, query: 9 });
+
+    expect(result.structuredContent.error).toMatchObject({
+      message: `query 9 is out of range: Foldseek ticket ${ticketId} holds 4 queries.`,
+      data: {
+        reason: 'query_out_of_range',
+        recovery: {
+          hint: expect.stringContaining(`ticket_id "${ticketId}" and query between 0 and 3`),
+        },
+      },
+    });
+    const text = textOf(result);
+    expect(text).toContain(`Foldseek ticket \`${ticketId}\` holds 4 queries.`);
+    expect(text).toContain(
+      `Recovery: Re-call by:"structure" with ticket_id "\`${ticketId}\`" and query between 0 and 3`,
+    );
+    expect(text).not.toContain('\\_EywG0b');
+  });
+});
+
+describe('protein_find_similar — ticket recipes replayed with only the arguments they name', () => {
+  type Input = z.input<typeof findSimilar.input>;
+
+  /** The input arguments a recipe names as whole words, in schema order. */
+  const namedIn = (text: string) =>
+    Object.keys(findSimilar.input.shape).filter((key) => new RegExp(`\\b${key}\\b`).test(text));
+
+  /** The format() line carrying the ticket and its re-call recipe. */
+  const ticketLine = (result: ContractResult) =>
+    textOf(result)
+      .split('\n')
+      .find((line) => line.startsWith('**Ticket:**')) ?? '';
+
+  /** Foldseek answers a resumed ticket for each query its 4-query job holds. */
+  const answerResumes = () =>
+    foldseekResume.mockImplementation(async ({ ticketId, query }) =>
+      query < 4
+        ? multichain({ ticketId, query })
+        : { status: 'query_out_of_range', ticketId, query, queryCount: 4 },
+    );
+
+  interface RecipeCase {
+    /** Values the recipe tells the caller to change from call 1. */
+    changed?: Record<string, unknown>;
+    first: Input;
+    name: string;
+    /** The recipe text call 1 returned. */
+    recipe: (result: ContractResult) => string;
+    /** The poll the replay must send Foldseek. */
+    resumed: { limit?: number; query: number; start?: number; ticketId: string };
+    setup: () => void;
+  }
+
+  it.each<RecipeCase>([
+    {
+      name: 'the computing notice of a non-zero query',
+      first: { by: 'structure', pdb_id: '4HHB', query: 2 },
+      setup: () => foldseekSearch.mockResolvedValue({ status: 'computing', ticketId: 'tkt-slow' }),
+      recipe: (result) => String(result.structuredContent.notice),
+      resumed: { ticketId: 'tkt-slow', query: 2 },
+    },
+    {
+      name: 'the format() ticket line of a completed job, re-paged at its next start',
+      first: { by: 'structure', pdb_id: '4HHB', limit: 1 },
+      setup: () => foldseekSearch.mockResolvedValue(multichain()),
+      recipe: ticketLine,
+      changed: { start: 1 },
+      resumed: { ticketId: 'tkt-4hhb', query: 0, start: 1, limit: 1 },
+    },
+    {
+      name: 'the multi-query notice of a completed job, read at another query',
+      first: { by: 'structure', pdb_id: '4HHB' },
+      setup: () => foldseekSearch.mockResolvedValue(multichain()),
+      recipe: (result) => String(result.structuredContent.notice),
+      changed: { query: 1 },
+      resumed: { ticketId: 'tkt-4hhb', query: 1 },
+    },
+    {
+      name: 'the query_out_of_range recovery hint',
+      first: { by: 'structure', ticket_id: 'tkt-4hhb', query: 9 },
+      setup: () => {},
+      recipe: (result) => String(result.structuredContent.error?.data.recovery?.hint),
+      changed: { query: 3 },
+      resumed: { ticketId: 'tkt-4hhb', query: 3 },
+    },
+  ])('resumes the same ticket from $name without resubmitting', async (c) => {
+    serveCoordinates('data_4HHB');
+    answerResumes();
+    c.setup();
+    const first = await run(c.first);
+    const recipe = c.recipe(first);
+    const ticketId = String(first.structuredContent.ticketId ?? c.first.ticket_id);
+
+    /**
+     * The literal client: every argument the recipe names and nothing else, valued
+     * from call 1 (the ticket from its response) unless the recipe asks for a
+     * different value. A key named only in prose, with no value in call 1, is one
+     * the client has nothing to send for.
+     */
+    const replay = Object.fromEntries(
+      namedIn(recipe).flatMap((key) => {
+        const value =
+          key === 'ticket_id'
+            ? ticketId
+            : c.changed && key in c.changed
+              ? c.changed[key]
+              : (c.first as Record<string, unknown>)[key];
+        return value === undefined ? [] : [[key, value]];
+      }),
+    );
+    const submits = foldseekSearch.mock.calls.length;
+    const downloads = fetchTextWindowMock.mock.calls.length;
+    const polls = foldseekResume.mock.calls.length;
+    // Untyped, as a client sends it: the schema rejects a replay missing a required argument.
+    const resumed = await run(replay as Input);
+
+    expect(resumed.isError).not.toBe(true);
+    expect(resumed.structuredContent).toMatchObject({
+      by: 'structure',
+      status: 'complete',
+      ticketId: c.resumed.ticketId,
+      query: c.resumed.query,
+    });
+    // One poll of call 1's ticket; no new job, no coordinate download.
+    expect(foldseekResume).toHaveBeenCalledTimes(polls + 1);
+    expect(foldseekResume.mock.calls.at(-1)?.[0]).toMatchObject(c.resumed);
+    expect(foldseekSearch).toHaveBeenCalledTimes(submits);
+    expect(fetchTextWindowMock).toHaveBeenCalledTimes(downloads);
   });
 });
 
@@ -2167,6 +2420,8 @@ describe('protein_find_similar — error envelope on both client surfaces', () =
     /** Declared recovery text, or an asymmetric matcher for a runtime-built hint. */
     hint: unknown;
     input: z.input<typeof findSimilar.input>;
+    /** A value the hint quotes for the caller to send back, which content[] renders as a code span. */
+    literal?: string;
     name: string;
     reason: string;
     setup?: () => void;
@@ -2321,7 +2576,8 @@ describe('protein_find_similar — error envelope on both client surfaces', () =
         }),
       code: JsonRpcErrorCode.InvalidParams,
       reason: 'query_out_of_range',
-      hint: expect.stringContaining('query between 0 and 3'),
+      hint: expect.stringContaining('ticket_id "tkt-4hhb" and query between 0 and 3'),
+      literal: 'tkt-4hhb',
       terms: '(reason query_out_of_range)',
     },
   ])('$name carries reason and recovery hint on structuredContent and content[]', async (c) => {
@@ -2336,7 +2592,8 @@ describe('protein_find_similar — error envelope on both client surfaces', () =
     const hint = result.structuredContent.error.data.recovery.hint;
     expect(hint).toBeTruthy();
     const text = result.content.map((block) => block.text).join('\n');
-    expect(text).toContain(`Recovery: ${hint}`);
+    const rendered = c.literal ? hint.replaceAll(c.literal, `\`${c.literal}\``) : hint;
+    expect(text).toContain(`Recovery: ${rendered}`);
     expect(text).toContain(c.terms);
   });
 });
@@ -2565,7 +2822,7 @@ describe('protein_find_similar — one call budget across chained requests', () 
 
   describe('when the budget ends after Foldseek accepted the job', () => {
     /** The real service: Foldseek accepts the job, then the status poll stalls. */
-    const stallAfterSubmit = (ticketId: string, onPoll?: () => void) => {
+    const stallAfterSubmit = (ticketId: string) => {
       foldseekImpl = new FoldseekService(
         {} as never,
         {} as never,
@@ -2573,7 +2830,6 @@ describe('protein_find_similar — one call budget across chained requests', () 
       );
       fetchJsonMock.mockImplementation((url: string, call: { signal: AbortSignal }) => {
         if (url === 'https://foldseek.test/api/ticket') return Promise.resolve({ id: ticketId });
-        onPoll?.();
         return new Promise((_resolve, reject) => {
           if (call.signal.aborted) return reject(call.signal.reason);
           call.signal.addEventListener('abort', () => reject(call.signal.reason), { once: true });
@@ -2646,18 +2902,99 @@ describe('protein_find_similar — one call budget across chained requests', () 
         hits: [],
       });
     });
+  });
 
-    it('still throws when the caller cancels after the submit, never returning computing', async () => {
-      const caller = new AbortController();
-      serveCoordinates('data_1ABC');
-      stallAfterSubmit('tkt-cancelled', () => caller.abort());
-      const outcome = findSimilar.handler(
-        findSimilar.input.parse({ by: 'structure', pdb_id: '1ABC' }),
-        createMockContext({ errors: findSimilar.errors, signal: caller.signal }),
+  describe('when the caller cancels after Foldseek accepted the job', () => {
+    let http: ReturnType<typeof createFetchMock>;
+
+    /**
+     * The real service and HTTP layer over a fetch fake: Foldseek accepts the job,
+     * and the caller cancels while the ticket poll is in flight, which then fails
+     * with the abort as fetch does.
+     */
+    beforeEach(async () => {
+      const actual = await vi.importActual<typeof import('@/services/shared/http.js')>(
+        '@/services/shared/http.js',
       );
+      fetchJsonMock.mockImplementation(actual.fetchJson);
+      foldseekImpl = new FoldseekService(
+        {} as never,
+        {} as never,
+        { foldseekBaseUrl: 'https://foldseek.test' } as never,
+      );
+      serveCoordinates('data_1ABC');
+    });
 
-      await expect(outcome).rejects.toBeInstanceOf(Error);
-      expect(caller.signal.aborted).toBe(true);
+    afterEach(() => {
+      http.restore();
+      fetchJsonMock.mockReset();
+    });
+
+    const foldseekPath = (path: string) => (req: Request) => {
+      const url = new URL(req.url);
+      return url.hostname === 'foldseek.test' && url.pathname === path;
+    };
+
+    const cancelDuringPoll = (caller: AbortController) => {
+      http = createFetchMock([
+        {
+          method: 'POST',
+          match: foldseekPath('/api/ticket'),
+          respond: () => Response.json({ id: 'tkt-cancelled', status: 'PENDING' }),
+        },
+        {
+          match: foldseekPath('/api/ticket/tkt-cancelled'),
+          respond: (req) => {
+            caller.abort();
+            return new Promise<Response>((_, reject) => {
+              if (req.signal.aborted) return reject(req.signal.reason);
+              req.signal.addEventListener('abort', () => reject(req.signal.reason), {
+                once: true,
+              });
+            });
+          },
+        },
+      ]);
+      http.install();
+    };
+
+    it('rethrows the cancellation from the handler, never search_failed', async () => {
+      const caller = new AbortController();
+      cancelDuringPoll(caller);
+      const err = await Promise.resolve(
+        findSimilar.handler(
+          findSimilar.input.parse({ by: 'structure', pdb_id: '1ABC' }),
+          createMockContext({ errors: findSimilar.errors, signal: caller.signal }),
+        ),
+      ).catch((e: unknown) => e);
+
+      expect(err).toMatchObject({
+        code: JsonRpcErrorCode.RequestCancelled,
+        message: expect.stringMatching(/^fetch GET https:\/\/foldseek\.test\/.* was aborted\.$/),
+      });
+      expect(err).not.toMatchObject({ data: { reason: 'search_failed' } });
+      // Submitted once, polled once: nothing retries for a caller that has gone.
+      expect(http.calls.map(({ request }) => new URL(request.url).pathname)).toEqual([
+        '/api/ticket',
+        '/api/ticket/tkt-cancelled',
+      ]);
+    });
+
+    it('settles as the fetch layer’s cancellation on both surfaces', async () => {
+      const caller = new AbortController();
+      cancelDuringPoll(caller);
+      const result = (await runToolContract(
+        findSimilar,
+        { by: 'structure', pdb_id: '1ABC' },
+        { context: { signal: caller.signal } },
+      )) as ContractResult;
+
+      expect(result.isError).toBe(true);
+      const message = String(result.structuredContent.error?.message);
+      expect(result.structuredContent.error?.code).toBe(JsonRpcErrorCode.RequestCancelled);
+      expect(message).toMatch(/^fetch GET https:\/\/foldseek\.test\/.* was aborted\.$/);
+      expect(textOf(result)).toContain(message);
+      expect(textOf(result)).not.toContain('Foldseek did not complete');
     });
   });
 

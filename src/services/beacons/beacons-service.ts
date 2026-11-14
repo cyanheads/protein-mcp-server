@@ -3,16 +3,15 @@
  * (`/uniprot/summary/{accession}.json`), which fronts experimental (PDBe,
  * SASBDB) and predicted (AlphaFold DB, AlphaFill, SWISS-MODEL, BFVD, …) models
  * behind one UniProt-keyed interface. Backs `best_available` resolution in
- * `protein_get_structure`. A federated response can arrive without one
- * provider's models, so a summary can be narrowed to a single provider to
- * confirm what that provider holds. A 404 returns an empty object upstream —
- * treated as "no models", distinct from a transport error.
+ * `protein_get_structure`. A 404 returns an empty object upstream — treated as
+ * "no models", distinct from a transport error.
  * @module services/beacons/beacons-service
  */
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
+import { httpErrorFromResponse } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
 import { fetchResponse, parseJson } from '../shared/http.js';
 
@@ -79,24 +78,19 @@ export class BeaconsService {
   }
 
   /**
-   * Fetch the federated model summary for a UniProt accession, or with
-   * `provider` only that provider's models (3D-Beacons' `provider` query value).
+   * Fetch the federated model summary for a UniProt accession; a 404 is an empty
+   * summary. Throws a status-classified `McpError` on any other non-2xx.
    */
-  async getSummary(accession: string, ctx: Context, provider?: 'pdbe'): Promise<BeaconSummary> {
+  async getSummary(accession: string, ctx: Context): Promise<BeaconSummary> {
     const acc = accession.toUpperCase();
-    const query = provider ? `?provider=${provider}` : '';
-    const url = `${this.baseUrl}/uniprot/summary/${encodeURIComponent(acc)}.json${query}`;
+    const url = `${this.baseUrl}/uniprot/summary/${encodeURIComponent(acc)}.json`;
     const res = await fetchResponse(url, ctx, {
       operation: 'BeaconsService.getSummary',
       baseDelayMs: 500,
     });
     if (res.status === 404) return { accession: acc, found: false, models: [] };
-    if (!res.ok) {
-      // Surface non-404 failures via the framework's status mapping by re-reading the body.
-      throw new Error(`3D-Beacons returned HTTP ${res.status} for ${acc}`);
-    }
-    const text = await res.text();
-    const raw = parseJson<RawSummary>(text, '3D-Beacons');
+    if (!res.ok) throw await httpErrorFromResponse(res, { service: '3D-Beacons' });
+    const raw = parseJson<RawSummary>(await res.text(), '3D-Beacons');
     const models = (raw.structures ?? [])
       .map((s) => s.summary)
       .filter((s): s is RawModelSummary => s != null && !!s.model_identifier)

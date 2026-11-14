@@ -9,9 +9,12 @@
 
 import type { Context } from '@cyanheads/mcp-ts-core';
 import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
+import { defaultIsTransient } from '@cyanheads/mcp-ts-core/utils';
 import type { ServerConfig } from '@/config/server-config.js';
 import { type PollStep, withAsyncPoll } from '../shared/async.js';
+import { budgetExhaustion } from '../shared/call-budget.js';
 import { fetchResponse, fetchText, parseJson } from '../shared/http.js';
 
 /** Alignment method name accepted by the RCSB Structural Comparison API. */
@@ -55,11 +58,14 @@ export interface AlignmentJob {
   structures?: [CompareStructure, CompareStructure];
 }
 
-/** Outcome of one pairwise alignment. */
+/**
+ * Outcome of one pairwise alignment. A failed pair carries `uuid` when its job
+ * was submitted, so the job can still be resumed.
+ */
 export type PairOutcome =
   | { status: 'complete'; uuid: string; scores: PairScores; job?: AlignmentJob }
   | { status: 'computing'; uuid: string }
-  | { status: 'failed'; error: string };
+  | { status: 'failed'; error: string; uuid?: string };
 
 /** A completed poll: the row's scores plus the job record, when echoed. */
 interface PolledResult {
@@ -100,14 +106,17 @@ export class AlignmentService {
       operation: 'AlignmentService.submit',
       label: 'RCSB Alignment API',
       baseDelayMs: 500,
+      isTransient: submitIsRetryable,
     });
     return text.trim().replace(/^"|"$/g, '');
   }
 
   /**
    * Run one pairwise alignment end-to-end: submit, then bounded-poll the result.
-   * Never throws — a submit/poll failure degrades to `{ status: 'failed' }` so
-   * one bad pair doesn't sink the whole comparison.
+   * A submit or poll failure degrades to `{ status: 'failed' }` so one bad pair
+   * doesn't sink the whole comparison. When the call budget stops the submit
+   * before a UUID comes back, the pair fails with no job to resume. Throws only a
+   * caller's cancellation.
    */
   async comparePair(
     a: CompareStructure,
@@ -120,7 +129,15 @@ export class AlignmentService {
     try {
       uuid = await this.submit(a, b, method, ctx);
     } catch (err) {
-      return { status: 'failed', error: err instanceof Error ? err.message : String(err) };
+      const exhausted = budgetExhaustion(ctx);
+      if (exhausted) {
+        return {
+          status: 'failed',
+          error: `${exhausted.message} The alignment service returned no job UUID for this pair, so there is no job to resume: re-call without a resume entry for it to submit a new alignment.`,
+        };
+      }
+      if (ctx.signal.aborted) throw err;
+      return { status: 'failed', error: errorText(err) };
     }
     return this.resumePair(uuid, timeoutMs, ctx);
   }
@@ -130,7 +147,10 @@ export class AlignmentService {
    * without resubmitting. A `404` — which the RCSB API returns identically for an
    * expired UUID and a job still computing — degrades to `{ status: 'computing' }`
    * on timeout rather than a false `failed`, so a legitimately in-flight job is
-   * never mistaken for a dead one. Never throws.
+   * never mistaken for a dead one. When the call budget stops the poll — mid
+   * request, retry backoff, or sleep — the job is still `computing`; any other
+   * poll failure is `failed` with the UUID kept, since the job exists upstream.
+   * Throws only a caller's cancellation.
    */
   async resumePair(uuid: string, timeoutMs: number, ctx: Context): Promise<PairOutcome> {
     try {
@@ -145,7 +165,9 @@ export class AlignmentService {
         ? { status: 'complete', uuid, ...outcome.value }
         : { status: 'computing', uuid };
     } catch (err) {
-      return { status: 'failed', error: err instanceof Error ? err.message : String(err) };
+      if (budgetExhaustion(ctx)) return { status: 'computing', uuid };
+      if (ctx.signal.aborted) throw err;
+      return { status: 'failed', uuid, error: errorText(err) };
     }
   }
 
@@ -164,6 +186,26 @@ export class AlignmentService {
     const job = parseJob(raw.meta?.alignment_method, first.structures);
     return { ready: true, value: { scores: normalizeScores(first), ...(job ? { job } : {}) } };
   }
+}
+
+/**
+ * Retry a submit only when the alignment service cannot have queued the job: a
+ * 429 or 503 refusal, or a connection that failed before a response. A submit
+ * that timed out or drew any other status may already hold a job upstream, so
+ * it is never sent again — a second attempt would queue a duplicate.
+ */
+function submitIsRetryable(error: unknown): boolean {
+  if (!(error instanceof McpError) || !defaultIsTransient(error)) return false;
+  const data = error.data as { errorSource?: unknown; status?: unknown } | undefined;
+  return (
+    error.code === JsonRpcErrorCode.RateLimited ||
+    data?.status === 503 ||
+    data?.errorSource === 'FetchNetworkErrorWrapper'
+  );
+}
+
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 function toQueryStructure(s: CompareStructure): Record<string, unknown> {

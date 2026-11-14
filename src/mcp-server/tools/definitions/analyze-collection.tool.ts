@@ -2,14 +2,14 @@
  * @fileoverview protein_analyze_collection — profile the PDB into distributions
  * and trends (counts by method / organism / polymer type, resolution histograms,
  * release-year timelines, and multidimensional cross-tabs) over an optional
- * scoping query. Backed by RCSB's server-side facet engine: one call, compact
- * buckets, no row pull, no SQL canvas. Fully portable.
+ * scoping query. Backed by RCSB's server-side facet engine: one request under the
+ * 50 s call budget, compact buckets, no row pull, no SQL canvas. Fully portable.
  * @module mcp-server/tools/definitions/analyze-collection.tool
  */
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getServerConfig } from '@/config/server-config.js';
+import { getServerConfig, MAX_FACET_BUCKETS } from '@/config/server-config.js';
 import {
   buildFacetSpec,
   FACET_DIMENSION_NAMES,
@@ -18,6 +18,7 @@ import {
   intervalTarget,
 } from '@/services/rcsb/facets.js';
 import { getRcsbService, METHOD_VOCABULARY } from '@/services/rcsb/rcsb-service.js';
+import { withCallBudget } from '@/services/shared/call-budget.js';
 import {
   CONTENT_TYPE_SCOPES,
   countBuckets,
@@ -176,7 +177,7 @@ export const analyzeCollection = tool('protein_analyze_collection', {
       .number()
       .int()
       .min(1)
-      .max(500)
+      .max(MAX_FACET_BUCKETS)
       .optional()
       .describe(
         'Max buckets per dimension level, not per response. A cross-tab applies the cap separately to the parent dimension and to the nested child inside each parent bucket, so up to bucket_limit × (1 + bucket_limit) buckets can come back — 2550 at the default 50. The realized count comes back as bucketsReturned. Defaults to the configured server cap.',
@@ -234,18 +235,22 @@ export const analyzeCollection = tool('protein_analyze_collection', {
       );
     const spec = buildFacetSpec(primary, input.interval, secondary);
 
-    const { total, facets } = await rcsb.analyzeFacets(
-      {
-        ...(input.query ? { text: input.query } : {}),
-        ...(input.organism ? { organism: input.organism } : {}),
-        ...(input.method ? { method: input.method } : {}),
-        ...(typeof input.max_resolution === 'number'
-          ? { maxResolution: input.max_resolution }
-          : {}),
-        contentType: CONTENT_TYPE_SCOPES[input.content_type],
-      },
-      [spec],
-      ctx,
+    // One budget across the facet request's attempts, so a hung aggregation stops
+    // as this server's Timeout before the client's request timeout.
+    const { total, facets } = await withCallBudget(ctx, (call) =>
+      rcsb.analyzeFacets(
+        {
+          ...(input.query ? { text: input.query } : {}),
+          ...(input.organism ? { organism: input.organism } : {}),
+          ...(input.method ? { method: input.method } : {}),
+          ...(typeof input.max_resolution === 'number'
+            ? { maxResolution: input.max_resolution }
+            : {}),
+          contentType: CONTENT_TYPE_SCOPES[input.content_type],
+        },
+        [spec],
+        call,
+      ),
     );
 
     const out = facets.map((f) => toFacetOutput(f, cap, total));

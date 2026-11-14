@@ -1,36 +1,31 @@
 /**
  * @fileoverview Tests for the 3D-Beacons service: federated model normalization
- * against the real summary shape (UniProt span included), the provider-narrowed
+ * against the real summary shape (UniProt span included), the un-narrowed
  * summary request, the 404 → { found:false } branch (distinct from a transport
- * error), the non-404 throw, the model_identifier filter (drops entries with no
- * ID), and the found = (models.length > 0) rule. HTTP mocked.
+ * error), the non-404 throw as a status-classified error, the model_identifier
+ * filter (drops entries with no ID), the found = (models.length > 0) rule, and
+ * under fake timers a stalled error body cut at the attempt deadline and a 404
+ * that leaves no timer. Run over a strict fetch stub, so the shared HTTP layer
+ * runs too.
  * @module tests/services/beacons/beacons-service.test
  */
 
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
-
-vi.mock('@/services/shared/http.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@/services/shared/http.js')>();
-  return { ...actual, fetchResponse: vi.fn() };
-});
-
+import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BeaconsService } from '@/services/beacons/beacons-service.js';
-import { fetchResponse } from '@/services/shared/http.js';
 
-const fetchResponseMock = vi.mocked(fetchResponse);
+const BASE = 'https://beacons.test';
 
 const service = () =>
-  new BeaconsService(
-    {} as never,
-    {} as never,
-    {
-      beaconsBaseUrl: 'https://beacons.test',
-    } as never,
-  );
+  new BeaconsService({} as never, {} as never, { beaconsBaseUrl: BASE } as never);
 
-const okResponse = (body: unknown) =>
-  ({ status: 200, ok: true, text: async () => JSON.stringify(body) }) as Response;
+const http = createFetchMock();
+
+/** Answer every 3D-Beacons request with `respond`. */
+function serve(respond: (req: Request) => Response): void {
+  http.route({ match: (req) => req.url.startsWith(`${BASE}/`), respond });
+}
 
 /** A real 3D-Beacons `/uniprot/summary/{acc}.json` payload (experimental + predicted). */
 const SUMMARY = {
@@ -65,11 +60,15 @@ const SUMMARY = {
   ],
 };
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  http.reset();
+  http.install();
+});
+afterEach(() => http.restore());
 
 describe('BeaconsService.getSummary', () => {
   it('normalizes experimental and predicted models with provider-specific fields', async () => {
-    fetchResponseMock.mockResolvedValue(okResponse(SUMMARY));
+    serve(() => Response.json(SUMMARY));
     const out = await service().getSummary('p69905', createMockContext());
 
     expect(out.accession).toBe('P69905');
@@ -94,62 +93,45 @@ describe('BeaconsService.getSummary', () => {
       uniprotEnd: 142,
     });
     // The federated request carries no provider filter.
-    expect(fetchResponseMock.mock.calls[0]?.[0]).toBe(
-      'https://beacons.test/uniprot/summary/P69905.json',
-    );
+    expect(http.calls.map((c) => c.request.url)).toEqual([`${BASE}/uniprot/summary/P69905.json`]);
   });
 
   it('omits the UniProt span when the summary lacks it, rather than inventing one', async () => {
-    fetchResponseMock.mockResolvedValue(
-      okResponse({ structures: [{ summary: { model_identifier: 'X1', provider: 'PDBe' } }] }),
+    serve(() =>
+      Response.json({ structures: [{ summary: { model_identifier: 'X1', provider: 'PDBe' } }] }),
     );
     const [model] = (await service().getSummary('P1', createMockContext())).models;
     expect(model).toEqual({ modelIdentifier: 'X1', provider: 'PDBe' });
   });
 
-  it('narrows the summary to one provider with the provider query', async () => {
-    fetchResponseMock.mockResolvedValue(
-      okResponse({ ...SUMMARY, structures: SUMMARY.structures.slice(0, 1) }),
-    );
-    const out = await service().getSummary('p69905', createMockContext(), 'pdbe');
-    expect(fetchResponseMock.mock.calls[0]?.[0]).toBe(
-      'https://beacons.test/uniprot/summary/P69905.json?provider=pdbe',
-    );
-    expect(out.models.map((m) => m.provider)).toEqual(['PDBe']);
-  });
-
-  it('reads a 404 on the provider-narrowed summary as that provider holding no models', async () => {
-    fetchResponseMock.mockResolvedValue({
-      status: 404,
-      ok: false,
-      text: async () => '{}',
-    } as Response);
-    const out = await service().getSummary('Q6ZS81', createMockContext(), 'pdbe');
-    expect(out).toEqual({ accession: 'Q6ZS81', found: false, models: [] });
-  });
-
-  it('returns found:false with no models on a 404 (no transport error thrown)', async () => {
-    fetchResponseMock.mockResolvedValue({
-      status: 404,
-      ok: false,
-      text: async () => '',
-    } as Response);
+  it('returns found:false with no models on a 404, in one request (no error thrown)', async () => {
+    serve(() => Response.json({}, { status: 404 }));
     const out = await service().getSummary('P00000', createMockContext());
     expect(out).toEqual({ accession: 'P00000', found: false, models: [] });
+    expect(http.calls).toHaveLength(1);
   });
 
-  it('throws on a non-404 HTTP failure', async () => {
-    fetchResponseMock.mockResolvedValue({
-      status: 500,
-      ok: false,
-      text: async () => '',
-    } as Response);
-    await expect(service().getSummary('P69905', createMockContext())).rejects.toThrow(/HTTP 500/);
-  });
+  it.each([
+    [503, 'Service Unavailable', JsonRpcErrorCode.ServiceUnavailable],
+    [500, 'Internal Server Error', JsonRpcErrorCode.ServiceUnavailable],
+    [429, 'Too Many Requests', JsonRpcErrorCode.RateLimited],
+    [400, 'Bad Request', JsonRpcErrorCode.InvalidParams],
+  ])(
+    'throws a status-classified error on HTTP %i, in one request',
+    async (status, statusText, code) => {
+      serve(() => new Response('upstream detail', { status, statusText }));
+      await expect(service().getSummary('P69905', createMockContext())).rejects.toMatchObject({
+        code,
+        message: `3D-Beacons returned HTTP ${status} ${statusText}.`,
+        data: { status },
+      });
+      expect(http.calls).toHaveLength(1);
+    },
+  );
 
   it('drops structures whose summary has no model_identifier', async () => {
-    fetchResponseMock.mockResolvedValue(
-      okResponse({
+    serve(() =>
+      Response.json({
         uniprot_entry: { ac: 'P1' },
         structures: [
           { summary: { provider: 'PDBe' } }, // no model_identifier → dropped
@@ -163,18 +145,71 @@ describe('BeaconsService.getSummary', () => {
   });
 
   it('reports found:false when the entry exists but yields zero usable models', async () => {
-    fetchResponseMock.mockResolvedValue(
-      okResponse({ uniprot_entry: { ac: 'P2' }, structures: [] }),
-    );
+    serve(() => Response.json({ uniprot_entry: { ac: 'P2' }, structures: [] }));
     const out = await service().getSummary('P2', createMockContext());
     expect(out).toMatchObject({ accession: 'P2', found: false, models: [] });
   });
 
   it('falls back to the requested accession when uniprot_entry.ac is absent', async () => {
-    fetchResponseMock.mockResolvedValue(
-      okResponse({ structures: [{ summary: { model_identifier: 'X1' } }] }),
-    );
+    serve(() => Response.json({ structures: [{ summary: { model_identifier: 'X1' } }] }));
     const out = await service().getSummary('p9', createMockContext());
     expect(out.accession).toBe('P9');
+  });
+});
+
+describe('BeaconsService.getSummary error-body deadline (fake timers)', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  /** The HTTP layer's per-attempt deadline, which 3D-Beacons requests keep. */
+  const ATTEMPT_MS = 30_000;
+
+  it('throws a 5xx whose body stalls as its status error at the attempt deadline, in one request', async () => {
+    serve(
+      (req) =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode('<html>'));
+              // Like fetch's body, it errors once the request's signal aborts.
+              req.signal.addEventListener('abort', () => controller.error(req.signal.reason), {
+                once: true,
+              });
+            },
+          }),
+          { status: 503, statusText: 'Service Unavailable' },
+        ),
+    );
+    const state: { settled: boolean; error?: unknown } = { settled: false };
+    service()
+      .getSummary('P69905', createMockContext())
+      .then(
+        () => {
+          state.settled = true;
+        },
+        (error: unknown) => {
+          state.settled = true;
+          state.error = error;
+        },
+      );
+
+    await vi.advanceTimersByTimeAsync(ATTEMPT_MS - 1);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    // The same error a prompt 503 draws, never a retry of the status.
+    expect(state.error).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message: '3D-Beacons returned HTTP 503 Service Unavailable.',
+      data: { status: 503 },
+    });
+    expect(http.calls).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('leaves no timer behind on a 404 whose body it never reads', async () => {
+    serve(() => Response.json({}, { status: 404 }));
+    const out = await service().getSummary('P00000', createMockContext());
+    expect(out).toEqual({ accession: 'P00000', found: false, models: [] });
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

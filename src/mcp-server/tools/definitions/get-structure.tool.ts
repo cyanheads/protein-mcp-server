@@ -7,11 +7,12 @@
  * together, and otherwise a per-structure size outline replaces them. Coordinate
  * files are streamed and cancelled once the response holds what it needs, since
  * the file hosts ignore `Range` and send no length. best_available picks a PDB
- * entry from PDBe's models by coverage, then resolution, confirming with a
- * PDBe-only request when the federated summary lacks them, and otherwise ranks
- * the remaining models on one lDDT-scale confidence. predicted and
- * best_available take canonical and isoform accessions and AlphaFold DB entry
- * IDs; after a model provider misses, UniProt decides what the accession is now
+ * entry from PDBe's models by coverage, then resolution, asking PDBe's SIFTS
+ * mapping for them when the federated summary lacks them (canonical accessions
+ * only), and otherwise ranks the remaining models on one lDDT-scale confidence,
+ * with a notice when that check failed. predicted and best_available take
+ * canonical and isoform accessions and AlphaFold DB entry IDs; after a model
+ * provider misses, UniProt decides what the accession is now
  * (a merge resolves to the successor with a notice, a demerged or deleted
  * accession fails its row). IDs are trimmed and de-duplicated before the batch
  * cap, and the cap's remainder is returned as `ignored`. Every upstream request
@@ -21,7 +22,9 @@
  * an outage, `upstream_unavailable`, not as missing entries.
  * Every success-path advisory — repeats, batch cap, partial failure, paging,
  * overflow, failed inlining — accumulates into one notice, since the
- * framework's `notice` field is last-write-wins. Carries upstream data
+ * framework's `notice` field is last-write-wins. An experimental record lists
+ * each polymer entity's first 100 chain IDs per namespace beside its
+ * `chainCount`, or every chain under `all_chains`. Carries upstream data
  * attribution per response.
  * @module mcp-server/tools/definitions/get-structure.tool
  */
@@ -39,11 +42,16 @@ import {
   getAlphaFoldService,
 } from '@/services/alphafold/alphafold-service.js';
 import { type BeaconModel, getBeaconsService } from '@/services/beacons/beacons-service.js';
+import { getPdbeService } from '@/services/pdbe/pdbe-service.js';
 import { getRcsbService } from '@/services/rcsb/rcsb-service.js';
 import type { CoordinateUrls, EntryMeta } from '@/services/rcsb/types.js';
 import { mapWithConcurrency } from '@/services/shared/async.js';
 import { attributionsFor } from '@/services/shared/attribution.js';
-import { withCallBudget } from '@/services/shared/call-budget.js';
+import {
+  budgetExhaustion,
+  cancelledByCaller,
+  withCallBudget,
+} from '@/services/shared/call-budget.js';
 import {
   type FetchOptions,
   fetchTextWindow,
@@ -57,6 +65,7 @@ import {
   isPdbId,
   isPredictionAccession,
   isUniProtAccession,
+  isUniProtIsoform,
 } from '@/services/shared/identifiers.js';
 import { TextBudget } from '@/services/shared/text-budget.js';
 import {
@@ -68,6 +77,7 @@ import {
 import {
   attributionSchema,
   ligandSchema,
+  polymerEntityOutput,
   polymerEntitySchema,
   renderAttribution,
 } from './_schemas.js';
@@ -78,6 +88,13 @@ import {
  * outline budget, so a window and the overflow outline share one limit.
  */
 const COORDS_WINDOW = DEFAULT_OUTLINE_BUDGET_BYTES;
+
+/**
+ * Chain IDs each polymer entity lists per namespace unless `all_chains` is set.
+ * 100 touches the fewest entries (188 entities in 130 PDB entries carry more)
+ * while cutting the long tail: 36ZA_7 alone has 1,615 chains.
+ */
+const CHAIN_LIST_CAP = 100;
 
 const confidenceBucketsSchema = z.object({
   veryLow: z.number().describe('Fraction of residues with pLDDT < 50.'),
@@ -127,7 +144,7 @@ const structureRecordSchema = z
       .array(polymerEntitySchema)
       .optional()
       .describe(
-        'Modeled polymer entities, each with both chain namespaces — authAsymIds for protein_get_annotations.chain, labelAsymIds for protein_compare_structures.chain. Present when the call used source experimental (computed-model IDs included); omitted under source predicted or best_available and for entries with none.',
+        `Modeled polymer entities, each with both chain namespaces — authAsymIds for protein_get_annotations.chain, labelAsymIds for protein_compare_structures.chain — and chainCount. Each namespace lists an entity's first ${CHAIN_LIST_CAP} chains, in RCSB order, unless all_chains is set. Present when the call used source experimental (computed-model IDs included); omitted under source predicted or best_available and for entries with none.`,
       ),
     ligands: z
       .array(ligandSchema)
@@ -222,7 +239,7 @@ type StructureRecord = z.infer<typeof structureRecordSchema>;
 
 export const getStructure = tool('protein_get_structure', {
   title: 'protein-mcp-server: get structure',
-  description: `Fetch structures with metadata and coordinate-file URLs. source "experimental" takes PDB entry IDs, and also resolves the computed-model IDs protein_search_structures returns (AF_*/MA_*), which come back marked source "predicted" with their modelling provider; "predicted" takes UniProt accessions, isoform accessions (P04637-2), or AlphaFold DB entry IDs (AF-P04637-2-F1) (AlphaFold, with pLDDT/PAE confidence); "best_available" takes the same identifiers, an entry ID reduced to its accession, and returns the top federated model — the PDB entry with the widest UniProt coverage, ties going to the finest resolution (coverage measures the mapped span, so the pick can be an engineered mutant over the wild-type entry), else the model with the highest confidence on the lDDT scale (pLDDT/100 or QMEANDisCo), unscored models last, which can include an experimental model outside the PDB such as a SASBDB fit; best_available records carry coverage and the UniProt span. Under predicted and best_available, a UniProt accession merged into another entry resolves to its successor's model with a notice naming the merge, and a demerged or deleted accession lands in failed[] with its replacements. Records fetched under source "experimental", computed models included, also carry polymer entities with both chain namespaces (labelAsymIds for protein_compare_structures, authAsymIds for protein_get_annotations), bound ligands, molecular weight, and release date. Resolves up to the configured batch cap per call with per-ID partial success: IDs are trimmed and repeats looked up once, missed IDs are listed in failed[] with their reasons, and IDs beyond the cap are listed in ignored, never looked up. Upstream lookups share one time budget per call; under predicted and best_available, an ID not finished within it, or whose upstream lookup failed, lands in failed[] with a reason to re-call it. Set include_coords to inline coordinate text, held to ${COORDS_WINDOW} characters per response on both surfaces: a lone selected file arrives in ${COORDS_WINDOW}-character windows, each giving coordinatesNextOffset to pass back as coords_offset; several selected files inline whole when they total ${COORDS_WINDOW} characters or fewer, and otherwise overflow lists each file's length — re-call with sections naming one structure to page through its file. coordinateUrls always link the complete files.`,
+  description: `Fetch structures with metadata and coordinate-file URLs. source "experimental" takes PDB entry IDs, and also resolves the computed-model IDs protein_search_structures returns (AF_*/MA_*), which come back marked source "predicted" with their modelling provider; "predicted" takes UniProt accessions, isoform accessions (P04637-2), or AlphaFold DB entry IDs (AF-P04637-2-F1) (AlphaFold, with pLDDT/PAE confidence); "best_available" takes the same identifiers, an entry ID reduced to its accession, and returns the top federated model — the PDB entry with the widest UniProt coverage, ties going to the finest resolution (coverage measures the mapped span, so the pick can be an engineered mutant over the wild-type entry), else the model with the highest confidence on the lDDT scale (pLDDT/100 or QMEANDisCo), unscored models last, which can include an experimental model outside the PDB such as a SASBDB fit; best_available records carry coverage and the UniProt span. Under predicted and best_available, a UniProt accession merged into another entry resolves to its successor's model with a notice naming the merge, and a demerged or deleted accession lands in failed[] with its replacements. Records fetched under source "experimental", computed models included, also carry polymer entities with both chain namespaces (labelAsymIds for protein_compare_structures, authAsymIds for protein_get_annotations; each lists an entity's first ${CHAIN_LIST_CAP} chains beside its chainCount, or every chain with all_chains), bound ligands, molecular weight, and release date. Resolves up to the configured batch cap per call with per-ID partial success: IDs are trimmed and repeats looked up once, missed IDs are listed in failed[] with their reasons, and IDs beyond the cap are listed in ignored, never looked up. Upstream lookups share one time budget per call; under predicted and best_available, an ID not finished within it, or whose upstream lookup failed, lands in failed[] with a reason to re-call it. Set include_coords to inline coordinate text, held to ${COORDS_WINDOW} characters per response on both surfaces: a lone selected file arrives in ${COORDS_WINDOW}-character windows, each giving coordinatesNextOffset to pass back as coords_offset; several selected files inline whole when they total ${COORDS_WINDOW} characters or fewer, and otherwise overflow lists each file's length — re-call with sections naming one structure to page through its file. coordinateUrls always link the complete files.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   errors: [
@@ -290,7 +307,15 @@ export const getStructure = tool('protein_get_structure', {
       .describe(
         `Character offset of the window to return when exactly one structure is selected (sections naming one ID, or include_coords on a one-ID call): the window is characters [coords_offset, coords_offset + ${COORDS_WINDOW}). Pass the coordinatesNextOffset a previous window returned.`,
       ),
+    all_chains: z
+      .boolean()
+      .default(false)
+      .describe(
+        `List every chain ID of each polymer entity. Off by default: authAsymIds and labelAsymIds hold an entity's first ${CHAIN_LIST_CAP} chains, and chainCount its full count. Applies to source experimental; the other sources return no polymer entities.`,
+      ),
   }),
+  // The sibling tools name a PDB entry pdb_id; a lone string is wrapped into ids.
+  inputAliases: { pdb_id: 'ids', id: 'ids', identifier: 'ids' },
 
   output: z.object({
     structures: z
@@ -361,7 +386,7 @@ export const getStructure = tool('protein_get_structure', {
       .string()
       .optional()
       .describe(
-        'Every applicable advisory joined into one string: repeated IDs counted once, batch cap, partial failures, a UniProt merge that resolved an accession to its successor, an unavailable PDB check behind a best_available pick, a computed model whose provider coordinate lookup failed (only its BinaryCIF URL listed), the re-call for the next coordinate window, a coords_offset past the end of the file, a sections entry that matched no structure, coordinate-budget overflow, and failed coordinate inlining.',
+        `Every applicable advisory joined into one string: repeated IDs counted once, batch cap, partial failures, a UniProt merge that resolved an accession to its successor, an unavailable PDB check behind a best_available pick, a computed model whose provider coordinate lookup failed (only its BinaryCIF URL listed), chain-ID lists capped at ${CHAIN_LIST_CAP} per polymer entity, the re-call for the next coordinate window, a coords_offset past the end of the file, a sections entry that matched no structure, coordinate-budget overflow, and failed coordinate inlining.`,
       ),
   },
 
@@ -412,7 +437,7 @@ export const getStructure = tool('protein_get_structure', {
     const { structures, failed, inlined } = await withCallBudget(ctx, async (call) => {
       const resolution =
         input.source === 'experimental'
-          ? await fetchExperimental(ids, cfg.fanoutConcurrency, call)
+          ? await fetchExperimental(ids, input.all_chains, cfg.fanoutConcurrency, call)
           : await fetchPredictedOrBest(ids, input.source, cfg.fanoutConcurrency, call);
 
       if (resolution.structures.length === 0) {
@@ -535,12 +560,20 @@ export const getStructure = tool('protein_get_structure', {
       if (s.polymerEntities && s.polymerEntities.length > 0) {
         lines.push('**Polymer entities:**');
         for (const e of s.polymerEntities) {
+          // Both namespaces are labelled, never merged — they are not interchangeable.
+          // A list shorter than chainCount was capped, and says so.
+          const chains = (namespace: string, ids: string[] | undefined) =>
+            ids
+              ? `${namespace}${ids.length < (e.chainCount ?? 0) ? ` (first ${ids.length})` : ''}: ${ids.join(', ')}`
+              : null;
           const parts = [
             e.description,
             e.organisms && e.organisms.length > 0 ? e.organisms.join(', ') : null,
-            // Both namespaces are labelled, never merged — they are not interchangeable.
-            e.authAsymIds ? `auth_asym_id: ${e.authAsymIds.join(', ')}` : null,
-            e.labelAsymIds ? `label_asym_id: ${e.labelAsymIds.join(', ')}` : null,
+            typeof e.chainCount === 'number'
+              ? `${e.chainCount} chain${e.chainCount === 1 ? '' : 's'}`
+              : null,
+            chains('auth_asym_id', e.authAsymIds),
+            chains('label_asym_id', e.labelAsymIds),
             typeof e.sequenceLength === 'number' ? `${e.sequenceLength} residues` : null,
           ].filter(Boolean);
           lines.push(`- **${e.entityId}** — ${parts.join(' · ')}`);
@@ -631,18 +664,9 @@ function dedupeIds(raw: readonly string[]): { repeated: string[]; unique: string
   return { unique: [...first.values()], repeated: [...repeated] };
 }
 
-/**
- * True when `withCallBudget` stopped the call's requests: its signal aborts with
- * a `TimeoutError` reason, while a caller's cancellation carries the caller's
- * own reason and must stay a cancellation.
- */
-function budgetSpent(ctx: Context): boolean {
-  const reason: unknown = ctx.signal.reason;
-  return ctx.signal.aborted && reason instanceof DOMException && reason.name === 'TimeoutError';
-}
-
 async function fetchExperimental(
   ids: string[],
+  allChains: boolean,
   concurrency: number,
   ctx: Context,
 ): Promise<Resolution> {
@@ -651,7 +675,10 @@ async function fetchExperimental(
   const byId = new Map(entries.map((e) => [e.id.toUpperCase(), e]));
   const structures: StructureRecord[] = [];
   const failed: Resolution['failed'] = [];
+  const notices: string[] = [];
   const csms: Array<{ meta: EntryMeta; record: StructureRecord }> = [];
+  // "4 entities in 36ZA" per structure whose chain lists the cap cut.
+  const chainCapped: string[] = [];
   for (const id of ids) {
     const meta = byId.get(id.toUpperCase());
     if (!meta) {
@@ -663,6 +690,19 @@ async function fetchExperimental(
     // their IDs under the default content_type. Read the provenance rather than
     // stamping every resolved ID experimental — that would both contradict the
     // record and credit an AlphaFold/ModelArchive model to the PDB's CC0.
+    // The entities are copies with their chain lists capped: EntryMeta keeps the
+    // complete lists that protein_track_ligands and pdb:// read.
+    const polymerEntities = meta.polymerEntities.map((e) =>
+      polymerEntityOutput(e, allChains ? undefined : CHAIN_LIST_CAP),
+    );
+    const cut = allChains
+      ? 0
+      : polymerEntities.filter((e) => (e.chainCount ?? 0) > CHAIN_LIST_CAP).length;
+    if (cut > 0) {
+      chainCapped.push(
+        `${cut} ${cut === 1 ? 'entity' : 'entities'} in ${escapeMarkdownInline(meta.id)}`,
+      );
+    }
     const record: StructureRecord = {
       id: meta.id,
       source: meta.computedModelProvider ? 'predicted' : 'experimental',
@@ -675,19 +715,23 @@ async function fetchExperimental(
         : {}),
       ...(meta.releaseDate ? { releaseDate: meta.releaseDate } : {}),
       ...(meta.organisms.length > 0 ? { organisms: meta.organisms } : {}),
-      // Already on EntryMeta from the same getEntries() call — omitted rather than
-      // emitted empty, so a sparse entry does not read as "this entry has none".
-      ...(meta.polymerEntities.length > 0 ? { polymerEntities: meta.polymerEntities } : {}),
+      // Omitted rather than emitted empty, so a sparse entry does not read as
+      // "this entry has none".
+      ...(polymerEntities.length > 0 ? { polymerEntities } : {}),
       ...(meta.ligands.length > 0 ? { ligands: meta.ligands } : {}),
       coordinateUrls: rcsb.coordinateUrls(meta),
     };
     structures.push(record);
     if (meta.computedModelProvider) csms.push({ meta, record });
   }
+  if (chainCapped.length > 0) {
+    notices.push(
+      `Chain-ID lists hold the first ${CHAIN_LIST_CAP} chains per polymer entity, capping ${chainCapped.join(', ')}; chainCount gives each entity's full count, and all_chains: true or pdb://{entry_id} lists every chain.`,
+    );
+  }
 
   // RCSB publishes only BinaryCIF for a computed model; its provider publishes the
   // text formats. Each lookup degrades to the RCSB BinaryCIF URL on its own row.
-  const notices: string[] = [];
   await mapWithConcurrency(csms, concurrency, async ({ meta, record }) => {
     const provider = await providerCoordinateUrls(meta, ctx);
     if (provider === 'unresolved') {
@@ -726,7 +770,7 @@ async function providerCoordinateUrls(
     .catch((err: unknown) => {
       // A lookup the call's budget stopped degrades like a failed one; a
       // caller's cancellation stays cancelled.
-      if (ctx.signal.aborted && !budgetSpent(ctx)) throw err;
+      if (cancelledByCaller(ctx)) throw err;
       ctx.log.warning('AlphaFold coordinate lookup failed', {
         id: meta.id,
         error: err instanceof Error ? err.message : err,
@@ -800,10 +844,10 @@ async function fetchPredictedOrBest(
     } catch (err) {
       // A caller's cancellation stays a cancellation. Anything else — the budget
       // stopping this ID, or a provider lookup failing with any error (3D-Beacons
-      // throws a plain Error, a refused connection a TypeError) — fails only this
-      // ID's row, so the IDs already resolved still return.
-      if (ctx.signal.aborted && !budgetSpent(ctx)) throw err;
-      if (budgetSpent(ctx)) return missed(BUDGET_STOPPED, 'budget');
+      // throws a status-classified McpError, a refused connection a TypeError) —
+      // fails only this ID's row, so the IDs already resolved still return.
+      if (budgetExhaustion(ctx) !== undefined) return missed(BUDGET_STOPPED, 'budget');
+      if (ctx.signal.aborted) throw err;
       ctx.log.warning('Upstream lookup failed for an ID', {
         id,
         error: err instanceof Error ? err.message : err,
@@ -929,59 +973,65 @@ async function fetchBest(id: string, ctx: Context): Promise<IdOutcome> {
   }
 }
 
-/** What {@link federatedPick} found, and the advisories it raised on the way. */
+/** What {@link federatedPick} found; `pdbCheckNotice` is present when its PDB check failed. */
 interface FederatedPick {
-  notices: string[];
+  pdbCheckNotice?: string;
   record?: StructureRecord;
 }
 
-/** A federated pick as a per-ID outcome: `notice` leads its advisories; with no record, `miss` leads the reason. */
+/**
+ * A federated pick as a per-ID outcome: `notice` leads its advisories. With no
+ * record, `miss` is the reason, unless the PDB check failed: the ID is then not
+ * known to lack a structure, so it fails as an upstream outage.
+ */
 function settle(found: FederatedPick, opts: { miss: string; notice?: string }): IdOutcome {
-  if (!found.record) return missed([opts.miss, ...found.notices].join(' '));
+  if (!found.record) {
+    return found.pdbCheckNotice ? missed(UPSTREAM_FAILED, 'upstream') : missed(opts.miss);
+  }
   return {
     kind: 'resolved',
-    notices: opts.notice ? [opts.notice, ...found.notices] : found.notices,
+    notices: [opts.notice, found.pdbCheckNotice].filter((n) => n !== undefined),
     record: found.record,
   };
 }
 
 /**
  * The pick among `models`, 3D-Beacons' answer for `accession`. PDB entries come
- * only from PDBe's models, ranked by UniProt coverage, then resolution, then
- * model ID — the order PDBe's own best-structures mapping uses. A federated
- * summary can arrive without PDBe's models, so when it carries none a PDBe-only
- * request confirms; 3D-Beacons answers that request with a 404 when PDBe holds
- * no entry. The confirm corrects an answer already in hand, so when it fails
- * the federated ranking stands, with a notice; a cancelled or out-of-budget
- * call stays stopped. With no PDB entry, every other model — predicted, or
- * experimental but outside the PDB (a SASBDB fit) — ranks by confidence.
+ * only from PDBe, ranked by UniProt coverage, then resolution, then model ID —
+ * the order PDBe's own best-structures mapping uses. A federated summary can
+ * arrive without PDBe's models, so when it carries none, PDBe's SIFTS mapping
+ * is asked for the accession's PDB entries; its 404 means PDBe maps none. An
+ * isoform accession is not checked, so its pick stays among the models
+ * 3D-Beacons lists for the isoform itself. The check corrects an answer already
+ * in hand, so when it fails the federated ranking stands, with a notice; a
+ * cancelled or out-of-budget call stays stopped. With no PDB entry, every other
+ * model — predicted, or experimental but outside the PDB (a SASBDB fit) — ranks
+ * by confidence.
  */
 async function federatedPick(
   accession: string,
   models: BeaconModel[],
   ctx: Context,
 ): Promise<FederatedPick> {
-  const notices: string[] = [];
   let pdbModels = models.filter(isPdbeModel);
-  if (pdbModels.length === 0) {
+  let pdbCheckNotice: string | undefined;
+  if (pdbModels.length === 0 && !isUniProtIsoform(accession)) {
     try {
-      const confirmed = await getBeaconsService().getSummary(accession, ctx, 'pdbe');
-      pdbModels = confirmed.models.filter(isPdbeModel);
+      pdbModels = await getPdbeService().getBestStructures(accession, ctx);
     } catch (err) {
       if (ctx.signal.aborted) throw err;
-      ctx.log.warning('PDBe-only 3D-Beacons check failed', {
+      ctx.log.warning('PDBe SIFTS check failed', {
         accession,
         error: err instanceof Error ? err.message : err,
       });
-      notices.push(
-        `The PDB check for ${accession} was unavailable, so its pick ranks the federated models alone and may pass over a PDB entry — re-call for the PDB-first pick.`,
-      );
+      pdbCheckNotice = `The PDB check for ${accession} was unavailable, so its pick ranks the federated models alone and may pass over a PDB entry — re-call for the PDB-first pick.`;
     }
   }
+  const check = pdbCheckNotice ? { pdbCheckNotice } : {};
   const [pdbPick] = pdbModels.toSorted(byCoverageThenResolution);
-  if (pdbPick) return { record: await pdbEntryRecord(accession, pdbPick, ctx), notices };
+  if (pdbPick) return { record: await pdbEntryRecord(accession, pdbPick, ctx), ...check };
   const [otherPick] = models.filter((m) => !isPdbeModel(m)).toSorted(byConfidence);
-  return otherPick ? { record: federatedModelRecord(accession, otherPick), notices } : { notices };
+  return otherPick ? { record: federatedModelRecord(accession, otherPick), ...check } : check;
 }
 
 /** A PDBe model: the only federated model that is a PDB entry, served by RCSB. */
@@ -1188,7 +1238,7 @@ function textCoordinateFile(s: StructureRecord): { format: 'cif' | 'pdb'; url: s
  * file like any other; a caller's cancellation is rethrown, never reported as one.
  */
 function onReadFailure(s: StructureRecord, err: unknown, ctx: Context): void {
-  if (ctx.signal.aborted && !budgetSpent(ctx)) throw err;
+  if (cancelledByCaller(ctx)) throw err;
   ctx.log.warning('Failed to inline coordinates', {
     id: s.id,
     error: err instanceof Error ? err.message : err,

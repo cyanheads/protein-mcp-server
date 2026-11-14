@@ -8,10 +8,15 @@
 
 import { tool, z } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { getServerConfig } from '@/config/server-config.js';
+import { getServerConfig, MAX_FACET_BUCKETS } from '@/config/server-config.js';
 import { buildFacetSpec, FACET_DIMENSION_NAMES } from '@/services/rcsb/facets.js';
-import { getRcsbService, METHOD_VOCABULARY } from '@/services/rcsb/rcsb-service.js';
-import type { EntryMeta, SearchHit } from '@/services/rcsb/types.js';
+import {
+  getRcsbService,
+  METHOD_VOCABULARY,
+  SEQUENCE_HIT_CEILING,
+} from '@/services/rcsb/rcsb-service.js';
+import type { ContentType, EntryMeta, SearchHit } from '@/services/rcsb/types.js';
+import { withCallBudget } from '@/services/shared/call-budget.js';
 import { entryIdOf, isComputedModelId } from '@/services/shared/identifiers.js';
 import { normalizeProteinSequence } from '@/services/shared/protein-sequence.js';
 import {
@@ -66,19 +71,29 @@ function computedModelNotice(filters: ReadonlyArray<(typeof EXPERIMENTAL_ONLY_FI
   return `No predicted models matched: computed models carry no ${lacking}, so ${named} ${many ? 'match' : 'matches'} nothing under content_type "predicted". Drop ${many ? 'them' : 'it'}, or set content_type to "experimental" or "all".`;
 }
 
+/** Each content universe as a notice names its search and its hits. */
+const UNIVERSE_NAMES = {
+  experimental: { search: 'experimental-structure search', hits: 'experimental structures' },
+  computational: { search: 'predicted-model search', hits: 'predicted models' },
+} satisfies Record<ContentType, { search: string; hits: string }>;
+
 /**
  * Why a search matched nothing, and the next move: the computed-model advice
  * when experimental-only filters emptied a predicted search, otherwise the
- * scope's own advice, plus the one-word organism advice and the find_ligand
- * pointer when those filters were set.
+ * scope's own advice — or, when a sequence search left a universe out, what the
+ * other universe alone matched — plus the one-word organism advice and the
+ * find_ligand pointer when those filters were set.
  */
-function zeroHitNotice(input: {
-  content_type: keyof typeof ZERO_HIT_NOTICE;
-  ligand?: string | undefined;
-  max_resolution?: number | undefined;
-  method?: string | undefined;
-  organism?: string | undefined;
-}): string {
+function zeroHitNotice(
+  input: {
+    content_type: keyof typeof ZERO_HIT_NOTICE;
+    ligand?: string | undefined;
+    max_resolution?: number | undefined;
+    method?: string | undefined;
+    organism?: string | undefined;
+  },
+  answeredAlone: ContentType | undefined,
+): string {
   const experimentalOnly = EXPERIMENTAL_ONLY_FILTERS.filter(
     ([name]) => input[name] !== undefined && input[name] !== '',
   );
@@ -86,12 +101,33 @@ function zeroHitNotice(input: {
     return computedModelNotice(experimentalOnly);
   }
   return [
-    ZERO_HIT_NOTICE[input.content_type],
+    answeredAlone
+      ? `No ${UNIVERSE_NAMES[answeredAlone].hits} matched.`
+      : ZERO_HIT_NOTICE[input.content_type],
     input.organism ? oneWordOrganismNotice(input.organism) : undefined,
     input.ligand ? LIGAND_ZERO_HIT_NOTICE : undefined,
   ]
     .filter(Boolean)
     .join(' ');
+}
+
+/**
+ * A sequence search that left a universe out: its search failed, so the response
+ * covers the other alone. RCSB can keep failing one sequence search across
+ * re-calls hours apart, so a re-call is offered as a retry, never as a fix.
+ */
+function leftOutNotice(failed: ContentType, answered: ContentType): string {
+  return `The ${UNIVERSE_NAMES[failed].search} failed upstream, so hits and totalCount cover ${UNIVERSE_NAMES[answered].hits} only. A re-call retries it, but RCSB can keep failing the same sequence search, so the re-call may leave it out again.`;
+}
+
+/**
+ * The universes whose sequence search reached RCSB's hit ceiling, each
+ * reporting {@link SEQUENCE_HIT_CEILING} hits however many more match.
+ */
+function ceilingNotice(capped: ContentType[]): string {
+  const searches = new Intl.ListFormat('en').format(capped.map((c) => UNIVERSE_NAMES[c].search));
+  const many = capped.length > 1;
+  return `RCSB stops a sequence search at ${SEQUENCE_HIT_CEILING.toLocaleString('en-US')} hits, and the ${searches} ${many ? 'each reached' : 'reached'} it, so ${many ? 'each' : 'its'} count is that ceiling, not a complete count. Raise min_identity, lower max_evalue, or add organism to narrow the search to a complete count.`;
 }
 
 /** Pull a UniProt accession out of a computed-model identifier when present (`AF_AFP69905F1` → `P69905`). */
@@ -104,18 +140,23 @@ function accessionFromCsm(id: string): string | undefined {
  * them rather than the first. The cap here is fixed server-side with no per-call
  * override, so the route to the long tail is another tool: every dimension this
  * tool facets is also a `protein_analyze_collection` `group_by` value, and that
- * tool takes a `bucket_limit` up to 500.
+ * tool takes a `bucket_limit` up to {@link MAX_FACET_BUCKETS}.
  *
- * A sequence search has no such route — `protein_analyze_collection` has no
- * sequence input, so it cannot reproduce the result set the facet describes.
- * Pointing there would hand back a different distribution under the same name,
- * so that case is told to narrow the request instead.
+ * Two cases have no such route and are told to narrow the request instead. A
+ * sequence search: `protein_analyze_collection` has no sequence input, so it
+ * cannot reproduce the result set the facet describes, and pointing there would
+ * hand back a different distribution under the same name. A cap already at
+ * {@link MAX_FACET_BUCKETS}: no `bucket_limit` there reaches past it.
  */
 function truncationNotice(dimensions: string[], cap: number, sequenceSearch: boolean): string {
   const named = `${dimensions.join(' and ')} ${dimensions.length > 1 ? 'were' : 'was'} capped at ${cap} buckets`;
-  return sequenceSearch
-    ? `${named}. protein_analyze_collection cannot reproduce a sequence search, so narrow this request instead: drop sequence, or add organism, method, max_resolution, ligand, or query filters to shrink the distribution before the cap.`
-    : `${named}. Call protein_analyze_collection with ${dimensions.length > 1 ? 'each dimension' : 'that dimension'} in group_by and a bucket_limit above ${cap} (up to 500) to reach the long tail.`;
+  if (sequenceSearch) {
+    return `${named}. protein_analyze_collection cannot reproduce a sequence search, so narrow this request instead: drop sequence, or add organism, method, max_resolution, ligand, or query filters to shrink the distribution before the cap.`;
+  }
+  if (cap >= MAX_FACET_BUCKETS) {
+    return `${named}. protein_analyze_collection's bucket_limit also stops at ${MAX_FACET_BUCKETS}, so narrow this request instead: add organism, method, max_resolution, ligand, or query filters to shrink the distribution before the cap.`;
+  }
+  return `${named}. Call protein_analyze_collection with ${dimensions.length > 1 ? 'each dimension' : 'that dimension'} in group_by and a bucket_limit above ${cap} (up to ${MAX_FACET_BUCKETS}) to reach the long tail.`;
 }
 
 export const searchStructures = tool('protein_search_structures', {
@@ -216,7 +257,7 @@ export const searchStructures = tool('protein_search_structures', {
       .enum(['experimental', 'predicted', 'all'])
       .default('all')
       .describe(
-        'Which structure universe to search: experimental (PDB), predicted (computed models), or all.',
+        'Which structure universe to search: experimental (PDB), predicted (computed models), or all. With a sequence, all searches each universe on its own and merges the hits by bit score.',
       ),
     facets: z
       .array(z.enum(FACET_DIMENSION_NAMES))
@@ -252,7 +293,7 @@ export const searchStructures = tool('protein_search_structures', {
               .number()
               .optional()
               .describe(
-                "RCSB relevance score, relative to the other hits of this search rather than a similarity measure; a sequence hit's similarity is in identity, evalue, and bitscore.",
+                "RCSB relevance score, a rank within its own search rather than a similarity measure. With a sequence, each universe is searched on its own, so the score ranks a hit within its own universe only; a sequence hit's similarity is in identity, evalue, and bitscore.",
               ),
             identity: z
               .number()
@@ -260,7 +301,12 @@ export const searchStructures = tool('protein_search_structures', {
               .describe(
                 'Sequence identity 0–1 over the alignment, to 4 decimal places (sequence hits).',
               ),
-            evalue: z.number().optional().describe('Alignment E-value (sequence hits).'),
+            evalue: z
+              .number()
+              .optional()
+              .describe(
+                "Alignment E-value against its own universe's sequence database, so compare hits across universes by bitscore (sequence hits).",
+              ),
             bitscore: z.number().optional().describe('Alignment bit score (sequence hits).'),
             alignmentLength: z
               .number()
@@ -341,7 +387,7 @@ export const searchStructures = tool('protein_search_structures', {
       .string()
       .optional()
       .describe(
-        'Advisory note (empty results, predicted-search caveats, truncation, facet dimensions whose buckets cover materially less than totalCount). Carries every applicable advisory in one string.',
+        "Advisory note (empty results, predicted-search caveats, truncation, facet dimensions whose buckets cover materially less than totalCount, a universe a sequence search left out because its search failed, a sequence search at RCSB's 2,000-hit ceiling). Carries every applicable advisory in one string.",
       ),
   },
 
@@ -387,33 +433,41 @@ export const searchStructures = tool('protein_search_structures', {
     const rcsb = getRcsbService();
     const facetSpecs = input.facets?.map((d) => buildFacetSpec(d));
 
-    const result = await rcsb.search(
-      {
-        ...(input.query ? { text: input.query } : {}),
-        ...(input.sequence ? { sequence: normalizeProteinSequence(input.sequence) } : {}),
-        ...(input.organism ? { organism: input.organism } : {}),
-        ...(input.method ? { method: input.method } : {}),
-        ...(typeof input.max_resolution === 'number'
-          ? { maxResolution: input.max_resolution }
-          : {}),
-        ...(input.ligand ? { ligand: input.ligand } : {}),
-        ...(typeof input.min_identity === 'number' ? { minIdentity: input.min_identity } : {}),
-        ...(typeof input.max_evalue === 'number' ? { maxEvalue: input.max_evalue } : {}),
-        contentType: CONTENT_TYPE_SCOPES[input.content_type],
-        limit: input.limit,
-        start: input.start,
-      },
-      ctx,
-      facetSpecs,
-    );
-
-    const experimentalIds = [
-      ...new Set(result.hits.filter((h) => !isComputedModelId(h.id)).map((h) => entryIdOf(h.id))),
-    ];
-    const metaById = new Map<string, EntryMeta>();
-    if (experimentalIds.length > 0) {
-      for (const meta of await rcsb.getEntries(experimentalIds, ctx)) metaById.set(meta.id, meta);
-    }
+    // One budget across every request the call chains — under content_type "all"
+    // a sequence search per universe, then the metadata lookup — so a universe
+    // whose search hangs through its retries cannot hold the call past the
+    // client's request timeout. The service leaves out a universe still
+    // searching at its own earlier deadline, so the lookup starts with budget left.
+    const { result, metaById } = await withCallBudget(ctx, async (call) => {
+      const result = await rcsb.search(
+        {
+          ...(input.query ? { text: input.query } : {}),
+          ...(input.sequence ? { sequence: normalizeProteinSequence(input.sequence) } : {}),
+          ...(input.organism ? { organism: input.organism } : {}),
+          ...(input.method ? { method: input.method } : {}),
+          ...(typeof input.max_resolution === 'number'
+            ? { maxResolution: input.max_resolution }
+            : {}),
+          ...(input.ligand ? { ligand: input.ligand } : {}),
+          ...(typeof input.min_identity === 'number' ? { minIdentity: input.min_identity } : {}),
+          ...(typeof input.max_evalue === 'number' ? { maxEvalue: input.max_evalue } : {}),
+          contentType: CONTENT_TYPE_SCOPES[input.content_type],
+          limit: input.limit,
+          start: input.start,
+        },
+        call,
+        facetSpecs,
+      );
+      const experimentalIds = [
+        ...new Set(result.hits.filter((h) => !isComputedModelId(h.id)).map((h) => entryIdOf(h.id))),
+      ];
+      const metaById = new Map<string, EntryMeta>();
+      if (experimentalIds.length > 0) {
+        for (const meta of await rcsb.getEntries(experimentalIds, call))
+          metaById.set(meta.id, meta);
+      }
+      return { result, metaById };
+    });
 
     const hits = result.hits.map((h) => toHit(h, metaById, Boolean(input.sequence)));
     const facets = result.facets?.map((f) => toFacetOutput(f, cfg.facetBucketCap, result.total));
@@ -426,15 +480,25 @@ export const searchStructures = tool('protein_search_structures', {
     });
     if (input.query) ctx.enrich.echo(input.query);
 
-    // `notice` is a single last-wins field, so the zero-hit advice, the capped-facet
-    // advice, and one fragment per under-covered facet dimension compose into ONE string.
+    // `notice` is a single last-wins field, so the universe advice, the zero-hit
+    // advice, the capped-facet advice, and one fragment per under-covered facet
+    // dimension compose into ONE string.
     const notices: string[] = [];
+    // Both universes failing fails the search, so a failed one has an answered partner.
+    const failed = result.universes?.find((u) => u.status === 'failed');
+    const answered = result.universes?.find((u) => u.status === 'answered');
+    const answeredAlone = failed && answered ? answered.contentType : undefined;
+    if (failed && answeredAlone) notices.push(leftOutNotice(failed.contentType, answeredAlone));
+    const capped = (result.universes ?? []).flatMap((u) =>
+      u.status === 'answered' && u.total === SEQUENCE_HIT_CEILING ? [u.contentType] : [],
+    );
+    if (capped.length > 0) notices.push(ceilingNotice(capped));
     // An empty page with a nonzero total is an offset past the end, not a query
     // that matched nothing — the two need opposite next moves.
     if (hits.length === 0)
       notices.push(
         result.total === 0
-          ? zeroHitNotice(input)
+          ? zeroHitNotice(input, answeredAlone)
           : `start ${input.start} is past the end of the ${result.total} matches. Re-call with a lower start to read a populated page.`,
       );
     if (facets) {

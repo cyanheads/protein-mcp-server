@@ -16,9 +16,11 @@ import type {
   AlignmentJob,
   AlignmentMethod,
   CompareStructure,
+  PairOutcome,
 } from '@/services/alignment/alignment-service.js';
 import { getAlignmentService } from '@/services/alignment/alignment-service.js';
 import { mapWithConcurrency } from '@/services/shared/async.js';
+import { budgetExhaustion, withCallBudget } from '@/services/shared/call-budget.js';
 
 const inputSchema = z.object({
   structures: z
@@ -30,7 +32,7 @@ const inputSchema = z.object({
             .string()
             .optional()
             .describe(
-              `mmCIF label_asym_id restricting the alignment to a single chain. Read it from polymerEntities[].labelAsymIds on protein_get_structure (source experimental) or the pdb://{entry_id} resource. Author chain IDs are a different namespace — polymerEntities[].authAsymIds, what protein_get_annotations.chain takes — and are not interchangeable with this one. Case-sensitive.`,
+              `mmCIF label_asym_id restricting the alignment to a single chain. Read it from polymerEntities[].labelAsymIds on the pdb://{entry_id} resource, or on protein_get_structure (source experimental), which lists an entity's first 100 chains unless all_chains is set. Author chain IDs are a different namespace — polymerEntities[].authAsymIds, what protein_get_annotations.chain takes — and are not interchangeable with this one. Case-sensitive.`,
             ),
         })
         .describe('A structure to align, by PDB entry ID with optional chain.'),
@@ -55,7 +57,7 @@ const inputSchema = z.object({
     .max(120)
     .optional()
     .describe(
-      'Poll budget per pair in seconds before returning "computing". Defaults to the server setting.',
+      'Poll budget per pair in seconds before returning "computing". Defaults to the server setting. The whole call stops at 50 s, so that budget ends polling first once timeout_s nears 50 or there are more pairs than the server aligns at once (PROTEIN_FANOUT_CONCURRENCY): a pair it stops after submission returns "computing" with its uuid, and one it reaches before submission returns "failed".',
     ),
   resume: z
     .array(
@@ -135,7 +137,9 @@ const outputSchema = z.object({
           uuid: z
             .string()
             .optional()
-            .describe('Alignment job UUID (present for computing/complete pairs).'),
+            .describe(
+              'Alignment job UUID: present on complete and computing pairs, and on a failed pair whose job was submitted, which a resume entry can still poll.',
+            ),
           error: z.string().optional().describe('Failure detail (failed pairs).'),
         })
         .describe('Alignment outcome for one structure pair.'),
@@ -144,10 +148,11 @@ const outputSchema = z.object({
 });
 
 type StructInput = z.infer<typeof inputSchema>['structures'][number];
+type PairRow = z.infer<typeof outputSchema>['pairs'][number];
 
 export const compareStructures = tool('protein_compare_structures', {
   title: 'protein-mcp-server: compare structures',
-  description: `Structurally align multiple structures (up to the configured batch cap; structures past it are returned in ignored) via the RCSB Structural Comparison service (TM-align / jFATCAT). reference:"first" aligns every structure to the first; reference:"all_pairs" computes the full pairwise matrix. Each pair is an independent async alignment job with per-pair partial success — a pair still computing when the budget elapses returns status "computing" with its job UUID, and a failed pair degrades its row without sinking the others. Re-call with a matching entry in resume[] to poll a computing pair's UUID instead of resubmitting; a resumed pair reports a and b in the order its job was submitted, and a resume under a different method is rejected. Returns TM-score, RMSD, and aligned-residue count per pair, plus each structure's modeled-residue count and alignment coverage. TM-score is length-normalized and can shift sharply between structures that differ only by a terminal residue or two — the greedy superposition can settle into a worse local optimum — so read tmScore alongside rmsd, alignedResidues, modeledResidues and coverage, the columns that make such cases diagnosable.`,
+  description: `Structurally align multiple structures (up to the configured batch cap; structures past it are returned in ignored) via the RCSB Structural Comparison service (TM-align / jFATCAT). reference:"first" aligns every structure to the first; reference:"all_pairs" computes the full pairwise matrix. Each pair is an independent async alignment job with per-pair partial success — a pair still computing when its poll budget or the call's 50 s budget runs out returns status "computing" with its job UUID, and a failed pair degrades its row without sinking the others, keeping its job UUID when the job was submitted. Re-call with a matching entry in resume[] to poll a pair's job UUID instead of resubmitting; a resumed pair reports a and b in the order its job was submitted, and a resume under a different method is rejected. Returns TM-score, RMSD, and aligned-residue count per pair, plus each structure's modeled-residue count and alignment coverage. TM-score is length-normalized and can shift sharply between structures that differ only by a terminal residue or two — the greedy superposition can settle into a worse local optimum — so read tmScore alongside rmsd, alignedResidues, modeledResidues and coverage, the columns that make such cases diagnosable.`,
   annotations: { readOnlyHint: true, openWorldHint: true },
 
   errors: [
@@ -272,45 +277,23 @@ export const compareStructures = tool('protein_compare_structures', {
     // it only surfaces once that job completes. Record the first one and throw
     // after the fanout settles, so no sibling pair is left polling in the background.
     let rejection: ResumeRejection | undefined;
-    const rows = await mapWithConcurrency(pairs, cfg.fanoutConcurrency, async ([a, b]) => {
-      const resumeUuid = resumeByPair.get(pairKey(label(a), label(b)));
-      const outcome = resumeUuid
-        ? await alignment.resumePair(resumeUuid, timeoutMs, ctx)
-        : await alignment.comparePair(toCompare(a), toCompare(b), method, timeoutMs, ctx);
-      let base = { a: label(a), b: label(b) };
-      if (outcome.status === 'complete' && resumeUuid && outcome.job) {
-        const oriented = orientResumedJob(outcome.job, base, method, resumeUuid);
-        if ('reason' in oriented) rejection ??= oriented;
-        else base = oriented;
-      }
-      if (outcome.status === 'complete') {
-        return {
-          ...base,
-          status: 'complete' as const,
-          uuid: outcome.uuid,
-          ...(typeof outcome.scores.tmScore === 'number'
-            ? { tmScore: outcome.scores.tmScore }
-            : {}),
-          ...(typeof outcome.scores.rmsd === 'number' ? { rmsd: outcome.scores.rmsd } : {}),
-          ...(typeof outcome.scores.similarityScore === 'number'
-            ? { similarityScore: outcome.scores.similarityScore }
-            : {}),
-          ...(typeof outcome.scores.sequenceSimilarity === 'number'
-            ? { sequenceSimilarity: outcome.scores.sequenceSimilarity }
-            : {}),
-          ...(typeof outcome.scores.alignedResidues === 'number'
-            ? { alignedResidues: outcome.scores.alignedResidues }
-            : {}),
-          ...(outcome.scores.modeledResidues
-            ? { modeledResidues: outcome.scores.modeledResidues }
-            : {}),
-          ...(outcome.scores.coverage ? { coverage: outcome.scores.coverage } : {}),
-        };
-      }
-      if (outcome.status === 'computing') {
-        return { ...base, status: 'computing' as const, uuid: outcome.uuid };
-      }
-      return { ...base, status: 'failed' as const, error: outcome.error };
+    // One 50 s budget across every pair's submit and polls. Pairs past the fan-out
+    // concurrency wait for a free slot, so without it the waves multiply timeout_s.
+    const { rows, budgetStop } = await withCallBudget(ctx, async (call) => {
+      const rows = await mapWithConcurrency(pairs, cfg.fanoutConcurrency, async ([a, b]) => {
+        const resumeUuid = resumeByPair.get(pairKey(label(a), label(b)));
+        const outcome = resumeUuid
+          ? await alignment.resumePair(resumeUuid, timeoutMs, call)
+          : await alignment.comparePair(toCompare(a), toCompare(b), method, timeoutMs, call);
+        let base = { a: label(a), b: label(b) };
+        if (outcome.status === 'complete' && resumeUuid && outcome.job) {
+          const oriented = orientResumedJob(outcome.job, base, method, resumeUuid);
+          if ('reason' in oriented) rejection ??= oriented;
+          else base = oriented;
+        }
+        return pairRow(base, outcome);
+      });
+      return { rows, budgetStop: budgetExhaustion(call) };
     });
 
     if (rejection) {
@@ -322,8 +305,7 @@ export const compareStructures = tool('protein_compare_structures', {
     ctx.enrich({ pairsTotal: rows.length, computing, ...(ignored.length > 0 ? { ignored } : {}) });
     if (computing > 0 || failed > 0) {
       notices.push(
-        `${computing} pair(s) still computing${failed > 0 ? `, ${failed} failed` : ''}. ` +
-          `Re-call with a resume entry per pair (copy a, b, uuid from the pairs above) to poll existing jobs — cold alignment jobs typically finish within 30–60 s. The alignment service answers an expired job the same way as a running one, so a pair that stays computing across several resumes should be resubmitted without its resume entry.`,
+        `${budgetStop ? `${budgetStop.message} ` : ''}${computing} pair(s) still computing${failed > 0 ? `, ${failed} failed` : ''}. Re-call with this call's structures, reference, and method, plus a resume entry (copy a, b, uuid from the pairs above) for each computing pair, and each failed pair that carries a uuid, to poll its existing job; a failed pair without a uuid has no job to resume, so leave it out of resume[] to submit it again. Cold alignment jobs typically finish within 30–60 s. The alignment service answers an expired job the same way as a running one, so a pair that stays computing across several resumes should be resubmitted without its resume entry.`,
       );
     }
     if (notices.length > 0) ctx.enrich.notice(notices.join(' '));
@@ -445,6 +427,41 @@ function pairKey(a: string, b: string): string {
 interface PairLabels {
   a: string;
   b: string;
+}
+
+/**
+ * One pairs[] row from a pair's outcome: only the scores the job reported, and
+ * the job UUID on every row whose job was submitted — a failed pair's included.
+ */
+function pairRow(labels: PairLabels, outcome: PairOutcome): PairRow {
+  if (outcome.status === 'computing') return { ...labels, status: 'computing', uuid: outcome.uuid };
+  if (outcome.status === 'failed') {
+    return {
+      ...labels,
+      status: 'failed',
+      ...(outcome.uuid ? { uuid: outcome.uuid } : {}),
+      error: outcome.error,
+    };
+  }
+  const { scores } = outcome;
+  return {
+    ...labels,
+    status: 'complete',
+    uuid: outcome.uuid,
+    ...(typeof scores.tmScore === 'number' ? { tmScore: scores.tmScore } : {}),
+    ...(typeof scores.rmsd === 'number' ? { rmsd: scores.rmsd } : {}),
+    ...(typeof scores.similarityScore === 'number'
+      ? { similarityScore: scores.similarityScore }
+      : {}),
+    ...(typeof scores.sequenceSimilarity === 'number'
+      ? { sequenceSimilarity: scores.sequenceSimilarity }
+      : {}),
+    ...(typeof scores.alignedResidues === 'number'
+      ? { alignedResidues: scores.alignedResidues }
+      : {}),
+    ...(scores.modeledResidues ? { modeledResidues: scores.modeledResidues } : {}),
+    ...(scores.coverage ? { coverage: scores.coverage } : {}),
+  };
 }
 
 interface ResumeRejection {

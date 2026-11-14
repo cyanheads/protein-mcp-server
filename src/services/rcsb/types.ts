@@ -91,9 +91,23 @@ export interface SearchResult {
    * constant within one sequence search. Absent when no hit carried a context.
    */
   queryLength?: number;
-  /** Total matches upstream (before pagination). */
+  /** Total matches upstream (before pagination); for a merged search, the answered universes' sum. */
   total: number;
+  /**
+   * How each content universe's search fared — present on every sequence
+   * search, which searches each universe on its own. Absent otherwise.
+   */
+  universes?: UniverseOutcome[];
 }
+
+/**
+ * One content universe's share of a sequence search. Under both universes one
+ * search can fail while the other answers; the result then holds only the
+ * answered universe's hits, total, and facets.
+ */
+export type UniverseOutcome =
+  | { contentType: ContentType; status: 'answered'; total: number }
+  | { contentType: ContentType; status: 'failed' };
 
 /** A modeled polymer (protein/nucleic) entity within an entry. */
 export interface PolymerEntityMeta {
@@ -240,10 +254,11 @@ export interface CoordinateUrls {
 }
 
 /**
- * One protein residue lining a ligand's binding pocket, in both numbering
- * namespaces. `asymId`/`seqId` are mmCIF label identifiers; `authAsymId`/
- * `authSeqId` are the depositor's (author) identifiers. The two are related by
- * no fixed offset — 1IEP label THR93 is author THR315.
+ * One polymer residue (an amino acid, or a nucleotide where the ligand binds
+ * DNA or RNA) lining a ligand's binding pocket, in both numbering namespaces.
+ * `asymId`/`seqId` are mmCIF label identifiers; `authAsymId`/`authSeqId` are the
+ * depositor's (author) identifiers. The two are related by no fixed offset —
+ * 1IEP label THR93 is author THR315.
  */
 export interface BindingResidue {
   /** mmCIF `label_asym_id` of the residue's chain. */
@@ -268,9 +283,41 @@ export interface BindingSite {
   ligandAuthSeqId?: number;
   /** Ligand chemical component ID. */
   ligandCompId: string;
-  /** Interacting protein residues, nearest first. */
+  /** Interacting polymer residues (amino acids or nucleotides), nearest first. */
   residues: BindingResidue[];
 }
+
+/**
+ * A ligand deposited as a polymer entity carrying a BIRD (Biologically
+ * Interesting molecule Reference Dictionary) ID, such as a peptide-like
+ * inhibitor (1CWA_2, cyclosporin A). RCSB computes pocket contacts for
+ * non-polymer instances only, so such a ligand never has a binding site.
+ */
+export interface PolymerLigand {
+  /** Author chain IDs (`auth_asym_id`) of the entity's instances. Absent when upstream omits them. */
+  authAsymIds?: string[];
+  /** Entity description (e.g. `CYCLOSPORIN A`). Absent when upstream omits it. */
+  description?: string;
+  /** Polymer entity ID (e.g. `1CWA_2`). */
+  entityId: string;
+  /** BIRD ID (e.g. `PRD_000142`). */
+  prdId: string;
+}
+
+/**
+ * An entry's binding sites, read from one GraphQL response:
+ * - `found` — the ligand instances (of the requested component, when one is
+ *   named) with pocket contacts, in paging order;
+ * - `no_contacts` — no such instance has contacts; `heldComponents` names every
+ *   bound non-polymer component the entry holds and `polymerLigands` its BIRD
+ *   polymer entities, each in entity-number order;
+ * - `entry_not_found` — RCSB has no current entry under the ID (obsoleted,
+ *   unreleased, or never assigned: the response does not say which).
+ */
+export type EntryBindingSites =
+  | { kind: 'found'; sites: BindingSite[] }
+  | { heldComponents: string[]; kind: 'no_contacts'; polymerLigands: PolymerLigand[] }
+  | { kind: 'entry_not_found' };
 
 /** Candidate chemical components for a name or formula search. */
 export interface ChemCompMatches {

@@ -13,6 +13,7 @@ import type { AppConfig } from '@cyanheads/mcp-ts-core/config';
 import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import type { ServerConfig } from '@/config/server-config.js';
+import { cancelledByCaller, withDeadline } from '../shared/call-budget.js';
 import { fetchJson } from '../shared/http.js';
 import { MIN_SEQUENCE_RESIDUES, normalizeProteinSequence } from '../shared/protein-sequence.js';
 import type {
@@ -22,21 +23,49 @@ import type {
   ChemCompMatches,
   ContentType,
   CoordinateUrls,
+  EntryBindingSites,
   EntryMeta,
   EntrySequence,
   FacetBucket,
   FacetDimension,
   LigandMeta,
   PolymerEntityMeta,
+  PolymerLigand,
   ProteinEntitySummary,
   SearchHit,
   SearchResult,
   StructureSearchParams,
   UniProtXref,
+  UniverseOutcome,
 } from './types.js';
 
 /** RCSB return types relevant to this server. */
 export type ReturnType = 'entry' | 'polymer_entity' | 'mol_definition';
+
+/**
+ * The most hits one RCSB sequence search returns: past it, `total_count`
+ * reports 2,000 whatever the true match count, so a total at this value is a
+ * ceiling, not a complete count.
+ */
+export const SEQUENCE_HIT_CEILING = 2000;
+
+/** RCSB Search's largest `paginate.rows`; a request above it is rejected with HTTP 400. */
+const MAX_ROWS = 10_000;
+
+/** The content universes in merge order: an experimental hit precedes a computed model on a bit-score tie. */
+const UNIVERSES = ['experimental', 'computational'] as const satisfies readonly ContentType[];
+
+/**
+ * How long a sequence search over both universes waits for each universe's own
+ * search. One still running then is left out, so the metadata lookup a caller
+ * chains next keeps 15 s of the 50 s call budget rather than starting on a spent
+ * one. RCSB abandons a sequence search at 30 s itself (HTTP 500, "did not
+ * complete ticketId … within 30000 ms"), and the HTTP layer ends each attempt at
+ * 30 s, so 35 s holds every first attempt RCSB can answer plus the retries of a
+ * fast failure. Measured: cold searches answer in 0.3–5.2 s, and the metadata of
+ * 100 entries in under 1 s.
+ */
+const UNIVERSE_SEARCH_DEADLINE_MS = 35_000;
 
 /** A facet dimension request: friendly name + how RCSB should aggregate it. */
 export interface FacetSpec {
@@ -128,8 +157,10 @@ export class RcsbService {
   /**
    * Full-text / filtered structure search, optionally with a facet breakdown.
    * With a sequence it returns polymer-entity hits carrying their alignment to
-   * the query (see {@link searchSequence}); the verbose response that carries the
-   * alignment is only requested then.
+   * the query (see {@link searchSequence}) — the verbose response that carries
+   * the alignment is only requested then — and reports each content universe's
+   * total in `universes`. A sequence search over both universes runs one search
+   * per universe ({@link searchEachUniverse}); every other search is one request.
    */
   async search(
     params: StructureSearchParams,
@@ -137,22 +168,121 @@ export class RcsbService {
     facets?: FacetSpec[],
   ): Promise<SearchResult> {
     const query = buildQuery(params);
-    const returnType: ReturnType = params.sequence ? 'polymer_entity' : 'entry';
-    const body = {
-      query,
-      return_type: returnType,
-      request_options: {
-        ...contentTypeOption(params.contentType),
-        paginate: { start: params.start ?? 0, rows: params.limit ?? 25 },
-        ...(facets && facets.length > 0 ? { facets: facets.map(toRcsbFacet) } : {}),
-        scoring_strategy: 'combined',
-        ...(params.sequence ? { results_verbosity: 'verbose' } : {}),
-      },
-    };
-    const raw = await this.postSearch(body, ctx, 'RcsbService.search');
-    return {
+    if (params.sequence && (params.contentType?.length ?? 0) > 1) {
+      return this.searchEachUniverse(query, params, ctx, facets);
+    }
+    const paginate = { start: params.start ?? 0, rows: params.limit ?? 25 };
+    const raw = await this.postSearch(
+      searchBody(query, params, params.contentType, paginate, facets),
+      ctx,
+      'RcsbService.search',
+    );
+    const result: SearchResult = {
       ...toSearchResult(raw),
       ...(facets && facets.length > 0 ? { facets: normalizeFacets(raw.facets, facets) } : {}),
+    };
+    if (!params.sequence) return result;
+    // An omitted scope is RCSB's experimental-only default.
+    const contentType = params.contentType?.[0] ?? 'experimental';
+    return { ...result, universes: [{ contentType, status: 'answered', total: result.total }] };
+  }
+
+  /**
+   * A sequence search over both content universes, run as one search per
+   * universe, sent concurrently. A single search over both does not return each
+   * universe's own hits: computed models displace experimental hits mmseqs2
+   * would otherwise keep, and every E-value scales to the combined database.
+   *
+   * Each half reads rows `[0, start + limit)` (at most {@link MAX_ROWS}), the
+   * halves merge by bit score ({@link mergeByBitscore}), and the page is the
+   * merged rows `[start, start + limit)`: a merged prefix of n rows draws on at
+   * most n rows of either half, so paging from 0 reads every hit of both
+   * universes once. Totals and facet buckets are the halves' sums.
+   *
+   * A universe whose search fails, or is still running at
+   * {@link UNIVERSE_SEARCH_DEADLINE_MS}, is left out — `failed` in `universes`,
+   * its hits, total, and facets absent — unless the failure ends the search
+   * ({@link endsSearch}); both failing fails it.
+   */
+  private async searchEachUniverse(
+    query: unknown,
+    params: StructureSearchParams,
+    ctx: Context,
+    facets?: FacetSpec[],
+  ): Promise<SearchResult> {
+    const start = params.start ?? 0;
+    const limit = params.limit ?? 25;
+    const paginate = { start: 0, rows: Math.min(start + limit, MAX_ROWS) };
+    // The HTTP layer reports the deadline's TimeoutError as a Timeout and stops
+    // retrying. It aborts only these two searches, so endsSearch, reading the
+    // caller's context, sees no cancellation.
+    const halves = await withDeadline(
+      ctx,
+      UNIVERSE_SEARCH_DEADLINE_MS,
+      `The per-universe sequence searches ran past their ${UNIVERSE_SEARCH_DEADLINE_MS / 1000} s deadline.`,
+      (searchCtx) =>
+        Promise.all(
+          UNIVERSES.map((contentType) =>
+            this.postSearch(
+              searchBody(query, params, [contentType], paginate, facets),
+              searchCtx,
+              'RcsbService.search',
+            ).then(
+              (raw) => ({ contentType, raw }),
+              (error: unknown) => ({ contentType, error }),
+            ),
+          ),
+        ),
+    );
+
+    const failures: unknown[] = [];
+    for (const half of halves) {
+      if (!('error' in half)) continue;
+      if (endsSearch(half.error, ctx)) throw half.error;
+      failures.push(half.error);
+      ctx.log.warning(
+        `RCSB ${half.contentType} sequence search failed; the merged search returns the other universe without it.`,
+        { error: half.error },
+      );
+    }
+    const answered = halves.flatMap((half) =>
+      'raw' in half
+        ? [
+            {
+              contentType: half.contentType,
+              ...toSearchResult(half.raw),
+              facets: facets && facets.length > 0 ? normalizeFacets(half.raw.facets, facets) : [],
+            },
+          ]
+        : [],
+    );
+    if (answered.length === 0) throw failures[0];
+
+    const hitsOf = (contentType: ContentType) =>
+      answered.find((half) => half.contentType === contentType)?.hits ?? [];
+    const queryLength = answered.find((half) => half.queryLength !== undefined)?.queryLength;
+    const universes = halves.map(
+      (half): UniverseOutcome =>
+        'raw' in half
+          ? { contentType: half.contentType, status: 'answered', total: half.raw.total_count ?? 0 }
+          : { contentType: half.contentType, status: 'failed' },
+    );
+    return {
+      total: answered.reduce((sum, half) => sum + half.total, 0),
+      hits: mergeByBitscore(hitsOf('experimental'), hitsOf('computational')).slice(
+        start,
+        start + limit,
+      ),
+      ...(queryLength !== undefined ? { queryLength } : {}),
+      ...(facets && facets.length > 0
+        ? {
+            facets: sumFacets(
+              answered.map((half) => half.facets),
+              facets,
+            ),
+          }
+        : {}),
+      universes,
     };
   }
 
@@ -244,19 +374,24 @@ export class RcsbService {
    * symbols and a digit (`SF4`, `H4B`) tokenizes as a formula. An empty formula
    * match therefore falls through to the name/synonym search rather than ending
    * the resolution, which keeps those IDs reaching the path that can resolve
-   * them. The extra call happens only when the formula terminal matched nothing.
+   * them. The extra call happens only when the formula terminal matched nothing:
+   * its total decides, since a page past the end of a formula match is empty too.
    *
-   * Returns the first `limit` candidate IDs in RCSB's order alongside the
-   * upstream `total` for the search that produced them, so a caller can tell a
-   * complete match set from a truncated one.
+   * Returns `page.limit` candidate IDs from `page.start` in RCSB's order, which
+   * is stable across calls, alongside the upstream `total` for the search that
+   * produced them, so a caller can tell a complete match set from a truncated one.
    */
-  async findChemComps(query: string, limit: number, ctx: Context): Promise<ChemCompMatches> {
+  async findChemComps(
+    query: string,
+    page: { limit: number; start: number },
+    ctx: Context,
+  ): Promise<ChemCompMatches> {
     const search = async (query_: unknown): Promise<ChemCompMatches> => {
       const raw = await this.postSearch(
         {
           query: query_,
           return_type: 'mol_definition' as const,
-          request_options: { paginate: { start: 0, rows: limit } },
+          request_options: { paginate: { start: page.start, rows: page.limit } },
         },
         ctx,
         'RcsbService.findChemComps',
@@ -266,7 +401,7 @@ export class RcsbService {
 
     if (!isChemicalFormula(query)) return search(chemNameQuery(query));
     const byFormula = await search(formulaQuery(query));
-    return byFormula.ids.length > 0 ? byFormula : search(chemNameQuery(query));
+    return byFormula.total > 0 ? byFormula : search(chemNameQuery(query));
   }
 
   /** Facet-only aggregation over an optional scoping query (no row pull). */
@@ -403,23 +538,28 @@ export class RcsbService {
    * caller pages them with `start`/`limit`, and upstream's own order varies
    * between connections: two pages read under different orders would skip or
    * repeat instances.
+   *
+   * A response with no site says why from the same payload: a null entry, or
+   * the bound components and BIRD polymer ligands the entry does hold.
    */
   async getBindingSites(
     pdbId: string,
     compId: string | undefined,
     ctx: Context,
-  ): Promise<BindingSite[]> {
+  ): Promise<EntryBindingSites> {
     const data = await this.graphql<{ entry: RawBindingEntry | null }>(
       BINDING_SITE_QUERY,
       { id: pdbId.toUpperCase() },
       ctx,
       'RcsbService.getBindingSites',
     );
+    const { entry } = data;
+    if (!entry) return { kind: 'entry_not_found' };
     // Label → author chain, one pair per polymer instance. The entity-level
     // `asym_ids`/`auth_asym_ids` arrays are each sorted independently (6QNR_9:
     // ["I","OB"] vs ["82","8E"], where I is 8E), so they cannot be zipped.
     const authChainByLabel = new Map<string, string>();
-    for (const poly of data.entry?.polymer_entities ?? []) {
+    for (const poly of entry.polymer_entities ?? []) {
       for (const inst of poly.polymer_entity_instances ?? []) {
         const ids = inst.rcsb_polymer_entity_instance_container_identifiers;
         if (ids?.asym_id && ids.auth_asym_id) authChainByLabel.set(ids.asym_id, ids.auth_asym_id);
@@ -427,7 +567,8 @@ export class RcsbService {
     }
     const sites: BindingSite[] = [];
     const want = compId?.toUpperCase();
-    for (const nonpoly of byEntityNumber(data.entry?.nonpolymer_entities)) {
+    const nonpolymers = byEntityNumber(entry.nonpolymer_entities);
+    for (const nonpoly of nonpolymers) {
       const ligand = nonpoly.rcsb_nonpolymer_entity_container_identifiers?.nonpolymer_comp_id;
       if (!ligand || (want && ligand.toUpperCase() !== want)) continue;
       const entitySites: BindingSite[] = [];
@@ -448,7 +589,27 @@ export class RcsbService {
       }
       sites.push(...entitySites.sort(compareLigandInstances));
     }
-    return sites;
+    if (sites.length > 0) return { kind: 'found', sites };
+    return {
+      kind: 'no_contacts',
+      heldComponents: nonpolymers.flatMap((e) => {
+        const id = e.rcsb_nonpolymer_entity_container_identifiers?.nonpolymer_comp_id;
+        return id ? [id] : [];
+      }),
+      polymerLigands: byEntityNumber(entry.polymer_entities).flatMap((e): PolymerLigand[] => {
+        const ids = e.rcsb_polymer_entity_container_identifiers;
+        if (!e.rcsb_id || !ids?.prd_id) return [];
+        const description = e.rcsb_polymer_entity?.pdbx_description;
+        return [
+          {
+            entityId: e.rcsb_id,
+            prdId: ids.prd_id,
+            ...(ids.auth_asym_ids?.length ? { authAsymIds: ids.auth_asym_ids } : {}),
+            ...(description ? { description } : {}),
+          },
+        ];
+      }),
+    };
   }
 
   // ─── REST chemical component ──────────────────────────────────────────────────
@@ -826,6 +987,43 @@ function contentTypeOption(contentTypes?: ContentType[]): { results_content_type
 }
 
 /**
+ * The request body of one {@link RcsbService.search} request over `contentTypes`.
+ * A sequence makes it a verbose polymer-entity search.
+ */
+function searchBody(
+  query: unknown,
+  params: StructureSearchParams,
+  contentTypes: ContentType[] | undefined,
+  paginate: { start: number; rows: number },
+  facets: FacetSpec[] | undefined,
+): unknown {
+  const returnType: ReturnType = params.sequence ? 'polymer_entity' : 'entry';
+  return {
+    query,
+    return_type: returnType,
+    request_options: {
+      ...contentTypeOption(contentTypes),
+      paginate,
+      ...(facets && facets.length > 0 ? { facets: facets.map(toRcsbFacet) } : {}),
+      scoring_strategy: 'combined',
+      ...(params.sequence ? { results_verbosity: 'verbose' } : {}),
+    },
+  };
+}
+
+/**
+ * Whether one universe's failed search ends a merged sequence search instead of
+ * leaving the other universe's hits: the caller's cancellation (a call-budget
+ * stop is this server's deadline, not the caller's, so it leaves them), or a
+ * rate limit, which the caller waits out and re-calls through rather than
+ * reading a universe as left out.
+ */
+function endsSearch(error: unknown, ctx: Context): boolean {
+  if (cancelledByCaller(ctx)) return true;
+  return error instanceof McpError && error.code === JsonRpcErrorCode.RateLimited;
+}
+
+/**
  * Ligand-containment search body (exact chemical-component ID), shared by
  * searchByLigand and countEntriesWithLigand: entries holding a bound copy, as
  * {@link ligandNode} defines it. Defaults to experimental content; `rows` bounds
@@ -980,6 +1178,32 @@ function queryLengthOf(resultSet: RawSearchRow[] | undefined): number | undefine
   return undefined;
 }
 
+/**
+ * Merge two universes' sequence hits by bit score, the one key comparable
+ * across them: `score` is rescaled within each search, and an E-value scales
+ * with the database searched. Each step takes the head with the higher bit
+ * score, the experimental one on a tie, and a head without a bit score only
+ * after one with it. The halves are consumed in their own order, never
+ * re-sorted — a sequence search combined with text criteria is not in bit-score
+ * order — so any prefix of the merge is built from a prefix of each half.
+ */
+function mergeByBitscore(experimental: SearchHit[], computational: SearchHit[]): SearchHit[] {
+  const merged: SearchHit[] = [];
+  let [e, c] = [0, 0];
+  for (let x = experimental[e], y = computational[c]; x && y; ) {
+    const experimentalFirst =
+      y.bitscore === undefined || (x.bitscore !== undefined && x.bitscore >= y.bitscore);
+    if (experimentalFirst) {
+      merged.push(x);
+      x = experimental[++e];
+    } else {
+      merged.push(y);
+      y = computational[++c];
+    }
+  }
+  return merged.concat(experimental.slice(e), computational.slice(c));
+}
+
 function normalizeFacets(raw: RawFacet[] | undefined, specs: FacetSpec[]): FacetDimension[] {
   const byAttr = new Map((raw ?? []).map((f) => [f.attribute ?? f.name, f]));
   return specs.map((spec) => {
@@ -1035,6 +1259,58 @@ function normalizeBuckets(raw: RawBucket[] | undefined, spec: FacetSpec): FacetB
     }
     return bucket;
   });
+}
+
+/**
+ * Two universes' facet breakdowns summed bucket by bucket, matched on label,
+ * nested cross-tab buckets included, before any bucket cap. Each part is
+ * {@link normalizeFacets} output for the same `specs`, so dimensions line up by
+ * position.
+ */
+function sumFacets(parts: FacetDimension[][], specs: FacetSpec[]): FacetDimension[] {
+  return specs.map((spec, i) => ({
+    dimension: spec.dimension,
+    attribute: spec.attribute,
+    buckets: sumBuckets(
+      parts.map((part) => part[i]?.buckets ?? []),
+      spec,
+    ),
+  }));
+}
+
+/**
+ * One position's bucket lists summed by label. Terms buckets re-rank by the
+ * summed count, a tie kept in first-appearance order (the experimental list's
+ * first); histogram and date buckets keep value order.
+ */
+function sumBuckets(lists: FacetBucket[][], spec: FacetSpec): FacetBucket[] {
+  const byLabel = new Map<string, { bucket: FacetBucket; children: FacetBucket[][] }>();
+  for (const bucket of lists.flat()) {
+    const children = bucket.child ? [bucket.child.buckets] : [];
+    const seen = byLabel.get(bucket.label);
+    if (seen) {
+      seen.bucket.count += bucket.count;
+      seen.children.push(...children);
+    } else {
+      byLabel.set(bucket.label, { bucket: { ...bucket }, children });
+    }
+  }
+  const child = spec.child;
+  const summed = [...byLabel.values()].map(({ bucket, children }) =>
+    child && bucket.child
+      ? { ...bucket, child: { ...bucket.child, buckets: sumBuckets(children, child) } }
+      : bucket,
+  );
+  return spec.aggregation === 'terms'
+    ? summed.toSorted((a, b) => b.count - a.count)
+    : summed.toSorted(compareBucketValues);
+}
+
+/** Histogram and date bucket order: numeric when both labels are numbers (`10.0` after `5.0`), else by code unit. */
+function compareBucketValues(a: FacetBucket, b: FacetBucket): number {
+  const [x, y] = [Number(a.label), Number(b.label)];
+  if (Number.isFinite(x) && Number.isFinite(y)) return x - y;
+  return a.label < b.label ? -1 : a.label > b.label ? 1 : 0;
 }
 
 /**
@@ -1246,6 +1522,13 @@ interface RawBindingEntry {
     }>;
   }>;
   polymer_entities?: Array<{
+    rcsb_id?: string;
+    rcsb_polymer_entity?: { pdbx_description?: string };
+    /** `prd_id` is the entity's BIRD ID, `null` on every entity that is not a BIRD molecule. */
+    rcsb_polymer_entity_container_identifiers?: {
+      auth_asym_ids?: string[];
+      prd_id?: string | null;
+    };
     polymer_entity_instances?: Array<{
       rcsb_polymer_entity_instance_container_identifiers?: {
         asym_id?: string;
@@ -1321,6 +1604,9 @@ const SEQUENCE_QUERY = `query Sequence($id: String!) {
 const BINDING_SITE_QUERY = `query BindingSite($id: String!) {
   entry(entry_id: $id) {
     polymer_entities {
+      rcsb_id
+      rcsb_polymer_entity { pdbx_description }
+      rcsb_polymer_entity_container_identifiers { prd_id auth_asym_ids }
       polymer_entity_instances {
         rcsb_polymer_entity_instance_container_identifiers { asym_id auth_asym_id }
       }

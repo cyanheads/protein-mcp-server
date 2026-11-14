@@ -10,7 +10,8 @@
  * the resolvedFrom enrichment, the one call budget across RCSB, UniProt, and
  * InterPro, and format() rendering. Service-level mocks cover the wiring; the
  * accession-status block runs the real UniProt service against a fetch fake to
- * pin the merge, inactive, never-assigned, and zero-membership paths and the
+ * pin the merge (UniProt's 303 read unfollowed, the successor requested once),
+ * inactive, never-assigned, and zero-membership paths and the
  * speculative InterPro request each one aborts or keeps.
  * @module tests/tools/get-annotations.tool.test
  */
@@ -875,18 +876,38 @@ const P69905_ENTRY = {
 };
 
 /**
- * What fetch hands back for merged Q1HDT5: UniProt answers 303 to P69905 and the
- * redirect drops `fields`, so the successor arrives whole, secondary structure included.
+ * UniProt's unfollowed answer for merged Q1HDT5 (live capture, UniProt 2026_04,
+ * 177 bytes): a 303 whose body reads the accession as an `Inactive` MERGED entry
+ * and whose `Location` names the successor.
  */
-const FOLLOWED_Q1HDT5 = {
-  ...P69905_ENTRY,
-  secondaryAccessions: ['P01922', 'Q1HDT5'],
-  features: [
-    { type: 'Helix', location: { start: { value: 4 }, end: { value: 17 } } },
-    { type: 'Turn', location: { start: { value: 51 }, end: { value: 53 } } },
-    ...P69905_ENTRY.features,
-  ],
-};
+const REDIRECT_Q1HDT5 = () =>
+  new Response(
+    '{"entryType":"Inactive","primaryAccession":"Q1HDT5","inactiveReason":{"inactiveReasonType":"MERGED","mergeDemergeTo":["P69905"]},"extraAttributes":{"uniParcId":"UPI0000D7A34F"}}',
+    {
+      status: 303,
+      headers: { 'content-type': 'application/json', location: '/uniprotkb/P69905?from=Q1HDT5' },
+    },
+  );
+
+/**
+ * P69905 as UniProt serves it: field-selected when the request names `fields`,
+ * whole — secondary structure included — when it does not, as requesting the
+ * 303's own `Location` URL would download it.
+ */
+const P69905_BY_FIELDS = (req: Request) =>
+  Response.json(
+    new URL(req.url).searchParams.has('fields')
+      ? P69905_ENTRY
+      : {
+          ...P69905_ENTRY,
+          secondaryAccessions: ['P01922', 'Q1HDT5'],
+          features: [
+            { type: 'Helix', location: { start: { value: 4 }, end: { value: 17 } } },
+            { type: 'Turn', location: { start: { value: 51 }, end: { value: 53 } } },
+            ...P69905_ENTRY.features,
+          ],
+        },
+  );
 
 /** UniProt's 200 answers for a demerged and a deleted accession (live captures, UniProt 2026_03). */
 const DEMERGED_P62988 = {
@@ -949,6 +970,30 @@ describe('protein_get_annotations accession status through the UniProt service (
   const interproRequests = () =>
     http.calls.filter((c) => new URL(c.request.url).hostname === 'interpro.test');
 
+  /** Every UniProt request: its path, `fields`, any `from` parameter, and redirect mode. */
+  const uniprotRequests = () =>
+    http.calls
+      .filter((c) => new URL(c.request.url).hostname === 'uniprot.test')
+      .map(({ request }) => {
+        const url = new URL(request.url);
+        return {
+          path: url.pathname,
+          fields: url.searchParams.get('fields'),
+          from: url.searchParams.get('from'),
+          redirect: request.redirect,
+        };
+      });
+
+  /** The merged Q1HDT5 read: its 303, then P69905 by accession with the same fields, nothing followed. */
+  const expectMergeRead = () => {
+    const made = uniprotRequests();
+    expect(made.map(({ path, from, redirect }) => ({ path, from, redirect }))).toEqual([
+      { path: '/uniprotkb/Q1HDT5', from: null, redirect: 'manual' },
+      { path: '/uniprotkb/P69905', from: null, redirect: 'manual' },
+    ]);
+    expect(made[1]?.fields).toBe(made[0]?.fields);
+  };
+
   beforeEach(() => {
     const real = new UniProtService(
       {} as never,
@@ -979,8 +1024,8 @@ describe('protein_get_annotations accession status through the UniProt service (
 
   it("answers a merged accession for its successor: the successor's own fields, its InterPro, the merge notice first", async () => {
     http.route(
-      { match: on('uniprot.test', '/uniprotkb/Q1HDT5'), respond: Response.json(FOLLOWED_Q1HDT5) },
-      { match: on('uniprot.test', '/uniprotkb/P69905'), respond: Response.json(P69905_ENTRY) },
+      { match: on('uniprot.test', '/uniprotkb/Q1HDT5'), respond: REDIRECT_Q1HDT5 },
+      { match: on('uniprot.test', '/uniprotkb/P69905'), respond: P69905_BY_FIELDS },
       { match: on('interpro.test', '/protein/UniProt/Q1HDT5/'), respond: heldOpen },
       { match: on('interpro.test', '/protein/UniProt/P69905/'), respond: proteinRecord(1) },
       {
@@ -1003,10 +1048,11 @@ describe('protein_get_annotations accession status through the UniProt service (
       domains: [{ accession: 'IPR002338' }],
       domainsTotal: 1,
     });
-    // The field-selected successor record, not the redirect's whole entry.
+    // The field-selected successor record, not the redirect target's whole entry.
     expect(out.features.map((f) => f.type)).toEqual(['Chain', 'Domain']);
     expect(out.notice.startsWith(merged)).toBe(true);
     expect(textOf(result)).toContain(merged);
+    expectMergeRead();
 
     // The speculative read for Q1HDT5 was aborted, never retried, and settled before the call returned.
     expect(abortedPaths).toEqual(['/protein/UniProt/Q1HDT5/']);
@@ -1023,8 +1069,8 @@ describe('protein_get_annotations accession status through the UniProt service (
 
   it("answers a merged accession under include:features with the successor's field-selected features and no InterPro read", async () => {
     http.route(
-      { match: on('uniprot.test', '/uniprotkb/Q1HDT5'), respond: Response.json(FOLLOWED_Q1HDT5) },
-      { match: on('uniprot.test', '/uniprotkb/P69905'), respond: Response.json(P69905_ENTRY) },
+      { match: on('uniprot.test', '/uniprotkb/Q1HDT5'), respond: REDIRECT_Q1HDT5 },
+      { match: on('uniprot.test', '/uniprotkb/P69905'), respond: P69905_BY_FIELDS },
     );
     const result = await runToolContract(getAnnotations, {
       uniprot: 'Q1HDT5',
@@ -1038,6 +1084,7 @@ describe('protein_get_annotations accession status through the UniProt service (
     });
     expect(textOf(result)).not.toMatch(/Helix|Turn/);
     expect(interproRequests()).toEqual([]);
+    expectMergeRead();
   });
 
   it.each(['features', 'variants', 'domains', 'all'] as const)(

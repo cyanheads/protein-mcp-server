@@ -30,10 +30,12 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 /**
- * Poll `step` with backoff until it reports ready or the wall-clock budget is
- * spent, returning `status: 'computing'` on timeout rather than blocking past the
- * budget. The agent re-calls to resume — async jobs are modeled as success
- * variants, not thrown errors.
+ * Poll `step` with backoff until it reports ready or the `timeoutMs` window
+ * ends, returning `status: 'computing'` on timeout rather than blocking past it.
+ * The agent re-calls to resume — async jobs are modeled as success variants, not
+ * thrown errors. Once `ctx.signal` has aborted no further step runs and the poll
+ * rejects with the signal's reason, so the caller alone decides whether that was
+ * a budget stop or a cancellation.
  */
 export async function withAsyncPoll<T>(opts: {
   step: () => Promise<PollStep<T>>;
@@ -46,10 +48,11 @@ export async function withAsyncPoll<T>(opts: {
   let interval = opts.intervalMs ?? 1000;
   const maxInterval = opts.maxIntervalMs ?? 2000;
   while (true) {
+    opts.ctx.signal.throwIfAborted();
     const step = await opts.step();
     if (step.ready) return { status: 'complete', value: step.value };
     const elapsed = Date.now() - start;
-    if (opts.ctx.signal.aborted || elapsed >= opts.timeoutMs) return { status: 'computing' };
+    if (elapsed >= opts.timeoutMs) return { status: 'computing' };
     await sleep(Math.min(interval, opts.timeoutMs - elapsed), opts.ctx.signal);
     interval = Math.min(interval * 1.5, maxInterval);
   }

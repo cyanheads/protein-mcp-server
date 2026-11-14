@@ -40,6 +40,12 @@ export interface FetchOptions {
   expectedStatuses?: number[];
   /** Request headers. */
   headers?: Record<string, string>;
+  /**
+   * Which failures are retried; omitted, `withRetry`'s own default. A request
+   * that creates upstream state narrows it so an attempt that may already have
+   * landed is never sent twice.
+   */
+  isTransient?: (error: unknown) => boolean;
   /** Human-readable provider label used in error messages. */
   label: string;
   /** Retry attempts after the initial call. Default 3. */
@@ -85,7 +91,20 @@ export function parseJson<T>(text: string, label: string): T {
 export function fetchJson<T>(
   url: string,
   ctx: Context,
-  opts: FetchOptions & { onEmptyBody?: () => T },
+  opts: FetchOptions & {
+    /**
+     * Response headers copied onto a non-2xx's `error.data.headers` under
+     * lowercase keys. Client-visible: never name one that carries a credential.
+     */
+    errorHeaders?: string[];
+    onEmptyBody?: () => T;
+    /**
+     * `fetch`'s redirect mode; omitted, redirects are followed. Under `'manual'` a
+     * 3xx throws `InvalidRequest` (never retried) with `data.status`, so the caller
+     * reads the redirect instead of downloading its target.
+     */
+    redirect?: RequestInit['redirect'];
+  },
 ): Promise<T> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   return withRetry(
@@ -94,6 +113,8 @@ export function fetchJson<T>(
         method: opts.method ?? 'GET',
         ...(opts.body !== undefined && { body: opts.body }),
         ...(opts.expectedStatuses && { expectedStatuses: opts.expectedStatuses }),
+        ...(opts.redirect && { redirect: opts.redirect }),
+        ...(opts.errorHeaders && { errorHeaders: opts.errorHeaders }),
         headers: withDefaultHeaders(opts.headers),
         signal: ctx.signal,
       });
@@ -108,6 +129,7 @@ export function fetchJson<T>(
       context: ctx,
       baseDelayMs: opts.baseDelayMs ?? 400,
       ...(opts.maxRetries !== undefined && { maxRetries: opts.maxRetries }),
+      ...(opts.isTransient && { isTransient: opts.isTransient }),
       signal: ctx.signal,
     },
   );
@@ -132,6 +154,7 @@ export function fetchText(url: string, ctx: Context, opts: FetchOptions): Promis
       context: ctx,
       baseDelayMs: opts.baseDelayMs ?? 400,
       ...(opts.maxRetries !== undefined && { maxRetries: opts.maxRetries }),
+      ...(opts.isTransient && { isTransient: opts.isTransient }),
       signal: ctx.signal,
     },
   );
@@ -166,6 +189,7 @@ export async function streamText(
       context: ctx,
       baseDelayMs: opts.baseDelayMs ?? 400,
       ...(opts.maxRetries !== undefined && { maxRetries: opts.maxRetries }),
+      ...(opts.isTransient && { isTransient: opts.isTransient }),
       signal: ctx.signal,
     },
   );
@@ -225,10 +249,15 @@ export async function fetchTextWindow(
 }
 
 /**
- * Fetch returning the raw `Response` without throwing on non-2xx status, so the
+ * Fetch returning the `Response` without throwing on non-2xx status, so the
  * caller can branch on the code (e.g. 3D-Beacons 404 → "no models", an async poll
- * 404 → "not ready yet"). Retries only network-level failures; HTTP statuses pass
- * through. Combines `ctx.signal` with a per-attempt timeout.
+ * 404 → "not ready yet"). Retries only network-level failures, a timed-out
+ * attempt included; HTTP statuses pass through. Combines `ctx.signal` with a
+ * per-attempt timeout that covers reading the body too. A 2xx body streams to
+ * the caller, and the timeout is cleared once it closes, errors, or is
+ * cancelled. Any other body is read before return ({@link withErrorBody}), so
+ * the timeout is cleared at return and no open body is left for a caller that
+ * ignores it.
  */
 export function fetchResponse(
   url: string,
@@ -245,14 +274,35 @@ export function fetchResponse(
 ): Promise<Response> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   return withRetry(
-    () => {
-      const signal = AbortSignal.any([ctx.signal, AbortSignal.timeout(timeoutMs)]);
-      return fetch(url, {
-        method: opts.method ?? 'GET',
-        ...(opts.body !== undefined && { body: opts.body }),
-        headers: withDefaultHeaders(opts.headers),
-        signal,
-      });
+    async () => {
+      // AbortController + setTimeout, not AbortSignal.timeout(), which fake timers
+      // can't drive and which can fail on a realm mismatch under Bun's stdio transport.
+      const attempt = new AbortController();
+      const timer = setTimeout(
+        () =>
+          attempt.abort(
+            new DOMException(`${opts.operation} timed out after ${timeoutMs} ms.`, 'TimeoutError'),
+          ),
+        timeoutMs,
+      );
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          method: opts.method ?? 'GET',
+          ...(opts.body !== undefined && { body: opts.body }),
+          headers: withDefaultHeaders(opts.headers),
+          signal: AbortSignal.any([ctx.signal, attempt.signal]),
+        });
+      } catch (err) {
+        clearTimeout(timer);
+        throw err;
+      }
+      if (res.ok && res.body) return withSettledBody(res, res.body, () => clearTimeout(timer));
+      try {
+        return await withErrorBody(res, ctx);
+      } finally {
+        clearTimeout(timer);
+      }
     },
     {
       operation: opts.operation,
@@ -262,4 +312,66 @@ export function fetchResponse(
       signal: ctx.signal,
     },
   );
+}
+
+/**
+ * A non-2xx (or body-less) response with its body read into memory, still under
+ * the attempt's timeout, so a stalled error body ends with the attempt rather
+ * than holding the caller until `ctx.signal` fires. A body that fails to arrive
+ * (the timeout, or a connection dropped mid-read) is left out and the status
+ * passes through, just as `httpErrorFromResponse` reads an unreadable body; a
+ * caller's cancellation rethrows. `status`, `statusText`, and `headers` carry
+ * across; `url`, `redirected`, and `type` do not.
+ */
+async function withErrorBody(res: Response, ctx: Context): Promise<Response> {
+  if (!res.body) return res;
+  let body: ArrayBuffer | null = null;
+  try {
+    body = await res.arrayBuffer();
+  } catch (error) {
+    if (ctx.signal.aborted) throw error;
+  }
+  return new Response(body, {
+    status: res.status,
+    statusText: res.statusText,
+    headers: res.headers,
+  });
+}
+
+/**
+ * Re-wrap a response so `settle` runs once its body closes, errors, or is
+ * cancelled. `status`, `statusText`, and `headers` carry across; `url`,
+ * `redirected`, and `type` do not.
+ */
+function withSettledBody(
+  res: Response,
+  body: ReadableStream<Uint8Array>,
+  settle: () => void,
+): Response {
+  const source = body.getReader();
+  const monitored = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await source.read();
+        if (done) {
+          settle();
+          controller.close();
+          return;
+        }
+        controller.enqueue(value);
+      } catch (error) {
+        settle();
+        controller.error(error);
+      }
+    },
+    cancel(reason) {
+      settle();
+      return source.cancel(reason);
+    },
+  });
+  return new Response(monitored, {
+    status: res.status,
+    statusText: res.statusText,
+    headers: res.headers,
+  });
 }

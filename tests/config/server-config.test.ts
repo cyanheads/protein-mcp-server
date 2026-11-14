@@ -1,7 +1,7 @@
 /**
  * @fileoverview Tests for the server config schema: out-of-the-box public-endpoint
  * defaults, env-var overrides mapped to the documented names, numeric coercion +
- * bounds, and URL validation. Each case re-imports the module after resetModules()
+ * bounds (the facet bucket cap's 500 ceiling included), and URL validation. Each case re-imports the module after resetModules()
  * so the memoized singleton doesn't leak across cases.
  * @module tests/config/server-config.test
  */
@@ -28,6 +28,7 @@ describe('getServerConfig — defaults', () => {
       rcsbModelsBaseUrl: 'https://models.rcsb.org',
       rcsbAlignmentBaseUrl: 'https://alignment.rcsb.org',
       beaconsBaseUrl: 'https://www.ebi.ac.uk/pdbe/pdbe-kb/3dbeacons/api',
+      pdbeApiBaseUrl: 'https://www.ebi.ac.uk/pdbe/api',
       alphafoldBaseUrl: 'https://alphafold.ebi.ac.uk',
       modelArchiveBaseUrl: 'https://modelarchive.org',
       foldseekBaseUrl: 'https://search.foldseek.com',
@@ -71,6 +72,12 @@ describe('getServerConfig — overrides', () => {
     expect(cfg.modelArchiveBaseUrl).toBe('https://ma.mirror.internal');
   });
 
+  it('maps the PDBe API override to PDBE_API_BASE_URL', async () => {
+    vi.stubEnv('PDBE_API_BASE_URL', 'https://pdbe.mirror.internal/api');
+    const cfg = await loadConfig();
+    expect(cfg.pdbeApiBaseUrl).toBe('https://pdbe.mirror.internal/api');
+  });
+
   it('coerces numeric env strings to numbers', async () => {
     vi.stubEnv('PROTEIN_MAX_BATCH_IDS', '50');
     vi.stubEnv('PROTEIN_ASYNC_POLL_TIMEOUT_MS', '60000');
@@ -94,5 +101,12 @@ describe('getServerConfig — validation', () => {
   it('rejects a sub-minimum compare cap', async () => {
     vi.stubEnv('PROTEIN_MAX_COMPARE_STRUCTURES', '1'); // schema min is 2
     await expect(loadConfig()).rejects.toThrow(/PROTEIN_MAX_COMPARE_STRUCTURES/);
+  });
+
+  it('takes a facet bucket cap up to 500, the ceiling bucket_limit shares, and no higher', async () => {
+    vi.stubEnv('PROTEIN_FACET_BUCKET_CAP', '500');
+    expect((await loadConfig()).facetBucketCap).toBe(500);
+    vi.stubEnv('PROTEIN_FACET_BUCKET_CAP', '501');
+    await expect(loadConfig()).rejects.toThrow(/PROTEIN_FACET_BUCKET_CAP/);
   });
 });

@@ -2,7 +2,8 @@
  * @fileoverview Tests for the RCSB service GraphQL/REST methods exercised through
  * realistic upstream payloads (HTTP mocked): entry-metadata normalization, UniProt
  * xref resolution, sequence extraction, binding-site assembly with distance sort
- * and label/author residue numbering (per-instance chain pairing),
+ * and label/author residue numbering (per-instance chain pairing) and its miss
+ * shapes (a null entry; the held components and BIRD polymer ligands),
  * chem-comp normalization (SMILES/InChIKey fallback chain) with the 404 → null
  * branch, sequence/ligand/chem-comp search hit normalization (each sequence
  * hit's verbose match context and the query length, read from the sequence
@@ -22,6 +23,7 @@ vi.mock('@/services/shared/http.js', async (importOriginal) => {
 });
 
 import { type FacetSpec, RcsbService } from '@/services/rcsb/rcsb-service.js';
+import type { EntryBindingSites } from '@/services/rcsb/types.js';
 import { fetchJson } from '@/services/shared/http.js';
 
 const fetchJsonMock = vi.mocked(fetchJson);
@@ -946,9 +948,15 @@ describe('RcsbService.getBindingSites', () => {
     },
   };
 
+  /** The sites of a `found` result; fails the test on any other kind. */
+  const sitesOf = (result: EntryBindingSites) => {
+    expect(result.kind).toBe('found');
+    return result.kind === 'found' ? result.sites : [];
+  };
+
   it('assembles sites and sorts residues nearest-first', async () => {
     fetchJsonMock.mockResolvedValue(gql(BINDING));
-    const sites = await service().getBindingSites('4HHB', undefined, createMockContext());
+    const sites = sitesOf(await service().getBindingSites('4HHB', undefined, createMockContext()));
 
     expect(sites).toHaveLength(2);
     const hem = sites.find((s) => s.ligandCompId === 'HEM');
@@ -960,12 +968,12 @@ describe('RcsbService.getBindingSites', () => {
 
   it('filters to a single ligand when compId is given', async () => {
     fetchJsonMock.mockResolvedValue(gql(BINDING));
-    const sites = await service().getBindingSites('4HHB', 'po4', createMockContext());
+    const sites = sitesOf(await service().getBindingSites('4HHB', 'po4', createMockContext()));
     expect(sites).toHaveLength(1);
     expect(sites[0]?.ligandCompId).toBe('PO4');
   });
 
-  it('returns [] when no instance has target neighbors', async () => {
+  it('reports a held component whose instances have no target neighbors as no_contacts (#105)', async () => {
     fetchJsonMock.mockResolvedValue(
       gql({
         entry: {
@@ -978,7 +986,169 @@ describe('RcsbService.getBindingSites', () => {
         },
       }),
     );
-    expect(await service().getBindingSites('4HHB', undefined, createMockContext())).toEqual([]);
+    expect(await service().getBindingSites('4HHB', undefined, createMockContext())).toEqual({
+      kind: 'no_contacts',
+      heldComponents: ['HEM'],
+      polymerLigands: [],
+    });
+  });
+
+  it('reports an entry RCSB does not hold as entry_not_found, not as an entry without contacts (2ZZZ, #105)', async () => {
+    // Live 2ZZZ (obsoleted 2009): the GraphQL entry is null.
+    fetchJsonMock.mockResolvedValue(gql({ entry: null }));
+    expect(await service().getBindingSites('2zzz', undefined, createMockContext())).toEqual({
+      kind: 'entry_not_found',
+    });
+  });
+
+  it('names every held component in entity-number order when the requested one is absent (4HHB ATP, #105)', async () => {
+    // Live 4HHB, served PO4 entity first: HEM (4HHB_3) and PO4 (4HHB_4) both have
+    // contacts, but neither is ATP.
+    fetchJsonMock.mockResolvedValue(
+      gql({
+        entry: {
+          polymer_entities: [
+            {
+              rcsb_id: '4HHB_2',
+              rcsb_polymer_entity: { pdbx_description: 'Hemoglobin subunit beta' },
+              rcsb_polymer_entity_container_identifiers: {
+                prd_id: null,
+                auth_asym_ids: ['B', 'D'],
+              },
+            },
+            {
+              rcsb_id: '4HHB_1',
+              rcsb_polymer_entity: { pdbx_description: 'Hemoglobin subunit alpha' },
+              rcsb_polymer_entity_container_identifiers: {
+                prd_id: null,
+                auth_asym_ids: ['A', 'C'],
+              },
+            },
+          ],
+          nonpolymer_entities: [
+            {
+              rcsb_id: '4HHB_4',
+              ...BINDING.entry.nonpolymer_entities[1],
+            },
+            {
+              rcsb_id: '4HHB_3',
+              ...BINDING.entry.nonpolymer_entities[0],
+            },
+          ],
+        },
+      }),
+    );
+    expect(await service().getBindingSites('4HHB', 'ATP', createMockContext())).toEqual({
+      kind: 'no_contacts',
+      heldComponents: ['HEM', 'PO4'],
+      polymerLigands: [],
+    });
+  });
+
+  it('names a BIRD ligand deposited as a polymer entity, with its description and author chains (1CWA, #105)', async () => {
+    // Live 1CWA: no non-polymer entity; cyclosporin A is polymer entity 1CWA_2.
+    fetchJsonMock.mockResolvedValue(
+      gql({
+        entry: {
+          polymer_entities: [
+            {
+              rcsb_id: '1CWA_2',
+              rcsb_polymer_entity: { pdbx_description: 'CYCLOSPORIN A' },
+              rcsb_polymer_entity_container_identifiers: {
+                prd_id: 'PRD_000142',
+                auth_asym_ids: ['C'],
+              },
+              polymer_entity_instances: [
+                {
+                  rcsb_polymer_entity_instance_container_identifiers: {
+                    asym_id: 'B',
+                    auth_asym_id: 'C',
+                  },
+                },
+              ],
+            },
+            {
+              rcsb_id: '1CWA_1',
+              rcsb_polymer_entity: { pdbx_description: 'PEPTIDYL-PROLYL CIS-TRANS ISOMERASE A' },
+              rcsb_polymer_entity_container_identifiers: { prd_id: null, auth_asym_ids: ['A'] },
+            },
+          ],
+          nonpolymer_entities: null,
+        },
+      }),
+    );
+    expect(await service().getBindingSites('1CWA', undefined, createMockContext())).toEqual({
+      kind: 'no_contacts',
+      heldComponents: [],
+      polymerLigands: [
+        {
+          entityId: '1CWA_2',
+          prdId: 'PRD_000142',
+          authAsymIds: ['C'],
+          description: 'CYCLOSPORIN A',
+        },
+      ],
+    });
+  });
+
+  it('orders BIRD polymer ligands by entity number and omits the fields upstream leaves out (#105)', async () => {
+    fetchJsonMock.mockResolvedValue(
+      gql({
+        entry: {
+          polymer_entities: [
+            {
+              rcsb_id: '9XYZ_10',
+              rcsb_polymer_entity_container_identifiers: { prd_id: 'PRD_000204' },
+            },
+            {
+              rcsb_id: '9XYZ_2',
+              rcsb_polymer_entity: { pdbx_description: 'ACTINOMYCIN D' },
+              rcsb_polymer_entity_container_identifiers: {
+                prd_id: 'PRD_000001',
+                auth_asym_ids: ['C', 'D'],
+              },
+            },
+            // A BIRD ID without an entity ID cannot be named, so it is left out.
+            { rcsb_polymer_entity_container_identifiers: { prd_id: 'PRD_000555' } },
+            {
+              rcsb_id: '9XYZ_1',
+              rcsb_polymer_entity_container_identifiers: { auth_asym_ids: ['A'] },
+            },
+          ],
+          nonpolymer_entities: [
+            {
+              rcsb_id: '9XYZ_3',
+              rcsb_nonpolymer_entity_container_identifiers: { nonpolymer_comp_id: 'CL' },
+              nonpolymer_entity_instances: [{ rcsb_target_neighbors: null }],
+            },
+          ],
+        },
+      }),
+    );
+    expect(await service().getBindingSites('9XYZ', undefined, createMockContext())).toEqual({
+      kind: 'no_contacts',
+      heldComponents: ['CL'],
+      polymerLigands: [
+        {
+          entityId: '9XYZ_2',
+          prdId: 'PRD_000001',
+          authAsymIds: ['C', 'D'],
+          description: 'ACTINOMYCIN D',
+        },
+        { entityId: '9XYZ_10', prdId: 'PRD_000204' },
+      ],
+    });
+  });
+
+  it('selects each polymer entity’s ID, description, BIRD ID, and author chains in the binding-site query (#105)', async () => {
+    fetchJsonMock.mockResolvedValue(gql({ entry: null }));
+    await service().getBindingSites('1CWA', undefined, createMockContext());
+    expect(fetchJsonMock).toHaveBeenCalledTimes(1);
+    const opts = fetchJsonMock.mock.calls[0]?.[2] as unknown as { body: string };
+    const query = JSON.parse(opts.body).query as string;
+    expect(query).toMatch(
+      /polymer_entities\s*\{\s*rcsb_id\s+rcsb_polymer_entity\s*\{\s*pdbx_description\s*\}\s*rcsb_polymer_entity_container_identifiers\s*\{\s*prd_id\s+auth_asym_ids\s*\}/,
+    );
   });
 
   /**
@@ -1048,7 +1218,7 @@ describe('RcsbService.getBindingSites', () => {
 
   it('carries author residue numbering beside the label numbering (1IEP STI, #69)', async () => {
     fetchJsonMock.mockResolvedValue(gql(BINDING_1IEP));
-    const [site] = await service().getBindingSites('1IEP', 'STI', createMockContext());
+    const [site] = sitesOf(await service().getBindingSites('1IEP', 'STI', createMockContext()));
 
     expect(site).toMatchObject({ ligandCompId: 'STI', ligandAsymId: 'A', ligandAuthSeqId: 201 });
     expect(site?.residues).toEqual([
@@ -1157,7 +1327,7 @@ describe('RcsbService.getBindingSites', () => {
         },
       }),
     );
-    const [site] = await service().getBindingSites('6QNR', 'MG', createMockContext());
+    const [site] = sitesOf(await service().getBindingSites('6QNR', 'MG', createMockContext()));
 
     expect(site).toMatchObject({ ligandAsymId: '13', ligandAuthSeqId: 1687 });
     expect(site?.residues).toEqual([
@@ -1218,7 +1388,7 @@ describe('RcsbService.getBindingSites', () => {
         },
       }),
     );
-    const [site] = await service().getBindingSites('4HHB', undefined, createMockContext());
+    const [site] = sitesOf(await service().getBindingSites('4HHB', undefined, createMockContext()));
     expect(site).not.toHaveProperty('ligandAuthSeqId');
     expect(site?.residues[0]).toEqual({
       residueCompId: 'HIS',
@@ -1287,7 +1457,7 @@ describe('RcsbService.getBindingSites', () => {
 
   const sitesFor = async (nonpolymer_entities: unknown[]) => {
     fetchJsonMock.mockResolvedValueOnce(gql({ entry: { nonpolymer_entities } }));
-    return service().getBindingSites('6M0J', undefined, createMockContext());
+    return sitesOf(await service().getBindingSites('6M0J', undefined, createMockContext()));
   };
 
   it('orders sites by ligand entity number, then author chain and residue, whatever order upstream serves (6M0J, #85)', async () => {
@@ -1613,7 +1783,12 @@ describe('RcsbService search helpers', () => {
       { text: 'hemoglobin', sequence: 'MVLSPADKTN', organism: 'Homo sapiens' },
       createMockContext(),
     );
-    expect(out).toEqual({ total: 739, queryLength: 142, hits: COMBINED_HITS });
+    expect(out).toEqual({
+      total: 739,
+      queryLength: 142,
+      hits: COMBINED_HITS,
+      universes: [{ contentType: 'experimental', status: 'answered', total: 739 }],
+    });
   });
 
   it('selects the sequence entry by service type, whatever position it holds (#89)', async () => {
@@ -1626,7 +1801,12 @@ describe('RcsbService search helpers', () => {
       { text: 'hemoglobin', sequence: 'MVLSPADKTN' },
       createMockContext(),
     );
-    expect(out).toEqual({ total: 739, queryLength: 142, hits: COMBINED_HITS });
+    expect(out).toEqual({
+      total: 739,
+      queryLength: 142,
+      hits: COMBINED_HITS,
+      universes: [{ contentType: 'experimental', status: 'answered', total: 739 }],
+    });
   });
 
   it('adds no alignment field a hit’s sequence entry did not carry (#89)', async () => {
@@ -1763,7 +1943,7 @@ describe('RcsbService search helpers', () => {
         { identifier: 'A1L15', score: 0.185 },
       ],
     });
-    const out = await service().findChemComps('ATP', 25, createMockContext());
+    const out = await service().findChemComps('ATP', { start: 0, limit: 25 }, createMockContext());
     expect(out).toEqual({
       ids: ['PRT', 'JSQ', 'AGS', 'ATP', 'DDS', 'APC', 'A1L15'],
       total: 7,
@@ -1779,7 +1959,7 @@ describe('RcsbService search helpers', () => {
         { identifier: 'FE2', score: 0.9 },
       ],
     });
-    const out = await service().findChemComps('iron', 2, createMockContext());
+    const out = await service().findChemComps('iron', { start: 0, limit: 2 }, createMockContext());
     expect(out).toEqual({ ids: ['FE', 'FE2'], total: 119 });
   });
 
@@ -1984,7 +2164,11 @@ describe('RcsbService.findChemComps — formula vs name routing (#50)', () => {
   );
 
   it('routes a spaced Hill-notation formula to the chemical/formula terminal', async () => {
-    const out = await service().findChemComps('C29 H31 N7 O', 25, createMockContext());
+    const out = await service().findChemComps(
+      'C29 H31 N7 O',
+      { start: 0, limit: 25 },
+      createMockContext(),
+    );
     expect(out).toEqual({ ids: ['STI'], total: 1 });
     expect(postedQuery()).toEqual({
       type: 'terminal',
@@ -1996,7 +2180,11 @@ describe('RcsbService.findChemComps — formula vs name routing (#50)', () => {
   });
 
   it('routes an unspaced formula to the same terminal without client-side normalization', async () => {
-    const out = await service().findChemComps('C29H31N7O', 25, createMockContext());
+    const out = await service().findChemComps(
+      'C29H31N7O',
+      { start: 0, limit: 25 },
+      createMockContext(),
+    );
     expect(out).toEqual({ ids: ['STI'], total: 1 });
     expect(postedQuery()).toMatchObject({
       service: 'chemical',
@@ -2007,7 +2195,7 @@ describe('RcsbService.findChemComps — formula vs name routing (#50)', () => {
   it.each(['STI', 'HEM', 'heme', 'imatinib', 'VITAMIN B12', '1PE'])(
     'keeps %s on the name/synonym text_chem path',
     async (query) => {
-      await service().findChemComps(query, 25, createMockContext());
+      await service().findChemComps(query, { start: 0, limit: 25 }, createMockContext());
       const q = postedQuery();
       expect(q.type).toBe('group');
       expect(q.nodes?.map((n) => n.parameters?.attribute)).toEqual([
@@ -2022,7 +2210,13 @@ describe('RcsbService.findChemComps — formula vs name routing (#50)', () => {
     // postSearch's onEmptyBody already turns RCSB's 204 into an empty result set;
     // the tool's existing not_found branch takes it from there.
     fetchJsonMock.mockResolvedValue({ total_count: 0, result_set: [], facets: [] });
-    expect(await service().findChemComps('C99 H99 N99 O99', 25, createMockContext())).toEqual({
+    expect(
+      await service().findChemComps(
+        'C99 H99 N99 O99',
+        { start: 0, limit: 25 },
+        createMockContext(),
+      ),
+    ).toEqual({
       ids: [],
       total: 0,
     });
@@ -2038,7 +2232,9 @@ describe('RcsbService.findChemComps — formula vs name routing (#50)', () => {
         .mockResolvedValueOnce({ total_count: 0, result_set: [] })
         .mockResolvedValueOnce({ total_count: 1, result_set: [{ identifier: '6ML', score: 1 }] });
 
-      expect(await service().findChemComps(query, 25, createMockContext())).toEqual({
+      expect(
+        await service().findChemComps(query, { start: 0, limit: 25 }, createMockContext()),
+      ).toEqual({
         ids: ['6ML'],
         total: 1,
       });
@@ -2053,16 +2249,45 @@ describe('RcsbService.findChemComps — formula vs name routing (#50)', () => {
   );
 
   it('does not re-query the name path when the formula terminal matched', async () => {
-    await service().findChemComps('C29 H31 N7 O', 25, createMockContext());
+    await service().findChemComps('C29 H31 N7 O', { start: 0, limit: 25 }, createMockContext());
     expect(fetchJsonMock).toHaveBeenCalledTimes(1);
   });
 
   it('paginates the formula path with the same row cap as the name path', async () => {
-    await service().findChemComps('C29 H31 N7 O', 7, createMockContext());
+    await service().findChemComps('C29 H31 N7 O', { start: 0, limit: 7 }, createMockContext());
     const opts = fetchJsonMock.mock.calls[0]?.[2] as unknown as { body: string };
     const body = JSON.parse(opts.body);
     expect(body.return_type).toBe('mol_definition');
     expect(body.request_options.paginate).toEqual({ start: 0, rows: 7 });
+  });
+
+  it('forwards the page offset to the formula and name searches alike', async () => {
+    fetchJsonMock
+      .mockResolvedValueOnce({ total_count: 0, result_set: [] })
+      .mockResolvedValueOnce({ total_count: 118, result_set: [{ identifier: '6CQ', score: 1 }] });
+    // SF4 is formula-shaped, so it tries the formula terminal before the name path.
+    const out = await service().findChemComps('SF4', { start: 25, limit: 50 }, createMockContext());
+    expect(out).toEqual({ ids: ['6CQ'], total: 118 });
+    const pages = fetchJsonMock.mock.calls.map(
+      (call) => JSON.parse((call[2] as unknown as { body: string }).body).request_options.paginate,
+    );
+    expect(pages).toEqual([
+      { start: 25, rows: 50 },
+      { start: 25, rows: 50 },
+    ]);
+  });
+
+  it('keeps a formula match whose page starts past its end instead of re-querying the name path', async () => {
+    // Live: a page past the end answers 200 with the total and no rows, not a 204.
+    fetchJsonMock.mockResolvedValue({ total_count: 1, result_set: [] });
+    const out = await service().findChemComps(
+      'C29 H31 N7 O',
+      { start: 25, limit: 25 },
+      createMockContext(),
+    );
+    expect(out).toEqual({ ids: [], total: 1 });
+    expect(fetchJsonMock).toHaveBeenCalledTimes(1);
+    expect(postedQuery()).toMatchObject({ service: 'chemical' });
   });
 });
 

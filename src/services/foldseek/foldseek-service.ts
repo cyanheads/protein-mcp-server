@@ -19,6 +19,7 @@ import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 import type { StorageService } from '@cyanheads/mcp-ts-core/storage';
 import type { ServerConfig } from '@/config/server-config.js';
 import { type PollStep, withAsyncPoll } from '../shared/async.js';
+import { cancelledByCaller } from '../shared/call-budget.js';
 import { fetchJson } from '../shared/http.js';
 import { isUniProtAccession } from '../shared/identifiers.js';
 
@@ -142,10 +143,11 @@ export class FoldseekService {
   }
 
   /**
-   * Submit a structure and bounded-poll for fold-similarity hits. Never throws —
-   * a submit Foldseek refuses with HTTP 400 is `{ status: 'rejected' }`, and any
-   * other submit/poll failure degrades to `{ status: 'failed' }`, carrying the
-   * ticket when the failure came after Foldseek accepted the job.
+   * Submit a structure and bounded-poll for fold-similarity hits. Throws only the
+   * caller's cancellation — a submit Foldseek refuses with HTTP 400 is
+   * `{ status: 'rejected' }`, and any other submit/poll failure, a call-budget
+   * stop included, degrades to `{ status: 'failed' }`, carrying the ticket when
+   * the failure came after Foldseek accepted the job.
    */
   async search(
     params: {
@@ -171,6 +173,7 @@ export class FoldseekService {
         ctx,
       );
     } catch (err) {
+      if (cancelledByCaller(ctx)) throw err;
       // `fetchWithTimeout` maps HTTP 400 to InvalidParams, which is never retried.
       // Foldseek answers 400 when it refuses the request itself — with every
       // database name schema-checked, a name it no longer accepts — so the
@@ -186,6 +189,7 @@ export class FoldseekService {
     try {
       return await this.pollToOutcome(ticketId, params, ctx);
     } catch (err) {
+      if (cancelledByCaller(ctx)) throw err;
       return {
         status: 'failed',
         ticketId,
@@ -199,7 +203,7 @@ export class FoldseekService {
    * without resubmitting. A bogus or expired ticket is a clean `400 "invalid ID"`
    * from Foldseek — surfaced as `{ status: 'not_found' }`, distinct from an
    * in-flight job (`computing`) or a processing error (`failed`, with the
-   * ticket). Never throws.
+   * ticket). Throws only the caller's cancellation.
    */
   async resume(
     params: { ticketId: string; limit: number; query?: number; start: number; timeoutMs: number },
@@ -208,6 +212,7 @@ export class FoldseekService {
     try {
       return await this.pollToOutcome(params.ticketId, params, ctx);
     } catch (err) {
+      if (cancelledByCaller(ctx)) throw err;
       // A 400 from the ticket/result endpoint is Foldseek's "invalid ID" — the
       // ticket never existed or has expired. `fetchWithTimeout` maps 400 →
       // InvalidParams, so key the not-found branch off that code.

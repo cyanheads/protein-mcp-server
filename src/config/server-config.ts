@@ -8,6 +8,13 @@
 import { z } from '@cyanheads/mcp-ts-core';
 import { parseEnvConfig } from '@cyanheads/mcp-ts-core/config';
 
+/**
+ * The most facet buckets per dimension level this server returns: the ceiling
+ * on `PROTEIN_FACET_BUCKET_CAP` and on `protein_analyze_collection`'s
+ * `bucket_limit`, which the bucket-cap notices name as the way past a cap.
+ */
+export const MAX_FACET_BUCKETS = 500;
+
 const ServerConfigSchema = z.object({
   rcsbSearchBaseUrl: z
     .string()
@@ -39,6 +46,11 @@ const ServerConfigSchema = z.object({
     .url()
     .default('https://www.ebi.ac.uk/pdbe/pdbe-kb/3dbeacons/api')
     .describe('Base URL for the 3D-Beacons federated structure API.'),
+  pdbeApiBaseUrl: z
+    .string()
+    .url()
+    .default('https://www.ebi.ac.uk/pdbe/api')
+    .describe('Base URL for the PDBe REST API (SIFTS UniProt-to-PDB mappings).'),
   alphafoldBaseUrl: z
     .string()
     .url()
@@ -70,7 +82,7 @@ const ServerConfigSchema = z.object({
     .min(1000)
     .default(30_000)
     .describe(
-      'Max wall-clock to poll an async job (alignment / Foldseek) before returning a "still computing" result. For a new protein_find_similar structure search the window starts with the call, and the call\'s 50 s upstream budget ends it first above about 45 s, so keep it at or below 45000.',
+      'Max wall-clock to poll an async job (alignment / Foldseek) before returning a "still computing" result. protein_find_similar and protein_compare_structures each stop at a 50 s upstream budget per call, which ends a poll first above about 45 s, so keep it at or below 45000; compare pairs beyond PROTEIN_FANOUT_CONCURRENCY wait for a free slot and can meet the budget sooner.',
     ),
   maxBatchIds: z.coerce
     .number()
@@ -90,7 +102,7 @@ const ServerConfigSchema = z.object({
     .number()
     .int()
     .min(1)
-    .max(500)
+    .max(MAX_FACET_BUCKETS)
     .default(50)
     .describe(
       'Default cap on buckets returned per protein_analyze_collection dimension level — applied separately to a cross-tab parent dimension and to the nested child inside each of its buckets.',
@@ -116,6 +128,7 @@ export function getServerConfig(): ServerConfig {
     rcsbModelsBaseUrl: 'RCSB_MODELS_BASE_URL',
     rcsbAlignmentBaseUrl: 'RCSB_ALIGNMENT_BASE_URL',
     beaconsBaseUrl: 'BEACONS_BASE_URL',
+    pdbeApiBaseUrl: 'PDBE_API_BASE_URL',
     alphafoldBaseUrl: 'ALPHAFOLD_BASE_URL',
     modelArchiveBaseUrl: 'MODELARCHIVE_BASE_URL',
     foldseekBaseUrl: 'FOLDSEEK_BASE_URL',

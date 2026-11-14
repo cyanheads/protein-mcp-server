@@ -6,9 +6,9 @@
  * @module tests/resources/pdb-summary.resource.test
  */
 
-import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
+import { createFetchMock, createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const getEntries = vi.fn();
 vi.mock('@/services/rcsb/rcsb-service.js', () => ({
@@ -18,6 +18,86 @@ vi.mock('@/services/rcsb/rcsb-service.js', () => ({
 import { pdbSummaryResource } from '@/mcp-server/resources/definitions/pdb-summary.resource.js';
 
 beforeEach(() => vi.clearAllMocks());
+
+/** RCSB's GraphQL host under a stubbed base URL. Strict: any other request fails the test. */
+const rcsb = createFetchMock();
+
+describe('pdb://{entry_id} call budget', () => {
+  /** The real RCSB metadata request, sent through the shared HTTP layer to the stub. */
+  beforeEach(async () => {
+    const { RcsbService } = await vi.importActual<typeof import('@/services/rcsb/rcsb-service.js')>(
+      '@/services/rcsb/rcsb-service.js',
+    );
+    const real = new RcsbService(
+      {} as never,
+      {} as never,
+      { rcsbSearchBaseUrl: 'https://search', rcsbDataBaseUrl: 'https://data' } as never,
+    );
+    getEntries.mockImplementation((ids: string[], c: never) => real.getEntries(ids, c));
+    rcsb.reset();
+    rcsb.install();
+  });
+  afterEach(() => {
+    rcsb.restore();
+    vi.useRealTimers();
+  });
+
+  /** A GraphQL answer that never comes: it rejects only once its request aborts. */
+  const hang = (req: Request) =>
+    new Promise<Response>((_, reject) => {
+      if (req.signal.aborted) reject(req.signal.reason);
+      req.signal.addEventListener('abort', () => reject(req.signal.reason), { once: true });
+    });
+
+  const read = (signal?: AbortSignal) =>
+    Promise.resolve(
+      pdbSummaryResource.handler(
+        pdbSummaryResource.params!.parse({ entry_id: '36ZA' }),
+        createMockContext({ uri: new URL('pdb://36za'), ...(signal ? { signal } : {}) }),
+      ),
+    );
+
+  it('settles a hung metadata request at the 50 s budget as a Timeout, across its retries', async () => {
+    vi.useFakeTimers();
+    rcsb.route({ match: 'https://data/graphql', respond: hang });
+    const state = { settled: false };
+    const reading = read()
+      .catch((e: unknown) => e)
+      .finally(() => {
+        state.settled = true;
+      });
+
+    // A lone request's own 30 s timeout fires first; the retry it earns is still
+    // in flight when the call budget runs out.
+    await vi.advanceTimersByTimeAsync(49_999);
+    expect(state.settled).toBe(false);
+    expect(rcsb.calls.length).toBeGreaterThanOrEqual(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(state.settled).toBe(true);
+
+    const err = await reading;
+    expect(err).toBeInstanceOf(McpError);
+    expect(err).toMatchObject({ code: JsonRpcErrorCode.Timeout });
+    expect((err as McpError).message).toContain("timed out on the caller's signal");
+  });
+
+  it('rejects as cancelled, not as a budget Timeout, when the caller cancels mid-request', async () => {
+    const caller = new AbortController();
+    rcsb.route({
+      match: 'https://data/graphql',
+      respond: (req) => {
+        caller.abort();
+        return hang(req);
+      },
+    });
+
+    const err = await read(caller.signal).catch((e: unknown) => e);
+    expect(rcsb.calls).toHaveLength(1);
+    expect(err).toBeInstanceOf(McpError);
+    expect(err).toMatchObject({ code: JsonRpcErrorCode.RequestCancelled });
+    expect((err as McpError).message).toContain('was aborted');
+  });
+});
 
 describe('pdb://{entry_id}', () => {
   it('projects a full entry summary', async () => {
@@ -75,9 +155,35 @@ describe('pdb://{entry_id}', () => {
     );
 
     expect(out.polymerEntities).toEqual([
-      { entityId: '6QNR_9', authAsymIds: ['82', '8E'], labelAsymIds: ['I', 'OB'] },
+      { entityId: '6QNR_9', authAsymIds: ['82', '8E'], labelAsymIds: ['I', 'OB'], chainCount: 2 },
     ]);
     expect(out).toEqual(expect.schemaMatching(pdbSummaryResource.output));
+  });
+
+  it('lists every chain of an entity past 100 chains, with chainCount (#102)', async () => {
+    const ids = (ns: string) => Array.from({ length: 1615 }, (_, i) => `${ns}${i}`);
+    getEntries.mockResolvedValue([
+      {
+        id: '36ZA',
+        organisms: [],
+        polymerEntities: [
+          { entityId: '36ZA_7', authAsymIds: ids('a'), labelAsymIds: ids('l') },
+          { entityId: '36ZA_8', authAsymIds: ['x'], labelAsymIds: ['y'] },
+        ],
+        ligands: [],
+      },
+    ]);
+    const params = pdbSummaryResource.params!.parse({ entry_id: '36ZA' });
+    const out = await pdbSummaryResource.handler(
+      params,
+      createMockContext({ uri: new URL('pdb://36za') }),
+    );
+
+    // The framework parses a resource result against `output` before serving it.
+    expect(pdbSummaryResource.output!.parse(out).polymerEntities).toEqual([
+      { entityId: '36ZA_7', authAsymIds: ids('a'), labelAsymIds: ids('l'), chainCount: 1615 },
+      { entityId: '36ZA_8', authAsymIds: ['x'], labelAsymIds: ['y'], chainCount: 1 },
+    ]);
   });
 
   it('omits an entity chain namespace the upstream did not supply', async () => {

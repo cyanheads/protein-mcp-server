@@ -2,23 +2,33 @@
  * @fileoverview Tests for protein_compare_structures: pair generation
  * (reference:first vs. all_pairs), repeated-structure de-duplication and the
  * pair-key uniqueness invariant it protects, the computing/ticket outcome with
- * enrichment, and format() rendering of both failure detail and job tickets.
- * Alignment mocked.
+ * enrichment, the computing notice's resume recipe replayed with only the
+ * arguments it names, and format() rendering of both failure detail and job tickets.
+ * Alignment mocked, except for the call-budget cases, which run the real
+ * alignment service over a fake upstream on fake timers.
  * @module tests/tools/compare-structures.tool.test
  */
 
 import { z } from '@cyanheads/mcp-ts-core';
-import { createMockContext, getEnrichment, runToolContract } from '@cyanheads/mcp-ts-core/testing';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  createFetchMock,
+  createMockContext,
+  type FetchMockHarness,
+  getEnrichment,
+  runToolContract,
+} from '@cyanheads/mcp-ts-core/testing';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const comparePair = vi.fn();
 const resumePair = vi.fn();
-vi.mock('@/services/alignment/alignment-service.js', () => ({
+vi.mock('@/services/alignment/alignment-service.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/alignment/alignment-service.js')>()),
   getAlignmentService: () => ({ comparePair, resumePair }),
 }));
 
 import { getServerConfig } from '@/config/server-config.js';
 import { compareStructures } from '@/mcp-server/tools/definitions/compare-structures.tool.js';
+import { AlignmentService } from '@/services/alignment/alignment-service.js';
 
 const ctx = () => createMockContext({ errors: compareStructures.errors });
 
@@ -839,5 +849,301 @@ describe('protein_compare_structures TM-score length-normalization caveat', () =
     expect(desc).toMatch(/terminal/i);
     expect(desc).toMatch(/rmsd/i);
     expect(desc).toMatch(/alignedResidues/i);
+  });
+});
+
+/** The text blocks of a tool result, joined. */
+const textOf = (result: { content: Array<{ type: string; text?: string }> }) =>
+  result.content
+    .filter((b) => b.type === 'text')
+    .map((b) => b.text)
+    .join('\n');
+
+describe('protein_compare_structures failed pairs keep a submitted job UUID (#101)', () => {
+  it('carries the uuid of a failed pair whose job was submitted on both surfaces, and says how to resume it', async () => {
+    comparePair
+      .mockResolvedValueOnce({ status: 'failed', uuid: 'job-7', error: 'poll failed' })
+      .mockResolvedValueOnce({ status: 'failed', error: 'submit failed' });
+    const result = await runToolContract(compareStructures, { structures: three });
+    const { pairs } = result.structuredContent as { pairs: Array<Record<string, unknown>> };
+    expect(pairs).toEqual([
+      { a: '4HHB', b: '2HHB', status: 'failed', uuid: 'job-7', error: 'poll failed' },
+      { a: '4HHB', b: '1A3N', status: 'failed', error: 'submit failed' },
+    ]);
+    const text = textOf(result);
+    expect(text).toContain('- 4HHB ↔ 2HHB: job job-7');
+    expect(text).toContain('each failed pair that carries a uuid');
+    expect(text).toContain('a failed pair without a uuid has no job to resume');
+  });
+
+  it('describes timeout_s as bounded by the 50 s call budget, with stopped pairs returning computing', () => {
+    const js = z.toJSONSchema(compareStructures.input) as unknown as {
+      properties: { timeout_s: { description?: string; maximum?: number } };
+    };
+    expect(js.properties.timeout_s.maximum).toBe(120);
+    expect(js.properties.timeout_s.description).toContain('50 s');
+    expect(js.properties.timeout_s.description).toContain('computing');
+  });
+});
+
+describe('protein_compare_structures resume recipe in the computing notice', () => {
+  it('resumes every pair when a client sends exactly the arguments the notice names', async () => {
+    // A non-default reference and method, so a replay that drops either one fails.
+    const first = { structures: three, reference: 'all_pairs', method: 'fatcat-rigid' } as const;
+    comparePair.mockImplementation(async (a: { entryId: string }, b: { entryId: string }) => ({
+      status: 'computing',
+      uuid: `job-${a.entryId}-${b.entryId}`,
+    }));
+    const computing = await runToolContract(compareStructures, first);
+    const { notice, pairs } = computing.structuredContent as {
+      notice: string;
+      pairs: Array<{ a: string; b: string; uuid: string }>;
+    };
+
+    // The literal client: every input argument the notice names — copied from
+    // this call, resume entries from its pairs — and nothing else.
+    const namedIn = (text: string) =>
+      Object.keys(compareStructures.input.shape).filter((key) =>
+        new RegExp(`\\b${key}\\b`).test(text),
+      );
+    const named = namedIn(notice);
+    expect(namedIn(textOf(computing))).toEqual(named);
+    const replay: Record<string, unknown> = Object.fromEntries(
+      named.map((key) => [
+        key,
+        key === 'resume'
+          ? pairs.map(({ a, b, uuid }) => ({ a, b, uuid }))
+          : first[key as keyof typeof first],
+      ]),
+    );
+    resumePair.mockImplementation(async (uuid: string) => ({
+      status: 'complete',
+      uuid,
+      scores: { tmScore: 0.9 },
+      job: { method: 'fatcat-rigid' },
+    }));
+    // Untyped, as a client sends it: runToolContract parses it against the schema,
+    // which rejects a replay that leaves out a required argument.
+    const resumed = await runToolContract(
+      compareStructures,
+      replay as z.input<typeof compareStructures.input>,
+    );
+
+    expect(resumed.isError).not.toBe(true);
+    expect(resumed.structuredContent).toMatchObject({
+      reference: 'all_pairs',
+      method: 'fatcat-rigid',
+      pairs: pairs.map(({ a, b, uuid }) => ({ a, b, uuid, status: 'complete', tmScore: 0.9 })),
+    });
+    expect(textOf(resumed)).toContain('| 2HHB ↔ 1A3N | complete | 0.900 |');
+    // The replay polled the first call's jobs and submitted none of its own.
+    expect(resumePair.mock.calls.map(([uuid]) => uuid)).toEqual(pairs.map((p) => p.uuid));
+    expect(comparePair).toHaveBeenCalledTimes(pairs.length);
+  });
+});
+
+describe('protein_compare_structures settles inside the 50 s call budget (#101)', () => {
+  const ORIGIN = 'https://alignment.test';
+  type Responder = (req: Request) => Promise<Response> | Response;
+  type Output = Awaited<ReturnType<typeof compareStructures.handler>>;
+  /** The second structure of every submit that went out, and the poll count. */
+  const submitted: string[] = [];
+  let polls = 0;
+  let http: FetchMockHarness | undefined;
+
+  const at = (path: string) => (req: Request) => {
+    const url = new URL(req.url);
+    return url.origin === ORIGIN && url.pathname === path;
+  };
+  /** An upstream that never answers: settles only when the request's signal aborts. */
+  const hang = (req: Request) =>
+    new Promise<Response>((_, reject) =>
+      req.signal.addEventListener('abort', () => reject(req.signal.reason), { once: true }),
+    );
+  /** The submitted query's second structure, which names the pair under reference "first". */
+  const partner = (req: Request): string =>
+    JSON.parse(new URL(req.url).searchParams.get('query') ?? '{}').context.structures[1].entry_id;
+  const serve = (submit: Responder, results: Responder) => {
+    // A real fetch sends nothing once its signal has aborted.
+    http = createFetchMock([
+      {
+        method: 'POST',
+        match: at('/api/v1/structures/submit'),
+        respond: (req) => {
+          if (req.signal.aborted) return Promise.reject(req.signal.reason);
+          submitted.push(partner(req));
+          return submit(req);
+        },
+      },
+      {
+        method: 'GET',
+        match: at('/api/v1/structures/results'),
+        respond: (req) => {
+          if (req.signal.aborted) return Promise.reject(req.signal.reason);
+          polls++;
+          return results(req);
+        },
+      },
+    ]);
+    http.install();
+  };
+  const accepted: Responder = (req) => new Response(`"job-${partner(req)}"`);
+  const notReady: Responder = () => new Response('', { status: 404 });
+
+  /** Start the handler directly with a context the test holds, tracking when it settles. */
+  const start = (input: unknown) => {
+    const c = ctx();
+    const state: { out?: Output; settled: boolean } = { settled: false };
+    const done = Promise.resolve(compareStructures.handler(compareStructures.input.parse(input), c))
+      .then((out) => {
+        state.out = out;
+      })
+      .finally(() => {
+        state.settled = true;
+      });
+    return { c, state, done };
+  };
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    submitted.length = 0;
+    polls = 0;
+    const real = new AlignmentService(
+      {} as never,
+      {} as never,
+      {
+        rcsbAlignmentBaseUrl: ORIGIN,
+      } as never,
+    );
+    comparePair.mockImplementation(real.comparePair.bind(real));
+    resumePair.mockImplementation(real.resumePair.bind(real));
+  });
+  afterEach(() => {
+    http?.restore();
+    http = undefined;
+    comparePair.mockReset();
+    resumePair.mockReset();
+    vi.useRealTimers();
+  });
+
+  it('fails a pair whose submit never answers at its 30 s attempt timeout, inside the budget, sending it once', async () => {
+    serve(hang, notReady);
+    const { c, state, done } = start({ structures: [{ pdb_id: '4HHB' }, { pdb_id: '2HHB' }] });
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(state.settled).toBe(true);
+    await done;
+    expect(state.out?.pairs).toEqual([
+      { a: '4HHB', b: '2HHB', status: 'failed', error: expect.stringContaining('timed out') },
+    ]);
+    expect(String(getEnrichment(c).notice)).toContain(
+      'a failed pair without a uuid has no job to resume',
+    );
+    expect(submitted).toEqual(['2HHB']);
+    expect(polls).toBe(0);
+  });
+
+  it('returns computing with the uuid for a pair whose poll is still in flight at the budget', async () => {
+    // Polls answer 404 until 40 s; the one sent at 41.25 s hangs past the budget.
+    const startedAt = Date.now();
+    serve(accepted, (req) => (Date.now() - startedAt < 40_000 ? notReady(req) : hang(req)));
+    const { c, state, done } = start({
+      structures: [{ pdb_id: '4HHB' }, { pdb_id: '2HHB' }],
+      timeout_s: 120,
+    });
+    await vi.advanceTimersByTimeAsync(49_999);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(state.settled).toBe(true);
+    await done;
+    expect(state.out?.pairs).toEqual([
+      { a: '4HHB', b: '2HHB', status: 'computing', uuid: 'job-2HHB' },
+    ]);
+    expect(String(getEnrichment(c).notice)).toContain('ran past the 50 s budget');
+  });
+
+  it('keeps the uuid on a pair whose every poll attempt hangs, failing it before the budget', async () => {
+    serve(accepted, hang);
+    const { state, done } = start({ structures: [{ pdb_id: '4HHB' }, { pdb_id: '2HHB' }] });
+    // Three 15 s poll attempts plus two backoffs (300–500 ms, then 600–1000 ms).
+    await vi.advanceTimersByTimeAsync(45_899);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(47_000 - 45_899);
+    expect(state.settled).toBe(true);
+    await done;
+    expect(state.out?.pairs).toEqual([
+      {
+        a: '4HHB',
+        b: '2HHB',
+        status: 'failed',
+        uuid: 'job-2HHB',
+        error: expect.stringContaining('failed after 3 attempts'),
+      },
+    ]);
+    expect(polls).toBe(3);
+  });
+
+  it('fails a later-wave pair the budget reaches before its submit, sending no request for it', async () => {
+    const { fanoutConcurrency } = getServerConfig();
+    // One more pair than the fan-out runs at once, so the last pair waits for a slot.
+    const structures = Array.from({ length: fanoutConcurrency + 2 }, (_, i) => ({
+      pdb_id: `${i + 1}ABC`,
+    }));
+    serve(accepted, notReady);
+    const { state, done } = start({ structures, timeout_s: 120 });
+    await vi.advanceTimersByTimeAsync(49_999);
+    expect(state.settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(state.settled).toBe(true);
+    await done;
+
+    const pairs = state.out?.pairs ?? [];
+    expect(pairs).toHaveLength(fanoutConcurrency + 1);
+    const firstWave = pairs.slice(0, fanoutConcurrency);
+    expect(firstWave.map((p) => p.status)).toEqual(Array(fanoutConcurrency).fill('computing'));
+    expect(firstWave.map((p) => p.uuid)).toEqual(firstWave.map((p) => `job-${p.b}`));
+    const last = pairs[fanoutConcurrency];
+    expect(last).toEqual({
+      a: '1ABC',
+      b: `${fanoutConcurrency + 2}ABC`,
+      status: 'failed',
+      error: expect.stringContaining('without a resume entry'),
+    });
+    expect(submitted).toHaveLength(fanoutConcurrency);
+    expect(submitted).not.toContain(last?.b);
+  });
+
+  it("rejects the handler with the caller's cancellation from a poll in flight, never rows", async () => {
+    const caller = new AbortController();
+    serve(accepted, (req) => {
+      queueMicrotask(() => caller.abort('client went away'));
+      return hang(req);
+    });
+    await expect(
+      compareStructures.handler(
+        compareStructures.input.parse({ structures: three }),
+        createMockContext({ errors: compareStructures.errors, signal: caller.signal }),
+      ),
+    ).rejects.toBe('client went away');
+  });
+
+  it("reports the caller's cancellation as RequestCancelled on both surfaces", async () => {
+    const caller = new AbortController();
+    serve(accepted, (req) => {
+      queueMicrotask(() => caller.abort('client went away'));
+      return hang(req);
+    });
+    const result = (await runToolContract(
+      compareStructures,
+      { structures: three },
+      { context: { signal: caller.signal } },
+    )) as ContractError & { content: Array<{ type: string; text?: string }> };
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({
+      code: -32011,
+      message: expect.stringContaining('client went away'),
+    });
+    expect(textOf(result)).toContain('client went away');
   });
 });

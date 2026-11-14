@@ -2,7 +2,7 @@
  * @fileoverview Tests for protein_get_structure: source/ID-type guarding, batched
  * partial success (failed[]), the predicted (AlphaFold) path, the best_available
  * federated pick (PDB entries only from PDBe, ranked by coverage then resolution,
- * with a PDBe-only confirmation when the federated summary lacks them; other
+ * with PDBe's SIFTS mapping asked when the federated summary lacks them; other
  * models ranked on one lDDT-scale confidence; pdbId + title promotion, full
  * cif/pdb/bcif parity with source experimental, a non-pLDDT metric kept out of
  * meanPlddt), coordinate paging (24,000-character windows for one selected file,
@@ -11,13 +11,14 @@
  * batch-cap / partial-failure / overflow notices from overwriting each other,
  * the entry detail carried on experimental records (polymer entities with both
  * chain namespaces, ligands, molecular weight, release date), and the
- * per-response attribution union derived from structures[]. The provider
- * services are mocked; coordinate files are served through a strict fetch stub,
- * so the real HTTP streaming path runs.
+ * per-response attribution union derived from structures[], and the ids input
+ * aliases. The provider services are mocked except PDBe's SIFTS lookup; it and
+ * the coordinate files are served through a strict fetch stub, so the real
+ * SIFTS status handling and HTTP streaming paths run.
  * @module tests/tools/get-structure.tool.test
  */
 
-import type { z } from '@cyanheads/mcp-ts-core';
+import { z } from '@cyanheads/mcp-ts-core';
 import { timeout } from '@cyanheads/mcp-ts-core/errors';
 import {
   createFetchMock,
@@ -64,6 +65,20 @@ vi.mock('@/services/beacons/beacons-service.js', () => ({
   getBeaconsService: () => ({ getSummary }),
 }));
 
+// PDBe's SIFTS lookup is the real service over the fetch stub (`sifts` below),
+// so its 404 / failure split and row normalization run under these tests.
+vi.mock('@/services/pdbe/pdbe-service.js', async (importOriginal) => {
+  const { PdbeService } = await importOriginal<typeof import('@/services/pdbe/pdbe-service.js')>();
+  const real = new PdbeService(
+    {} as never,
+    {} as never,
+    {
+      pdbeApiBaseUrl: 'https://pdbe',
+    } as never,
+  );
+  return { getPdbeService: () => real };
+});
+
 // UniProt's verdict is faked; the message and notice builders stay real.
 const resolveAccession = vi.fn();
 vi.mock('@/services/uniprot/uniprot-service.js', async (importOriginal) => ({
@@ -105,6 +120,58 @@ function serveAllFiles(body: string): void {
 
 /** Coordinate URLs requested, in call order. */
 const fetchedUrls = () => files.calls.map((c) => c.request.url);
+
+/** PDBe's SIFTS best-structures endpoint under the stubbed base URL. */
+const SIFTS = 'https://pdbe/mappings/best_structures/';
+
+/**
+ * SIFTS answers by accession: chain rows (served as a 200), or a responder. An
+ * accession left out gets PDBe's 404, its answer for one it maps no PDB entry to.
+ */
+const sifts = new Map<string, unknown[] | ((req: Request) => Response | Promise<Response>)>();
+
+function routeSifts(): void {
+  files.route({
+    match: (req) => req.url.startsWith(SIFTS),
+    respond: (req) => {
+      const acc = decodeURIComponent(req.url.slice(SIFTS.length));
+      const answer = sifts.get(acc);
+      if (answer === undefined) {
+        return Response.json(
+          { message: 'Requested endpoint does not contain any data' },
+          { status: 404 },
+        );
+      }
+      return typeof answer === 'function' ? answer(req) : Response.json({ [acc]: answer });
+    },
+  });
+}
+
+/** Accessions SIFTS was asked for, in call order. */
+const siftsRequests = () =>
+  fetchedUrls()
+    .filter((url) => url.startsWith(SIFTS))
+    .map((url) => decodeURIComponent(url.slice(SIFTS.length)));
+
+/** A SIFTS chain row as PDBe serves it; `resolution` is null for an NMR entry. */
+const siftsRow = (
+  pdbId: string,
+  coverage: number,
+  resolution: number | null,
+  span: [number, number],
+  method = 'X-ray diffraction',
+) => ({
+  pdb_id: pdbId,
+  chain_id: 'A',
+  experimental_method: method,
+  resolution,
+  tax_id: 9606,
+  unp_start: span[0],
+  unp_end: span[1],
+  start: 1,
+  end: span[1] - span[0] + 1,
+  coverage,
+});
 
 /**
  * A body served in fixed-size chunks with no read-ahead, recording how many
@@ -186,6 +253,8 @@ beforeEach(() => {
   }));
   files.reset();
   files.install();
+  sifts.clear();
+  routeSifts();
 });
 afterEach(() => files.restore());
 
@@ -572,11 +641,11 @@ const swissModel = (id: string) => ({
 
 /**
  * Answer the federated summary per requested accession (`[answeredFor, models]`,
- * `null` for 3D-Beacons' 404), and the PDBe-only confirm with a 404.
+ * `null` for 3D-Beacons' 404). The PDB check answers from `sifts`.
  */
 function serveFederated(byAccession: Record<string, [string, unknown[]] | null>): void {
-  getSummary.mockImplementation(async (acc: string, _ctx: unknown, provider?: string) => {
-    const entry = provider === 'pdbe' ? null : (byAccession[acc] ?? null);
+  getSummary.mockImplementation(async (acc: string) => {
+    const entry = byAccession[acc] ?? null;
     return entry
       ? { accession: entry[0], found: entry[1].length > 0, models: entry[1] }
       : { accession: acc, found: false, models: [] };
@@ -846,10 +915,9 @@ describe('protein_get_structure inactive accessions (#83)', () => {
     expectInactiveRows(out.failed);
     expect(noticeOf(c)).toContain(MERGE_NOTICE);
     expect(resolvedFor()).toEqual(['A0A008APQ8', 'P62988', 'Q1HDT5']);
-    // An inactive accession is settled by UniProt; no PDBe confirm is spent on it.
-    expect(getSummary.mock.calls.some(([acc, , p]) => acc === 'A0A008APQ8' && p === 'pdbe')).toBe(
-      false,
-    );
+    // An inactive accession is settled by UniProt; no PDB check is spent on it,
+    // and every other ID's summary carried a PDBe model.
+    expect(siftsRequests()).toEqual([]);
   });
 
   it('keeps a lone inactive accession’s replacements in all_failed data.failed', async () => {
@@ -942,20 +1010,24 @@ describe('protein_get_structure best_available selection (#90)', () => {
   });
   type Model = ReturnType<typeof pdbe> | typeof SASBDB_4545 | ReturnType<typeof predicted>;
 
-  /**
-   * Serve the federated summary, and the PDBe-only summary (`provider` 'pdbe'):
-   * `null` there is 3D-Beacons' 404 for an accession PDBe holds nothing for.
-   */
-  function serveSummaries(accession: string, federated: Model[], pdbeOnly: Model[] | null = null) {
-    getSummary.mockImplementation(async (_acc: string, _ctx: unknown, provider?: string) => {
-      if (provider === 'pdbe') {
-        return pdbeOnly
-          ? { accession, found: true, models: pdbeOnly }
-          : { accession, found: false, models: [] };
-      }
-      return { accession, found: federated.length > 0, models: federated };
-    });
+  /** Serve the federated summary; the PDB check answers from `sifts` (PDBe's 404 unless set). */
+  function serveSummaries(accession: string, federated: Model[]) {
+    getSummary.mockResolvedValue({ accession, found: federated.length > 0, models: federated });
   }
+
+  /** No 3D-Beacons request was narrowed to one provider: the PDB check goes to SIFTS. */
+  const expectNoProviderQuery = () =>
+    expect(getSummary.mock.calls.every((call) => call.length === 2)).toBe(true);
+
+  /** The federated P0DTC2 answer without PDBe's models: SWISS-MODEL and SASBDB 4545. */
+  const P0DTC2_FEDERATED = (): Model[] => [
+    predicted('P0DTC2_14-1147:7mjm.1.C', 'SWISS-MODEL', 'QMEANDisCo', 0.772),
+    SASBDB_4545,
+  ];
+  const PDB_CHECK_UNAVAILABLE =
+    'The PDB check for P0DTC2 was unavailable, so its pick ranks the federated models alone and may pass over a PDB entry — re-call for the PDB-first pick.';
+
+  afterEach(() => vi.useRealTimers());
 
   const pick = async (accession: string) =>
     (
@@ -1042,66 +1114,246 @@ describe('protein_get_structure best_available selection (#90)', () => {
     }
   });
 
-  it('makes no PDBe-only request when the federated summary carries a PDBe model', async () => {
+  /** A best_available call through the contract: a pick, or the error envelope. */
+  type Contract = {
+    isError?: boolean;
+    structuredContent: {
+      structures: Array<Record<string, unknown>>;
+      notice?: string;
+      error: {
+        code: number;
+        message: string;
+        data: {
+          reason: string;
+          retryable?: boolean;
+          failed?: Array<{ id: string; reason: string }>;
+        };
+      };
+    };
+    content: Array<{ text: string }>;
+  };
+  const bestAvailable = async (ids: string[], signal?: AbortSignal) =>
+    (await runToolContract(
+      getStructure,
+      { ids, source: 'best_available' },
+      signal ? { context: { signal } } : undefined,
+    )) as Contract;
+  const textOf = (result: Contract) => result.content.map((b) => b.text).join('\n');
+
+  /** A SIFTS request that answers only by rejecting once its signal aborts. */
+  const pendingUntilAborted = (req: Request) =>
+    new Promise<Response>((_, reject) => {
+      if (req.signal.aborted) reject(req.signal.reason);
+      req.signal.addEventListener('abort', () => reject(req.signal.reason), { once: true });
+    });
+
+  it('asks SIFTS nothing when the federated summary carries a PDBe model', async () => {
     serveSummaries('P69905', [pdbe('1bab', 1, 1.5, [1, 142])]);
+    // A finer entry SIFTS would offer, so a check that ran would change the pick.
+    sifts.set('P69905', [siftsRow('2w72', 1, 1.07, [1, 142])]);
     getEntries.mockResolvedValue([experimentalMeta('1BAB')]);
-    await pick('P69905');
+    expect((await pick('P69905'))?.pdbId).toBe('1BAB');
 
     expect(getSummary).toHaveBeenCalledTimes(1);
-    expect(getSummary.mock.calls[0]?.[2]).toBeUndefined();
+    expectNoProviderQuery();
+    expect(siftsRequests()).toEqual([]);
   });
 
-  it('confirms with a PDBe-only request when the federated summary has no PDBe model, and picks from it', async () => {
-    // A federated response that arrived without PDBe's models (live P0DTC2 shape).
-    serveSummaries(
-      'P0DTC2',
-      [predicted('P0DTC2_14-1147:7mjm.1.C', 'SWISS-MODEL', 'QMEANDisCo', 0.772), SASBDB_4545],
-      [pdbe('7z8o', 0.155, 0.96, [333, 527]), pdbe('8cxq', 1, 2.3, [1, 1273])],
+  const P0DTC2_SIFTS = [
+    siftsRow('8cxq', 1, 2.3, [1, 1273], 'Electron Microscopy'),
+    siftsRow('7z8o', 0.155, 0.96, [333, 527]),
+  ];
+  it.each([
+    ['in SIFTS order', P0DTC2_SIFTS],
+    ['in reverse', [...P0DTC2_SIFTS].reverse()],
+  ])(
+    'picks the PDB entry PDBe’s SIFTS mapping ranks first when the federated summary has no PDBe model (%s)',
+    async (_label, rows) => {
+      serveSummaries('P0DTC2', P0DTC2_FEDERATED());
+      sifts.set('P0DTC2', rows);
+      getEntries.mockResolvedValue([experimentalMeta('8CXQ')]);
+      const result = await bestAvailable(['P0DTC2']);
+
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent.structures[0]).toMatchObject({
+        id: 'P0DTC2',
+        source: 'experimental',
+        pdbId: '8CXQ',
+        provider: 'PDBe',
+        method: 'ELECTRON MICROSCOPY',
+        resolution: 2.3,
+        coverage: 1,
+        uniprotStart: 1,
+        uniprotEnd: 1273,
+      });
+      expect(result.structuredContent).not.toHaveProperty('notice');
+      const text = textOf(result);
+      expect(text).toContain('**PDB:** 8CXQ | **Method:** ELECTRON MICROSCOPY');
+      expect(text).toContain('**UniProt span:** 1–1273');
+      expect(text).not.toContain('The PDB check');
+      // One PDB check per ID, to SIFTS; no 3D-Beacons request narrowed to PDBe.
+      expect(siftsRequests()).toEqual(['P0DTC2']);
+      expectNoProviderQuery();
+    },
+  );
+
+  /** PDB check failures: each leaves the federated ranking standing, with a notice. */
+  const SIFTS_FAILURES: Array<[string, () => Response]> = [
+    ['answers 503', () => new Response('Service Unavailable', { status: 503 })],
+    ['serves an HTML page', () => new Response('<!DOCTYPE html><html><body>Down</body></html>')],
+    [
+      'is unreachable',
+      () => {
+        throw new TypeError('fetch failed');
+      },
+    ],
+    [
+      'times out each request',
+      () => {
+        throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+      },
+    ],
+  ];
+
+  it.each(SIFTS_FAILURES)(
+    'keeps the federated pick with a notice on both surfaces when SIFTS %s',
+    async (_label, failure) => {
+      serveSummaries('P0DTC2', P0DTC2_FEDERATED());
+      sifts.set('P0DTC2', failure);
+      const result = await bestAvailable(['P0DTC2']);
+
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent.structures[0]).toMatchObject({
+        id: 'P0DTC2',
+        source: 'predicted',
+        provider: 'SWISS-MODEL',
+      });
+      expect(result.structuredContent.structures[0]).not.toHaveProperty('pdbId');
+      expect(result.structuredContent.notice).toBe(PDB_CHECK_UNAVAILABLE);
+      expect(textOf(result)).toContain(PDB_CHECK_UNAVAILABLE);
+      // One attempt: a failed check is never retried.
+      expect(siftsRequests()).toEqual(['P0DTC2']);
+    },
+  );
+
+  it.each([
+    ['hangs on every attempt', () => pendingUntilAborted],
+    [
+      'hangs once, with a 200 behind it',
+      () => {
+        let attempts = 0;
+        return (req: Request) =>
+          ++attempts === 1
+            ? pendingUntilAborted(req)
+            : Response.json({ P0DTC2: [siftsRow('8cxq', 1, 2.3, [1, 1273])] });
+      },
+    ],
+  ])(
+    'settles a check that %s to the federated pick with the notice at 15 s, inside the call budget',
+    async (_label, responder) => {
+      vi.useFakeTimers();
+      serveSummaries('P0DTC2', P0DTC2_FEDERATED());
+      sifts.set('P0DTC2', responder());
+      let settled = false;
+      const running = bestAvailable(['P0DTC2']).finally(() => {
+        settled = true;
+      });
+
+      await vi.advanceTimersByTimeAsync(14_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(true);
+      const result = await running;
+
+      expect(result.isError).toBeFalsy();
+      expect(result.structuredContent.structures[0]).toMatchObject({
+        id: 'P0DTC2',
+        source: 'predicted',
+        provider: 'SWISS-MODEL',
+      });
+      expect(result.structuredContent.structures[0]).not.toHaveProperty('pdbId');
+      expect(result.structuredContent.notice).toBe(PDB_CHECK_UNAVAILABLE);
+      expect(textOf(result)).toContain(PDB_CHECK_UNAVAILABLE);
+      expect(siftsRequests()).toEqual(['P0DTC2']);
+      expect(getEntries).not.toHaveBeenCalled();
+    },
+  );
+
+  it('fails the row as an upstream outage when the PDB check fails and 3D-Beacons lists no model', async () => {
+    serveSummaries('A0PK11', []);
+    sifts.set('A0PK11', () => new Response('', { status: 503 }));
+    const result = await bestAvailable(['A0PK11']);
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({
+      code: -32000,
+      data: {
+        reason: 'upstream_unavailable',
+        retryable: true,
+        failed: [{ id: 'A0PK11', reason: UPSTREAM_REASON }],
+      },
+    });
+    expect(textOf(result)).toContain(`A0PK11: ${UPSTREAM_REASON}`);
+    expect(textOf(result)).not.toContain('The PDB check');
+  });
+
+  it('fails all_failed, naming the missing model, when SIFTS answers 404 and 3D-Beacons lists no model', async () => {
+    serveSummaries('A0PK11', []);
+    const result = await bestAvailable(['A0PK11']);
+
+    expect(result.structuredContent.error).toMatchObject({
+      code: -32001,
+      data: {
+        reason: 'all_failed',
+        failed: [{ id: 'A0PK11', reason: '3D-Beacons has no model for A0PK11.' }],
+      },
+    });
+    expect(siftsRequests()).toEqual(['A0PK11']);
+  });
+
+  it('stops the row at the call budget when the budget runs out during the PDB check', async () => {
+    vi.useFakeTimers();
+    // 3D-Beacons takes 40 s, so the check's 15 s bound would land past the 50 s budget.
+    getSummary.mockImplementation(
+      () =>
+        new Promise((resolve) =>
+          setTimeout(
+            () => resolve({ accession: 'P0DTC2', found: true, models: [SASBDB_4545] }),
+            40_000,
+          ),
+        ),
     );
-    getEntries.mockResolvedValue([experimentalMeta('8CXQ')]);
-    const rec = await pick('P0DTC2');
+    sifts.set('P0DTC2', pendingUntilAborted);
+    const running = bestAvailable(['P0DTC2']);
+    await vi.advanceTimersByTimeAsync(50_000);
+    const result = await running;
 
-    expect(getSummary).toHaveBeenCalledTimes(2);
-    expect(getSummary.mock.calls[1]?.[2]).toBe('pdbe');
-    expect(rec).toMatchObject({ source: 'experimental', pdbId: '8CXQ', provider: 'PDBe' });
+    expect(siftsRequests()).toEqual(['P0DTC2']);
+
+    expect(result.structuredContent.error).toMatchObject({
+      code: -32000,
+      data: {
+        reason: 'upstream_unavailable',
+        failed: [
+          {
+            id: 'P0DTC2',
+            reason: "Not finished within this call's upstream time budget — re-call with this ID.",
+          },
+        ],
+      },
+    });
   });
 
-  it('keeps the federated ranking with a notice when the PDBe-only confirm fails', async () => {
-    const federated = [
-      predicted('P0DTC2_14-1147:7mjm.1.C', 'SWISS-MODEL', 'QMEANDisCo', 0.772),
-      SASBDB_4545,
-    ];
-    getSummary.mockImplementation(async (_acc: string, _ctx: unknown, provider?: string) => {
-      if (provider === 'pdbe') throw new Error('3D-Beacons returned HTTP 503 for P0DTC2');
-      return { accession: 'P0DTC2', found: true, models: federated };
-    });
-    const result = (await runToolContract(getStructure, {
-      ids: ['P0DTC2'],
-      source: 'best_available',
-    })) as {
-      isError?: boolean;
-      structuredContent: { structures: Array<Record<string, unknown>>; notice?: string };
-      content: Array<{ text: string }>;
-    };
-
-    expect(result.isError).toBeFalsy();
-    expect(result.structuredContent.structures[0]).toMatchObject({
-      id: 'P0DTC2',
-      provider: 'SWISS-MODEL',
-    });
-    const unavailable = 'The PDB check for P0DTC2 was unavailable';
-    expect(result.structuredContent.notice).toContain(unavailable);
-    expect(result.content.map((b) => b.text).join('\n')).toContain(unavailable);
-  });
-
-  it('stays cancelled when the caller cancels during the PDBe-only confirm', async () => {
-    const caller = new AbortController();
-    getSummary.mockImplementation(async (_acc: string, _ctx: unknown, provider?: string) => {
-      if (provider !== 'pdbe') {
-        return { accession: 'P0DTC2', found: true, models: [SASBDB_4545] };
-      }
+  it('stays cancelled when the caller cancels during the PDB check, aborting the SIFTS request', async () => {
+    // The check's 15 s timer is armed and never advanced: the cancellation alone settles the call.
+    vi.useFakeTimers();
+    serveSummaries('P0DTC2', [SASBDB_4545]);
+    const checks: AbortSignal[] = [];
+    let caller = new AbortController();
+    sifts.set('P0DTC2', (req) => {
+      checks.push(req.signal);
       caller.abort(new DOMException('cancelled', 'AbortError'));
-      throw caller.signal.reason;
+      return pendingUntilAborted(req);
     });
 
     await expect(
@@ -1109,11 +1361,36 @@ describe('protein_get_structure best_available selection (#90)', () => {
         getStructure.input.parse({ ids: ['P0DTC2'], source: 'best_available' }),
         createMockContext({ errors: getStructure.errors, signal: caller.signal }),
       ),
-    ).rejects.toMatchObject({ name: 'AbortError' });
+    ).rejects.toMatchObject({ name: 'AbortError', message: 'cancelled' });
+    // The in-flight check was aborted and never retried.
+    expect(checks).toHaveLength(1);
+    expect(checks[0]?.aborted).toBe(true);
+
+    // Through the contract, the caller's reason reaches both surfaces as a cancellation.
+    caller = new AbortController();
+    const result = await bestAvailable(['P0DTC2'], caller.signal);
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({ code: -32011, message: 'cancelled' });
+    expect(result.structuredContent).not.toHaveProperty('structures');
+    expect(textOf(result)).toContain('cancelled');
+    expect(checks).toHaveLength(2);
+  });
+
+  it('asks no PDB check for an isoform accession, keeping the isoform’s own model as its pick', async () => {
+    serveSummaries('P04637-2', [predicted('AF-P04637-2-F1', 'AlphaFold DB', 'pLDDT', 76.94)]);
+    // SIFTS maps PDB entries to P04637-2; a check would make 4MZR the pick.
+    sifts.set('P04637-2', [siftsRow('4mzr', 0.509, 2.9, [93, 292])]);
+    expect(await pick('P04637-2')).toMatchObject({
+      id: 'P04637-2',
+      source: 'predicted',
+      provider: 'AlphaFold DB',
+    });
+    expect(siftsRequests()).toEqual([]);
+    expectNoProviderQuery();
   });
 
   it('picks a SASBDB model as a non-PDB experimental record when PDBe holds nothing', async () => {
-    serveSummaries('P0DTC2', [SASBDB_4545], null);
+    serveSummaries('P0DTC2', [SASBDB_4545]);
     const result = (await runToolContract(getStructure, {
       ids: ['P0DTC2'],
       source: 'best_available',
@@ -1137,12 +1414,16 @@ describe('protein_get_structure best_available selection (#90)', () => {
     const text = result.content.map((b) => b.text).join('\n');
     expect(text).not.toContain('**PDB:**');
     expect(text).toContain('**SASBDB**');
+    // SIFTS's 404 says PDBe maps no entry: the pick stands with no notice.
+    expect(siftsRequests()).toEqual(['P0DTC2']);
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    expect(text).not.toContain('The PDB check');
   });
 
   it('prefers a scored prediction over an unscored SASBDB model when PDBe holds nothing', async () => {
     const models = [SASBDB_4545, predicted('AF-0000000365840314', 'AlphaFold DB', 'pLDDT', 67.14)];
     for (const order of [models, [...models].reverse()]) {
-      serveSummaries('P0DTC2', order, null);
+      serveSummaries('P0DTC2', order);
       expect(await pick('P0DTC2')).toMatchObject({
         source: 'predicted',
         provider: 'AlphaFold DB',
@@ -1159,42 +1440,36 @@ describe('protein_get_structure best_available selection (#90)', () => {
     ];
     for (const [models, expected] of cases) {
       for (const order of [models, [...models].reverse()]) {
-        serveSummaries('P22222', order, null);
+        serveSummaries('P22222', order);
         const rec = await pick('P22222');
         expect(rec?.coordinateUrls).toEqual({ cif: expect.stringContaining(`/${expected}.cif`) });
       }
     }
     // The record keeps the native value and names its metric.
-    serveSummaries(
-      'P22222',
-      [unscored, swiss, predicted('af-70', 'AlphaFold DB', 'pLDDT', 70)],
-      null,
-    );
+    serveSummaries('P22222', [unscored, swiss, predicted('af-70', 'AlphaFold DB', 'pLDDT', 70)]);
     expect(await pick('P22222')).toMatchObject({ confidence: 0.85, confidenceType: 'QMEANDisCo' });
     // An unscored model is still picked when nothing else is offered.
-    serveSummaries('P22222', [unscored], null);
+    serveSummaries('P22222', [unscored]);
     expect(await pick('P22222')).toMatchObject({ provider: 'AlphaFill' });
   });
 
   it('carries coverage, uniprotStart, and uniprotEnd on both surfaces for experimental and predicted picks', async () => {
     getEntries.mockResolvedValue([experimentalMeta('9R2Q')]);
-    getSummary.mockImplementation(async (acc: string, _ctx: unknown, provider?: string) =>
+    getSummary.mockImplementation(async (acc: string) =>
       acc === 'P04637'
         ? { accession: 'P04637', found: true, models: [pdbe('9r2q', 1, 3.2, [1, 393])] }
-        : provider === 'pdbe'
-          ? { accession: acc, found: false, models: [] }
-          : {
-              accession: acc,
-              found: true,
-              models: [
-                {
-                  ...predicted('sm-1', 'SWISS-MODEL', 'QMEANDisCo', 0.63),
-                  coverage: 0.144,
-                  uniprotStart: 2390,
-                  uniprotEnd: 2821,
-                },
-              ],
-            },
+        : {
+            accession: acc,
+            found: true,
+            models: [
+              {
+                ...predicted('sm-1', 'SWISS-MODEL', 'QMEANDisCo', 0.63),
+                coverage: 0.144,
+                uniprotStart: 2390,
+                uniprotEnd: 2821,
+              },
+            ],
+          },
     );
     const result = (await runToolContract(getStructure, {
       ids: ['P04637', 'Q6ZS81'],
@@ -1522,9 +1797,9 @@ describe('protein_get_structure upstream lookup failures', () => {
 
   /** The 3D-Beacons summary: P69905's PDBe entry, a failure for `failFor`, and a 404 for anything else. */
   function summaryFailingFor(failFor: string, failure: () => Promise<unknown>): void {
-    getSummary.mockImplementation(async (acc: string, _c: unknown, provider?: string) => {
+    getSummary.mockImplementation(async (acc: string) => {
       if (acc === failFor) throw await failure();
-      return acc === 'P69905' && provider !== 'pdbe'
+      return acc === 'P69905'
         ? { accession: 'P69905', found: true, models: [pdbeModel('2w72')] }
         : { accession: acc, found: false, models: [] };
     });
@@ -1586,13 +1861,9 @@ describe('protein_get_structure upstream lookup failures', () => {
       },
     ],
     [
-      '3D-Beacons answers a non-404 status (a plain Error)',
+      '3D-Beacons answers a non-404 status (a status-classified error)',
       'best_available',
-      () =>
-        summaryFailingFor(
-          'P04637',
-          async () => new Error('3D-Beacons returned HTTP 500 for P04637'),
-        ),
+      () => summaryFailingFor('P04637', () => statusError(500, '3D-Beacons')),
     ],
     [
       '3D-Beacons is unreachable (a network TypeError)',
@@ -1608,10 +1879,7 @@ describe('protein_get_structure upstream lookup failures', () => {
             ? { kind: 'merged', accession: 'P04637', successor: 'P99999' }
             : { kind: 'active', accession: acc },
         );
-        summaryFailingFor(
-          'P99999',
-          async () => new Error('3D-Beacons returned HTTP 502 for P99999'),
-        );
+        summaryFailingFor('P99999', () => statusError(502, '3D-Beacons'));
       },
     ],
   ] as const)('fails only the row when %s', async (_label, source, arrange) => {
@@ -3144,7 +3412,7 @@ describe('protein_get_structure experimental entry detail', () => {
     );
 
     expect(out.structures[0]?.polymerEntities).toEqual([
-      { entityId: '6QNR_9', authAsymIds: ['82', '8E'], labelAsymIds: ['I', 'OB'] },
+      { entityId: '6QNR_9', authAsymIds: ['82', '8E'], labelAsymIds: ['I', 'OB'], chainCount: 2 },
     ]);
     // Both namespaces reach the text surface, each labelled by namespace.
     const text = (getStructure.format!(out)[0] as { text: string }).text;
@@ -3357,4 +3625,298 @@ describe('chain-namespace descriptions across the surface', () => {
     const chainNotFound = getAnnotations.errors?.find((e) => e.reason === 'chain_not_found');
     expect(chainNotFound?.recovery).toContain('polymerEntities[].authAsymIds');
   });
+});
+
+describe('protein_get_structure ids aliases (#104)', () => {
+  type Result = {
+    isError?: boolean;
+    structuredContent: {
+      structures?: Array<{ id: string }>;
+      error?: { code: number; data: { recovery?: { hint: string } } };
+    };
+    content: Array<{ type: string; text: string }>;
+  };
+  // Through the contract runner, which applies input aliases as a client call does.
+  const call = async (args: Record<string, unknown>) =>
+    (await runToolContract(getStructure, args as never)) as Result;
+  const ALIASES = ['pdb_id', 'id', 'identifier'];
+
+  beforeEach(() => {
+    getEntries.mockImplementation(async (ids: string[]) => ids.map((id) => experimentalMeta(id)));
+  });
+
+  it.each(ALIASES)(
+    'reads a lone %s string as ids, with both surfaces identical to an ids call',
+    async (alias) => {
+      const viaIds = await call({ ids: ['4HHB'] });
+      const viaAlias = await call({ [alias]: '4HHB' });
+
+      expect(viaIds.isError).toBeFalsy();
+      expect(viaIds.structuredContent.structures?.map((s) => s.id)).toEqual(['4HHB']);
+      expect(viaAlias.structuredContent).toEqual(viaIds.structuredContent);
+      expect(viaAlias.content).toEqual(viaIds.content);
+      expect(getEntries.mock.calls.map(([ids]) => ids)).toEqual([['4HHB'], ['4HHB']]);
+    },
+  );
+
+  it('passes an array sent under an alias through, resolving every ID', async () => {
+    const result = await call({ pdb_id: ['4HHB', '1CRN'] });
+    expect(result.structuredContent.structures?.map((s) => s.id)).toEqual(['4HHB', '1CRN']);
+  });
+
+  it.each([
+    [{ pdb_id: '4HHB', ids: ['1CRN'] }, 'pdb_id is an alias of ids; send one of them, not both.'],
+    [
+      { id: '4HHB', identifier: '1UBQ', ids: ['1CRN'] },
+      'id and identifier are aliases of ids; send only one of them.',
+    ],
+  ])('rejects aliases sent beside ids: %j', async (args, hint) => {
+    const result = await call(args);
+
+    expect(result.isError).toBe(true);
+    expect(result.structuredContent.error).toMatchObject({
+      code: -32602,
+      data: { recovery: { hint } },
+    });
+    expect(result.content.map((b) => b.text).join('\n')).toContain(hint);
+    expect(getEntries).not.toHaveBeenCalled();
+  });
+
+  it('advertises no alias key in the input schema', () => {
+    const schema = z.toJSONSchema(getStructure.input, { io: 'input' }) as {
+      properties: Record<string, unknown>;
+      required?: string[];
+    };
+    for (const alias of ALIASES) expect(schema.properties).not.toHaveProperty(alias);
+    expect(schema.required).toEqual(['ids']);
+  });
+});
+
+describe('protein_get_structure chain-ID cap (#102)', () => {
+  type Entity = {
+    entityId: string;
+    authAsymIds?: string[];
+    labelAsymIds?: string[];
+    chainCount?: number;
+  };
+  type Result = {
+    isError?: boolean;
+    structuredContent: {
+      structures: Array<{ id: string; polymerEntities?: Entity[] }>;
+      notice?: string;
+    };
+    content: Array<{ type: string; text: string }>;
+  };
+  const call = async (args: Record<string, unknown>) =>
+    (await runToolContract(getStructure, args as never)) as Result;
+  const textOf = (r: Result) => r.content.map((b) => b.text).join('\n');
+
+  /** `n` distinct chain IDs of entity `no` in one namespace, in upstream order. */
+  const chainIds = (no: number, ns: 'a' | 'l', n: number) =>
+    Array.from({ length: n }, (_, i) => `${no}${ns}${i}`);
+
+  /** Polymer entity `no` of `id` with `n` chains; its author and label IDs differ. */
+  const entity = (id: string, no: number, n: number) => ({
+    entityId: `${id}_${no}`,
+    authAsymIds: chainIds(no, 'a', n),
+    labelAsymIds: chainIds(no, 'l', n),
+  });
+
+  /** 36ZA's census: 29 entities and 2,888 chains, four entities past 100. */
+  const OVER_CAP_36ZA = new Map([
+    [2, 110],
+    [7, 1615],
+    [11, 282],
+    [13, 276],
+  ]);
+  const meta36za = () => ({
+    ...experimentalMeta('36ZA'),
+    // The 25 entities under the cap hold the other 605 chains: 24 × 24 + 29.
+    polymerEntities: Array.from({ length: 29 }, (_, i) =>
+      entity('36ZA', i + 1, OVER_CAP_36ZA.get(i + 1) ?? (i + 1 === 29 ? 29 : 24)),
+    ),
+  });
+
+  const CAP_NOTICE_36ZA =
+    "Chain-ID lists hold the first 100 chains per polymer entity, capping 4 entities in 36ZA; chainCount gives each entity's full count, and all_chains: true or pdb://{entry_id} lists every chain.";
+
+  it('lists every chain of an entity at or under 100 chains, with no cap notice', async () => {
+    getEntries.mockResolvedValue([
+      {
+        ...experimentalMeta('9AAV'),
+        polymerEntities: [entity('9AAV', 1, 64), entity('9AAV', 2, 100), entity('9AAV', 3, 2)],
+      },
+    ]);
+    const result = await call({ ids: ['9AAV'] });
+
+    const entities = result.structuredContent.structures[0]?.polymerEntities ?? [];
+    expect(entities.map((e) => e.authAsymIds)).toEqual([
+      chainIds(1, 'a', 64),
+      chainIds(2, 'a', 100),
+      chainIds(3, 'a', 2),
+    ]);
+    expect(entities.map((e) => e.labelAsymIds)).toEqual([
+      chainIds(1, 'l', 64),
+      chainIds(2, 'l', 100),
+      chainIds(3, 'l', 2),
+    ]);
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    expect(textOf(result)).toContain(`auth_asym_id: ${chainIds(2, 'a', 100).join(', ')}`);
+  });
+
+  it('leaves the EntryMeta the record is built from complete', async () => {
+    const meta = meta36za();
+    getEntries.mockResolvedValue([meta]);
+    await call({ ids: ['36ZA'] });
+
+    expect(meta.polymerEntities[6]?.authAsymIds).toEqual(chainIds(7, 'a', 1615));
+    expect(meta.polymerEntities[6]?.labelAsymIds).toEqual(chainIds(7, 'l', 1615));
+  });
+
+  it('lists the first 100 chains of each entity past 100 in both namespaces, with chainCount and one notice, on both surfaces', async () => {
+    const meta = meta36za();
+    getEntries.mockResolvedValue([meta]);
+    const result = await call({ ids: ['36ZA'] });
+
+    const entities = result.structuredContent.structures[0]?.polymerEntities ?? [];
+    expect(entities).toHaveLength(29);
+    for (const [i, e] of entities.entries()) {
+      const upstream = meta.polymerEntities[i];
+      expect(e.chainCount).toBe(upstream?.authAsymIds.length);
+      expect(e.authAsymIds).toEqual(upstream?.authAsymIds.slice(0, 100));
+      expect(e.labelAsymIds).toEqual(upstream?.labelAsymIds.slice(0, 100));
+    }
+    expect(entities.filter((e) => e.authAsymIds?.length === 100).map((e) => e.entityId)).toEqual([
+      '36ZA_2',
+      '36ZA_7',
+      '36ZA_11',
+      '36ZA_13',
+    ]);
+    expect(entities.reduce((sum, e) => sum + (e.chainCount ?? 0), 0)).toBe(2888);
+    expect(result.structuredContent.notice).toBe(CAP_NOTICE_36ZA);
+
+    const text = textOf(result);
+    expect(text).toContain(
+      `- **36ZA_7** — 1615 chains · auth_asym_id (first 100): ${chainIds(7, 'a', 100).join(', ')} · label_asym_id (first 100): ${chainIds(7, 'l', 100).join(', ')}`,
+    );
+    expect(text).toContain(
+      `- **36ZA_1** — 24 chains · auth_asym_id: ${chainIds(1, 'a', 24).join(', ')} · label_asym_id: ${chainIds(1, 'l', 24).join(', ')}`,
+    );
+    expect(text).not.toMatch(/\b7a100\b|\b7l100\b/);
+    expect(text).toContain(CAP_NOTICE_36ZA);
+  });
+
+  it('lists every chain with all_chains, with no cap notice', async () => {
+    const meta = meta36za();
+    getEntries.mockResolvedValue([meta]);
+    const result = await call({ ids: ['36ZA'], all_chains: true });
+
+    const entities = result.structuredContent.structures[0]?.polymerEntities ?? [];
+    expect(entities.flatMap((e) => e.authAsymIds ?? [])).toHaveLength(2888);
+    expect(entities.flatMap((e) => e.labelAsymIds ?? [])).toHaveLength(2888);
+    expect(entities.map((e) => e.labelAsymIds)).toEqual(
+      meta.polymerEntities.map((e) => e.labelAsymIds),
+    );
+    expect(entities.map((e) => e.chainCount)).toEqual(
+      meta.polymerEntities.map((e) => e.authAsymIds.length),
+    );
+    expect(result.structuredContent).not.toHaveProperty('notice');
+    const text = textOf(result);
+    expect(text).toContain(
+      `- **36ZA_7** — 1615 chains · auth_asym_id: ${chainIds(7, 'a', 1615).join(', ')}`,
+    );
+    expect(text).not.toContain('first 100');
+  });
+
+  it('caps an entity at 101 chains and not one at 100', async () => {
+    getEntries.mockResolvedValue([
+      {
+        ...experimentalMeta('8CKB'),
+        polymerEntities: [entity('8CKB', 1, 100), entity('8CKB', 2, 101)],
+      },
+    ]);
+    const result = await call({ ids: ['8CKB'] });
+
+    const [at, past] = result.structuredContent.structures[0]?.polymerEntities ?? [];
+    expect(at).toMatchObject({ chainCount: 100, authAsymIds: chainIds(1, 'a', 100) });
+    expect(past).toMatchObject({ chainCount: 101, authAsymIds: chainIds(2, 'a', 100) });
+    expect(result.structuredContent.notice).toContain('capping 1 entity in 8CKB;');
+  });
+
+  it('names every structure with capped entities in one notice sentence, and none without', async () => {
+    getEntries.mockResolvedValue([
+      meta36za(),
+      { ...experimentalMeta('4HHB'), polymerEntities: [entity('4HHB', 1, 2)] },
+      { ...experimentalMeta('8CKB'), polymerEntities: [entity('8CKB', 1, 101)] },
+    ]);
+    const result = await call({ ids: ['36ZA', '4HHB', '8CKB'] });
+
+    expect(result.structuredContent.notice).toBe(
+      "Chain-ID lists hold the first 100 chains per polymer entity, capping 4 entities in 36ZA, 1 entity in 8CKB; chainCount gives each entity's full count, and all_chains: true or pdb://{entry_id} lists every chain.",
+    );
+  });
+
+  it('gives an entity upstream reports no chain IDs for neither list nor chainCount', async () => {
+    getEntries.mockResolvedValue([
+      {
+        ...experimentalMeta('1ABC'),
+        polymerEntities: [
+          { entityId: '1ABC_1', description: 'Sparse entity' },
+          { entityId: '1ABC_2', authAsymIds: ['A', 'B', 'C'] },
+          { entityId: '1ABC_3', authAsymIds: ['Z'], labelAsymIds: ['Y'] },
+        ],
+      },
+    ]);
+    const result = await call({ ids: ['1ABC'] });
+
+    expect(result.structuredContent.structures[0]?.polymerEntities).toEqual([
+      { entityId: '1ABC_1', description: 'Sparse entity' },
+      { entityId: '1ABC_2', authAsymIds: ['A', 'B', 'C'], chainCount: 3 },
+      { entityId: '1ABC_3', authAsymIds: ['Z'], labelAsymIds: ['Y'], chainCount: 1 },
+    ]);
+    const text = textOf(result);
+    expect(text).toContain('- **1ABC_1** — Sparse entity\n');
+    expect(text).toContain('- **1ABC_2** — 3 chains · auth_asym_id: A, B, C\n');
+    expect(text).toContain('- **1ABC_3** — 1 chain · auth_asym_id: Z · label_asym_id: Y\n');
+  });
+
+  it('points protein_compare_structures.chain at the lists that hold every chain', () => {
+    const description = String(
+      compareStructures.input.shape.structures.element.shape.chain.description,
+    );
+    expect(description).toContain('pdb://{entry_id}');
+    expect(description).toContain('first 100 chains unless all_chains is set');
+  });
+
+  it.each(['predicted', 'best_available'] as const)(
+    'accepts all_chains under %s and changes nothing',
+    async (source) => {
+      getPrediction.mockResolvedValue({
+        uniprotAccession: 'P69905',
+        meanPlddt: 98,
+        cifUrl: 'https://af/cif',
+      });
+      getSummary.mockResolvedValue({
+        accession: 'P69905',
+        found: true,
+        models: [
+          {
+            modelIdentifier: 'AF-P69905-F1',
+            modelCategory: 'AB-INITIO',
+            provider: 'AlphaFold DB',
+            modelUrl: 'https://alphafold.test/af.cif',
+            confidenceType: 'pLDDT',
+            confidenceAvgLocalScore: 96.8,
+          },
+        ],
+      });
+      const without = await call({ ids: ['P69905'], source });
+      const withFlag = await call({ ids: ['P69905'], source, all_chains: true });
+
+      expect(withFlag.isError).toBeFalsy();
+      expect(withFlag.structuredContent.structures.map((s) => s.id)).toEqual(['P69905']);
+      expect(withFlag.structuredContent).toEqual(without.structuredContent);
+      expect(withFlag.content).toEqual(without.content);
+    },
+  );
 });

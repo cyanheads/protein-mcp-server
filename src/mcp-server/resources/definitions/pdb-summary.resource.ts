@@ -8,8 +8,13 @@
 
 import { resource, z } from '@cyanheads/mcp-ts-core';
 import { notFound } from '@cyanheads/mcp-ts-core/errors';
-import { ligandSchema, polymerEntitySchema } from '@/mcp-server/tools/definitions/_schemas.js';
+import {
+  ligandSchema,
+  polymerEntityOutput,
+  polymerEntitySchema,
+} from '@/mcp-server/tools/definitions/_schemas.js';
 import { getRcsbService } from '@/services/rcsb/rcsb-service.js';
+import { withCallBudget } from '@/services/shared/call-budget.js';
 
 export const pdbSummaryResource = resource('pdb://{entry_id}', {
   name: 'pdb-structure-summary',
@@ -35,13 +40,17 @@ export const pdbSummaryResource = resource('pdb://{entry_id}', {
     polymerEntities: z
       .array(polymerEntitySchema)
       .describe(
-        'Modeled polymer entities in entity-number order, each carrying both chain namespaces — authAsymIds for protein_get_annotations, labelAsymIds for protein_compare_structures.',
+        'Modeled polymer entities in entity-number order, each carrying every chain in both namespaces — authAsymIds for protein_get_annotations, labelAsymIds for protein_compare_structures — and chainCount.',
       ),
     ligands: z.array(ligandSchema).describe('Bound ligands, in non-polymer entity-number order.'),
   }),
 
   async handler(params, ctx) {
-    const [meta] = await getRcsbService().getEntries([params.entry_id], ctx);
+    // The metadata request and its retries share the call budget, so a hung
+    // upstream settles before the client's request timeout.
+    const [meta] = await withCallBudget(ctx, (call) =>
+      getRcsbService().getEntries([params.entry_id], call),
+    );
     if (!meta)
       throw notFound(`No PDB entry found for ${params.entry_id.toUpperCase()}`, {
         entryId: params.entry_id,
@@ -56,7 +65,7 @@ export const pdbSummaryResource = resource('pdb://{entry_id}', {
         : {}),
       ...(meta.releaseDate ? { releaseDate: meta.releaseDate } : {}),
       organisms: meta.organisms,
-      polymerEntities: meta.polymerEntities,
+      polymerEntities: meta.polymerEntities.map((e) => polymerEntityOutput(e)),
       ligands: meta.ligands,
     };
   },

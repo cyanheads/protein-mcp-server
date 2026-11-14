@@ -23,9 +23,9 @@ import {
   type FoldseekOutcome,
   getFoldseekService,
 } from '@/services/foldseek/foldseek-service.js';
-import { getRcsbService } from '@/services/rcsb/rcsb-service.js';
+import { getRcsbService, SEQUENCE_HIT_CEILING } from '@/services/rcsb/rcsb-service.js';
 import type { EntryMeta, ProteinEntitySummary } from '@/services/rcsb/types.js';
-import { withCallBudget } from '@/services/shared/call-budget.js';
+import { budgetExhaustion, withCallBudget } from '@/services/shared/call-budget.js';
 import { fetchTextWindow } from '@/services/shared/http.js';
 import {
   canonicalAccessionOf,
@@ -303,7 +303,7 @@ const enrichmentShape = {
     .string()
     .optional()
     .describe(
-      'Advisory note: a structure job still computing, or one the call’s time budget cut off after submitting (with how to resume it), no matches, a start past the end of the results, other queries in a multichain structure job, the default protein entity a pdb_id sequence query searched alongside the entry’s other protein entities, or a merged UniProt accession answered for its successor.',
+      'Advisory note: a structure job still computing, or one the call’s time budget cut off after submitting (with how to resume it), no matches, a start past the end of the results, a sequence search at RCSB’s 2,000-hit ceiling, other queries in a multichain structure job, the default protein entity a pdb_id sequence query searched alongside the entry’s other protein entities, or a merged UniProt accession answered for its successor.',
     ),
 };
 
@@ -406,7 +406,7 @@ export const findSimilar = tool('protein_find_similar', {
       code: JsonRpcErrorCode.InvalidParams,
       when: 'The requested query index is not below the number of queries the completed Foldseek job holds.',
       recovery:
-        'Re-call with the ticket_id from the error and a query index below the reported query count; the job is already complete.',
+        'Re-call by:"structure" with the ticket_id from the error and a query index below the reported query count; the job is already complete.',
       thrownBy: 'service',
     },
     {
@@ -461,7 +461,7 @@ export const findSimilar = tool('protein_find_similar', {
     if (result.ticketId) {
       const withQuery = result.query ? ` and query ${result.query}` : '';
       lines.push(
-        `**Ticket:** ${result.ticketId} — re-call with ticket_id${withQuery} to resume or re-page this job.`,
+        `**Ticket:** ${result.ticketId} — re-call by:"structure" with ticket_id${withQuery} to resume this job, adding a different start or limit to re-page it.`,
       );
     }
     if (typeof result.queryCount === 'number')
@@ -495,6 +495,9 @@ export const findSimilar = tool('protein_find_similar', {
   },
 });
 
+/** A by:"sequence" search whose total is RCSB's sequence-hit ceiling, which it reports however many more match. */
+const SEQUENCE_CEILING_NOTICE = `RCSB stops a sequence search at ${SEQUENCE_HIT_CEILING.toLocaleString('en-US')} hits, and this search reached it, so totalCount is that ceiling, not a complete count. Raise min_identity or lower max_evalue to narrow the search to a complete count.`;
+
 async function runSequence(input: FindSimilarInput, ctx: Ctx): Promise<FindSimilarOutput> {
   const rcsb = getRcsbService();
   const query = await resolveSequence(input, ctx);
@@ -524,8 +527,10 @@ async function runSequence(input: FindSimilarInput, ctx: Ctx): Promise<FindSimil
   });
   // Same two empty-page causes runStructure separates: nothing matched, or an
   // offset past the end of a populated result set. `notice` is last-wins, so the
-  // page note and the query's provenance note are joined into one string.
+  // ceiling note, the page note, and the query's provenance note are joined into
+  // one string.
   const notes: string[] = [];
+  if (result.total === SEQUENCE_HIT_CEILING) notes.push(SEQUENCE_CEILING_NOTICE);
   if (result.hits.length === 0)
     notes.push(
       result.total === 0
@@ -631,10 +636,12 @@ async function runStructure(
         recovery: {
           hint:
             queryCount > 0
-              ? `Re-call with ticket_id "${ticketId}" and query between 0 and ${queryCount - 1}; the job is already complete, so nothing is resubmitted.`
+              ? `Re-call by:"structure" with ticket_id "${ticketId}" and query between 0 and ${queryCount - 1}; the job is already complete, so nothing is resubmitted.`
               : 'Foldseek read no chains from the submitted structure; confirm it has protein coordinates via protein_get_structure.',
         },
       },
+      // The caller sends the ticket back as written; a literal renders it unescaped in content[].
+      { literals: [ticketId] },
     );
   }
   if (outcome.status === 'not_found') {
@@ -644,10 +651,10 @@ async function runStructure(
     );
   }
   if (outcome.status === 'failed') {
-    // The service folds every submit and poll failure into `failed`; one the call
-    // budget caused is reported as the timeout it is, or — once Foldseek holds the
-    // job — as a job to resume by its ticket. Upstream's own text stays in the
-    // log, out of the error.
+    // The service folds every submit and poll failure into `failed`, rethrowing only
+    // the caller's cancellation; one the call budget caused is reported as the
+    // timeout it is, or — once Foldseek holds the job — as a job to resume by its
+    // ticket. Upstream's own text stays in the log, out of the error.
     const exhausted = budgetExhaustion(ctx);
     if (exhausted && outcome.ticketId) {
       return computing(
@@ -696,7 +703,7 @@ async function runStructure(
   }
   if (outcome.queryCount > 1) {
     notes.push(
-      `This job holds ${outcome.queryCount} queries, one per chain Foldseek read from the submitted structure in file order; these hits are for query ${outcome.query}. Re-call with ticket_id "${outcome.ticketId}" and a different query (0–${outcome.queryCount - 1}) to read another chain's hits.`,
+      `This job holds ${outcome.queryCount} queries, one per chain Foldseek read from the submitted structure in file order; these hits are for query ${outcome.query}. Re-call by:"structure" with ticket_id "${outcome.ticketId}" and a different query (0–${outcome.queryCount - 1}) to read another chain's hits.`,
     );
   }
   notes.push(...provenance);
@@ -734,23 +741,11 @@ function computing(
   const withQuery = query > 0 ? ` and query ${query}` : '';
   ctx.enrich.notice(
     [
-      `${lead} Re-call protein_find_similar with ticket_id set to "${ticketId}"${withQuery} to resume.`,
+      `${lead} Re-call protein_find_similar by:"structure" with ticket_id set to "${ticketId}"${withQuery} to resume.`,
       ...provenance,
     ].join(' '),
   );
   return { by: 'structure', engine: 'Foldseek', status: 'computing', ticketId, query, hits: [] };
-}
-
-/**
- * The reason `withCallBudget` aborted the call's requests with once its budget
- * ran out (a `TimeoutError`); undefined while it runs and after a caller's
- * cancellation, which keeps the caller's reason.
- */
-function budgetExhaustion(ctx: Ctx): DOMException | undefined {
-  const reason: unknown = ctx.signal.reason;
-  return ctx.signal.aborted && reason instanceof DOMException && reason.name === 'TimeoutError'
-    ? reason
-    : undefined;
 }
 
 /**
@@ -820,8 +815,8 @@ async function resolveSequence(input: FindSimilarInput, ctx: Ctx): Promise<Seque
   if (input.pdb_id) return await sequenceFromEntry(input.pdb_id.trim(), chain, ctx);
   if (input.uniprot) {
     const id = checkedUniProtId(input.uniprot, ctx);
-    // The service resolves an entry name to its entry in the same request, and
-    // throws inactive_accession for a demerged or deleted accession.
+    // The service reads an entry name's or merged accession's redirect and fetches
+    // the entry it names, and throws inactive_accession for a demerged or deleted accession.
     const found = await getUniProtService().getSequence(id, ctx);
     if (!found) {
       throw ctx.fail('no_sequence', `UniProtKB has no entry with a sequence for ${id}.`);

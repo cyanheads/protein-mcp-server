@@ -2,9 +2,11 @@
  * @fileoverview Tests for the UniProt service: entry normalization (recommended
  * name, gene names, FUNCTION comment join, feature vs. variant categorization),
  * include-scoped field selection in the request URL, accession status (active,
- * merged and followed to its successor, demerged or deleted, never assigned)
- * across getEntry / getSequence / resolveAccession, entry names resolved to
- * their entry's accession, and InterPro memberships: the protein-record count
+ * merged — a 303 read, never followed, and its successor requested once with the
+ * call's fields — demerged or deleted, never assigned) across getEntry /
+ * getSequence / resolveAccession with the request count each costs, entry names
+ * resolved to their entry's accession through the same 303 without a merge, and
+ * InterPro memberships: the protein-record count
  * gate and its failed reads (429, 403, HTML pages), the paged entries walk with
  * its stop guards, and normalization. Normalization tests stub `fetchJson`; status and paging
  * tests run the real HTTP layer against a fetch fake.
@@ -147,24 +149,25 @@ const DELETED_A0A008APQ8 = {
 };
 
 /**
- * What fetch hands back for merged Q1HDT5: UniProt answers 303 to P69905 and the
- * redirect drops `fields`, so the successor arrives whole — secondary structure
- * included (live capture: 63 features with Helix and Turn, against 43 asked for).
+ * UniProt's 303 for merged Q1HDT5 (live capture, UniProt 2026_04, 177 bytes): the
+ * body reads the accession as an `Inactive` MERGED entry, and `Location` names the
+ * successor. Following it would download P69905 whole, `fields` dropped.
  */
-const FOLLOWED_Q1HDT5 = {
-  entryType: 'UniProtKB reviewed (Swiss-Prot)',
-  primaryAccession: 'P69905',
-  secondaryAccessions: ['P01922', 'Q1HDT5'],
-  sequence: { length: 142, value: 'MVLSPADKTNVKAAWGKVGAHAGEYGAEALERMFLSFPTTKTYFPHF' },
-  features: [
-    { type: 'Helix', location: { start: { value: 4 }, end: { value: 17 } } },
+const REDIRECT_Q1HDT5 = () =>
+  new Response(
+    '{"entryType":"Inactive","primaryAccession":"Q1HDT5","inactiveReason":{"inactiveReasonType":"MERGED","mergeDemergeTo":["P69905"]},"extraAttributes":{"uniParcId":"UPI0000D7A34F"}}',
     {
-      type: 'Domain',
-      description: 'Globin',
-      location: { start: { value: 2 }, end: { value: 142 } },
+      status: 303,
+      headers: { 'content-type': 'application/json', location: '/uniprotkb/P69905?from=Q1HDT5' },
     },
-  ],
-};
+  );
+
+/** UniProt's 303 for entry name HBA_HUMAN (live capture, UniProt 2026_04): an empty body. */
+const REDIRECT_HBA_HUMAN = () =>
+  new Response(null, { status: 303, headers: { location: '/uniprotkb/P69905?from=HBA_HUMAN' } });
+
+/** Secondary structure, which UniProt sends only when a request selects no `fields`. */
+const HELIX = { type: 'Helix', location: { start: { value: 4 }, end: { value: 17 } } };
 
 /** P69905 requested by its own accession with the call's fields. */
 const P69905_WITH_FIELDS = {
@@ -179,6 +182,18 @@ const P69905_WITH_FIELDS = {
     },
   ],
 };
+
+/**
+ * P69905 as UniProt serves it: field-selected when the request names `fields`,
+ * whole (Helix included) when it does not — what requesting the 303's own
+ * `Location` URL would download.
+ */
+const P69905_BY_FIELDS = (req: Request) =>
+  Response.json(
+    new URL(req.url).searchParams.has('fields')
+      ? P69905_WITH_FIELDS
+      : { ...P69905_WITH_FIELDS, features: [HELIX, ...P69905_WITH_FIELDS.features] },
+  );
 
 /** UniProt's 404 for an accession it never assigned (live capture). */
 const NOT_FOUND = () =>
@@ -205,6 +220,18 @@ beforeEach(() => {
 });
 
 afterEach(() => http.restore());
+
+/** Every request made so far: its path, `fields`, any `from` parameter, and redirect mode. */
+const requests = () =>
+  http.calls.map(({ request }) => {
+    const url = new URL(request.url);
+    return {
+      path: url.pathname,
+      fields: url.searchParams.get('fields'),
+      from: url.searchParams.get('from'),
+      redirect: request.redirect,
+    };
+  });
 
 describe('UniProtService.getEntry', () => {
   it('retains present variant IDs and changes, including empty values, without inventing missing fields (#68)', async () => {
@@ -369,26 +396,62 @@ describe('UniProtService.getEntry', () => {
     expect(http.calls).toHaveLength(1);
   });
 
-  it("follows a merged accession to its successor and re-requests it with the call's fields (#83)", async () => {
+  it("reads a merged accession's 303 and requests the successor once, by accession, with the call's fields (#83, #100)", async () => {
     http.route(
-      { match: on('uniprot.test', '/uniprotkb/Q1HDT5'), respond: Response.json(FOLLOWED_Q1HDT5) },
-      {
-        match: on('uniprot.test', '/uniprotkb/P69905'),
-        respond: Response.json(P69905_WITH_FIELDS),
-      },
+      { match: on('uniprot.test', '/uniprotkb/Q1HDT5'), respond: REDIRECT_Q1HDT5 },
+      { match: on('uniprot.test', '/uniprotkb/P69905'), respond: P69905_BY_FIELDS },
     );
     const out = await service().getEntry('q1hdt5', 'features', createMockContext());
 
     expect(out).toMatchObject({ accession: 'P69905', mergedFrom: 'Q1HDT5' });
-    // The successor's own field-selected record, not the redirect's whole entry.
+    // The successor's own field-selected record, not the redirect target's whole entry.
     expect(out?.features.map((f) => f.type)).toEqual(['Domain']);
-    expect(http.calls.map((c) => new URL(c.request.url).pathname)).toEqual([
-      '/uniprotkb/Q1HDT5',
-      '/uniprotkb/P69905',
-    ]);
-    const [first, second] = http.calls.map((c) => fieldsOf(c.request.url));
-    expect(second).toEqual(first);
-    expect(second).toEqual(expect.arrayContaining(ADDED_FEATURE_FIELDS));
+    const made = requests();
+    expect(made.map((r) => r.path)).toEqual(['/uniprotkb/Q1HDT5', '/uniprotkb/P69905']);
+    expect(made.map((r) => r.redirect)).toEqual(['manual', 'manual']);
+    expect(made.map((r) => r.from)).toEqual([null, null]);
+    expect(made[1]?.fields).toBe(made[0]?.fields);
+    expect(fieldsOf(http.calls[1]?.request.url ?? '')).toEqual(
+      expect.arrayContaining(ADDED_FEATURE_FIELDS),
+    );
+  });
+
+  it("reads an entry name's 303 as the entry's accession: one request for that entry, no merge (#100)", async () => {
+    http.route(
+      { match: on('uniprot.test', '/uniprotkb/HBA_HUMAN'), respond: REDIRECT_HBA_HUMAN },
+      { match: on('uniprot.test', '/uniprotkb/P69905'), respond: P69905_BY_FIELDS },
+    );
+    const out = await service().getEntry('hba_human', 'features', createMockContext());
+
+    expect(out?.accession).toBe('P69905');
+    expect(out).not.toHaveProperty('mergedFrom');
+    expect(out?.features.map((f) => f.type)).toEqual(['Domain']);
+    const made = requests();
+    expect(made.map((r) => r.path)).toEqual(['/uniprotkb/HBA_HUMAN', '/uniprotkb/P69905']);
+    expect(made[1]?.fields).toBe(made[0]?.fields);
+  });
+
+  it('fails ServiceUnavailable when the successor redirects again, requesting no third entry', async () => {
+    http.route(
+      { match: on('uniprot.test', '/uniprotkb/Q1HDT5'), respond: REDIRECT_Q1HDT5 },
+      {
+        match: on('uniprot.test', '/uniprotkb/P69905'),
+        respond: () =>
+          new Response(null, {
+            status: 303,
+            headers: { location: '/uniprotkb/P99999?from=P69905' },
+          }),
+      },
+    );
+    const err = await service()
+      .getEntry('Q1HDT5', 'all', createMockContext())
+      .catch((e: unknown) => e);
+
+    expect(err).toMatchObject({
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      message: 'UniProt redirected Q1HDT5 to P69905, which redirects again to P99999.',
+    });
+    expect(http.calls).toHaveLength(2);
   });
 
   it('throws inactive_accession for a demerged accession, naming every replacement (#83)', async () => {
@@ -474,20 +537,20 @@ describe('UniProtService.getSequence', () => {
     expect(http.calls).toHaveLength(1);
   });
 
-  it("follows a merged accession to its successor's sequence and reports the merge (#83)", async () => {
+  it("reads a merged accession's 303 and returns its successor's sequence with the merge (#83, #100)", async () => {
     http.route(
-      { match: on('uniprot.test', '/uniprotkb/Q1HDT5'), respond: Response.json(FOLLOWED_Q1HDT5) },
-      {
-        match: on('uniprot.test', '/uniprotkb/P69905'),
-        respond: Response.json(P69905_WITH_FIELDS),
-      },
+      { match: on('uniprot.test', '/uniprotkb/Q1HDT5'), respond: REDIRECT_Q1HDT5 },
+      { match: on('uniprot.test', '/uniprotkb/P69905'), respond: P69905_BY_FIELDS },
     );
     expect(await service().getSequence('Q1HDT5', createMockContext())).toEqual({
       accession: 'P69905',
       sequence: P69905_WITH_FIELDS.sequence.value,
       mergedFrom: 'Q1HDT5',
     });
-    expect(fieldsOf(http.calls[1]?.request.url ?? '')).toEqual(['sequence']);
+    expect(requests()).toEqual([
+      { path: '/uniprotkb/Q1HDT5', fields: 'sequence', from: null, redirect: 'manual' },
+      { path: '/uniprotkb/P69905', fields: 'sequence', from: null, redirect: 'manual' },
+    ]);
   });
 
   it('throws inactive_accession for a demerged accession (#83)', async () => {
@@ -510,28 +573,35 @@ describe('UniProtService.getSequence', () => {
     await expect(service().getSequence('P04637-99', createMockContext())).resolves.toBeNull();
   });
 
-  it("returns an entry name's sequence under its entry's accession from one request, with no merge", async () => {
-    http.route({
-      match: on('uniprot.test', '/uniprotkb/HBA_HUMAN'),
-      respond: Response.json(P69905_WITH_FIELDS),
-    });
+  it("returns an entry name's sequence under its entry's accession: the 303, then that entry, no merge (#100)", async () => {
+    http.route(
+      { match: on('uniprot.test', '/uniprotkb/HBA_HUMAN'), respond: REDIRECT_HBA_HUMAN },
+      { match: on('uniprot.test', '/uniprotkb/P69905'), respond: P69905_BY_FIELDS },
+    );
     expect(await service().getSequence('hba_human', createMockContext())).toEqual({
       accession: 'P69905',
       sequence: P69905_WITH_FIELDS.sequence.value,
     });
-    expect(http.calls).toHaveLength(1);
-    expect(fieldsOf(http.calls[0]?.request.url ?? '')).toEqual(['sequence']);
+    expect(requests()).toEqual([
+      { path: '/uniprotkb/HBA_HUMAN', fields: 'sequence', from: null, redirect: 'manual' },
+      { path: '/uniprotkb/P69905', fields: 'sequence', from: null, redirect: 'manual' },
+    ]);
   });
 });
 
 describe('UniProtService.resolveAccession', () => {
   it.each([
-    ['P69905', ENTRY, { kind: 'active', accession: 'P69905' }],
-    ['P04637-2', { primaryAccession: 'P04637-2' }, { kind: 'active', accession: 'P04637-2' }],
-    ['Q1HDT5', FOLLOWED_Q1HDT5, { kind: 'merged', accession: 'Q1HDT5', successor: 'P69905' }],
+    ['P69905', () => Response.json(ENTRY), { kind: 'active', accession: 'P69905' }],
+    [
+      'P04637-2',
+      () => Response.json({ primaryAccession: 'P04637-2' }),
+      { kind: 'active', accession: 'P04637-2' },
+    ],
+    // The 303's body reads `entryType: "Inactive"`; the status and Location decide first.
+    ['Q1HDT5', REDIRECT_Q1HDT5, { kind: 'merged', accession: 'Q1HDT5', successor: 'P69905' }],
     [
       'P62988',
-      DEMERGED_P62988,
+      () => Response.json(DEMERGED_P62988),
       {
         kind: 'inactive',
         accession: 'P62988',
@@ -541,7 +611,7 @@ describe('UniProtService.resolveAccession', () => {
     ],
     [
       'A0A008APQ8',
-      DELETED_A0A008APQ8,
+      () => Response.json(DELETED_A0A008APQ8),
       {
         kind: 'inactive',
         accession: 'A0A008APQ8',
@@ -550,27 +620,47 @@ describe('UniProtService.resolveAccession', () => {
         replacements: [],
       },
     ],
-  ])('classifies %s from one accession-only request (#83)', async (accession, body, expected) => {
-    http.route({
-      match: on('uniprot.test', `/uniprotkb/${accession}`),
-      respond: Response.json(body),
-    });
-    expect(await service().resolveAccession(accession, createMockContext())).toEqual(expected);
-    expect(http.calls).toHaveLength(1);
-    expect(fieldsOf(http.calls[0]?.request.url ?? '')).toEqual(['accession']);
-  });
+  ])(
+    'classifies %s from one accession-only request (#83)',
+    async (accession, respond, expected) => {
+      http.route({ match: on('uniprot.test', `/uniprotkb/${accession}`), respond });
+      expect(await service().resolveAccession(accession, createMockContext())).toEqual(expected);
+      expect(requests()).toEqual([
+        { path: `/uniprotkb/${accession}`, fields: 'accession', from: null, redirect: 'manual' },
+      ]);
+    },
+  );
 
-  it("resolves an entry name to its entry's accession as active, never as a merge", async () => {
-    http.route({
-      match: on('uniprot.test', '/uniprotkb/HBA_HUMAN'),
-      respond: Response.json({ primaryAccession: 'P69905' }),
-    });
+  it("resolves an entry name's 303 to its entry's accession as active, never as a merge (#100)", async () => {
+    http.route({ match: on('uniprot.test', '/uniprotkb/HBA_HUMAN'), respond: REDIRECT_HBA_HUMAN });
     expect(await service().resolveAccession('HBA_HUMAN', createMockContext())).toEqual({
       kind: 'active',
       accession: 'P69905',
     });
-    expect(http.calls).toHaveLength(1);
-    expect(fieldsOf(http.calls[0]?.request.url ?? '')).toEqual(['accession']);
+    expect(requests()).toEqual([
+      { path: '/uniprotkb/HBA_HUMAN', fields: 'accession', from: null, redirect: 'manual' },
+    ]);
+  });
+
+  it.each([
+    ['no Location', {}],
+    ['a Location outside UniProtKB', { location: '/uniparc/UPI0000D7A34F' }],
+  ])('fails a 303 with %s as ServiceUnavailable, never a verdict (#100)', async (_, headers) => {
+    http.route({
+      match: on('uniprot.test', '/uniprotkb/Q1HDT5'),
+      respond: () => new Response(null, { status: 303, headers }),
+    });
+    for (const call of [
+      () => service().resolveAccession('Q1HDT5', createMockContext()),
+      () => service().getSequence('Q1HDT5', createMockContext()),
+    ]) {
+      await expect(call()).rejects.toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        message: expect.stringContaining('Q1HDT5'),
+      });
+    }
+    // Each call made its one request; the redirect is never followed or retried.
+    expect(http.calls).toHaveLength(2);
   });
 
   it('classifies an entry name UniProt does not know as unknown, under the name as sent', async () => {
@@ -595,6 +685,57 @@ describe('UniProtService.resolveAccession', () => {
       code: JsonRpcErrorCode.ServiceUnavailable,
     });
   });
+});
+
+describe('UniProt requests per accession class (#100)', () => {
+  /** UniProt's answer for each identifier class, as captured live. */
+  const routeEveryClass = () =>
+    http.route(
+      { match: on('uniprot.test', '/uniprotkb/Q1HDT5'), respond: REDIRECT_Q1HDT5 },
+      { match: on('uniprot.test', '/uniprotkb/HBA_HUMAN'), respond: REDIRECT_HBA_HUMAN },
+      { match: on('uniprot.test', '/uniprotkb/P69905'), respond: P69905_BY_FIELDS },
+      {
+        match: on('uniprot.test', '/uniprotkb/P62988'),
+        respond: () => Response.json(DEMERGED_P62988),
+      },
+      {
+        match: on('uniprot.test', '/uniprotkb/A0A008APQ8'),
+        respond: () => Response.json(DELETED_A0A008APQ8),
+      },
+      { match: on('uniprot.test', '/uniprotkb/A0A9Z9Z9Z9'), respond: NOT_FOUND },
+    );
+
+  const methods = [
+    (id: string) => service().resolveAccession(id, createMockContext()),
+    (id: string) => service().getEntry(id, 'all', createMockContext()),
+    (id: string) => service().getSequence(id, createMockContext()),
+  ];
+
+  it.each([
+    ['Q1HDT5 (merged)', [1, 2, 2], 'Q1HDT5'],
+    ['HBA_HUMAN (entry name)', [1, 2, 2], 'HBA_HUMAN'],
+    ['P69905 (active)', [1, 1, 1], 'P69905'],
+    ['P62988 (demerged)', [1, 1, 1], 'P62988'],
+    ['A0A008APQ8 (deleted)', [1, 1, 1], 'A0A008APQ8'],
+    ['A0A9Z9Z9Z9 (never assigned)', [1, 1, 1], 'A0A9Z9Z9Z9'],
+  ])(
+    '%s costs %j requests (resolveAccession / getEntry / getSequence), none followed',
+    async (_, expected, id) => {
+      routeEveryClass();
+      const counts: number[] = [];
+      for (const method of methods) {
+        const before = http.calls.length;
+        // Demerged and deleted accessions throw from getEntry / getSequence; the verdicts are pinned above.
+        await method(id).catch(() => undefined);
+        counts.push(http.calls.length - before);
+      }
+      expect(counts).toEqual(expected);
+      for (const request of requests()) {
+        expect(request.redirect).toBe('manual');
+        expect(request.from).toBeNull();
+      }
+    },
+  );
 });
 
 describe('inactive-accession and merge wording', () => {
