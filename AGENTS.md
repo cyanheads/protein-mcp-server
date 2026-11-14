@@ -2,8 +2,8 @@
 
 **Server:** protein-mcp-server
 **Version:** 0.9.0
-**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.18`
-**Engines:** Bun ≥1.4.0, Node ≥24.0.0
+**Framework:** [@cyanheads/mcp-ts-core](https://www.npmjs.com/package/@cyanheads/mcp-ts-core) `^0.13.22`
+**Engines:** Bun ≥1.4.4, Node ≥24.0.0
 **MCP SDK:** `@modelcontextprotocol/server` ^2.4.0
 **Zod:** ^4.6.7
 **TypeScript:** ^7.0.2
@@ -185,7 +185,7 @@ await createApp({
   landing: { requireAuth: false }, // public, keyless data server
   sessionMode: 'stateless',        // no tool gates on ctx.requestInput
   instructions: 'Find structures with protein_search_structures, then pass the returned IDs to protein_get_structure … A PDB ID also chains into … A Foldseek search or structural alignment still running … re-call with it to resume that job rather than resubmitting. The protein-guide skill (skill://protein-guide/SKILL.md) carries the identifier forms each tool takes, author versus label chain IDs, residue numbering, and the gates for reading best_available picks, sequence and Foldseek hits, ligand counts, and PDB profiles.',
-  setup(core) { /* init the six provider services */ },
+  setup(core) { /* init the seven provider services */ },
 });
 ```
 
@@ -195,7 +195,7 @@ await createApp({
 
 `sessionMode: 'stateless'` declares the HTTP session posture in `src/` instead of leaving it to a deployment's `MCP_SESSION_MODE`, which still wins whenever it carries a meaningful value (an empty string and an unsubstituted `${…}` placeholder read as unset and fall through to the option). Stateless fits this server: no tool asks the caller for input mid-handler. If a tool ever gates on `ctx.requestInput`, switch to `{ default: 'stateful', require: 'stateful' }` — startup then fails with a `ConfigurationError` rather than serving a mode in which a 2025-era client can never answer the prompt. Stdio is never refused.
 
-`teardown(core)` is the `setup()` counterpart — release a watcher, socket, or non-`unref()`'d timer there. It runs after the transport stops and before the logger closes, on every shutdown path, and a signal-triggered shutdown then exits the process explicitly (0, or 1 if a step never settles within the framework's 10 s ceiling). This server passes none: the six provider services hold no long-lived handles (the async-poll `sleep` timer is request-scoped and cleared on abort).
+`teardown(core)` is the `setup()` counterpart — release a watcher, socket, or non-`unref()`'d timer there. It runs after the transport stops and before the logger closes, on every shutdown path, and a signal-triggered shutdown then exits the process explicitly (0, or 1 if a step never settles within the framework's 10 s ceiling). This server passes none: the seven provider services hold no long-lived handles (the async-poll `sleep` timer is request-scoped and cleared on abort).
 
 ---
 
@@ -268,17 +268,18 @@ See framework CLAUDE.md and the `api-errors` skill for the full auto-classificat
 
 ```text
 src/
-  index.ts                              # createApp() entry point — registers 7 tools + 2 resources, serves skills/, inits 6 services
+  index.ts                              # createApp() entry point — registers 7 tools + 2 resources, serves skills/, inits 7 services
   config/
     server-config.ts                    # Server-specific env vars (Zod schema) — provider base URLs + tuning limits, all optional
   services/
     rcsb/                               # RCSB Search v2 + Data API + alignment + facets (rcsb-service.ts, facets.ts, types.ts)
     alphafold/                          # AlphaFold DB predictions (pLDDT/PAE)
     beacons/                            # 3D-Beacons federated best-available models
+    pdbe/                               # PDBe SIFTS UniProt-to-PDB mappings, the best_available PDB check
     uniprot/                           # UniProt features/variants + InterPro domains/GO terms
     alignment/                         # RCSB Structural Comparison (TM-align / jFATCAT) async jobs
     foldseek/                          # Foldseek fold-similarity async search
-    shared/                            # http.ts, async.ts (mapWithConcurrency), identifiers.ts (PDB/UniProt ID checks), call-budget.ts (withCallBudget: one 50 s budget per call), text-budget.ts (TextBudget: several reads held under one shared character budget)
+    shared/                            # http.ts, async.ts (mapWithConcurrency), identifiers.ts (PDB/UniProt ID checks), call-budget.ts (withDeadline: one deadline shared by the requests it wraps; withCallBudget, its 50 s per-call case; budgetExhaustion: a budget stop vs a caller's cancellation), text-budget.ts (TextBudget: several reads held under one shared character budget)
   mcp-server/
     tools/definitions/
       *.tool.ts                        # 7 tool definitions + _schemas.ts (shared facet schema/render) + index.ts barrel
@@ -393,7 +394,7 @@ When you complete a skill's checklist, check the boxes and add a completion time
 
 ## Bundling
 
-`bun run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs (`framework-skills/`, `skills/`, `.claude/`, `.agents/` at a package root, and `SKILL.md` files — a nested runtime `skills/` such as the MCP SDK's `dist/ext/skills/` stays); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, `CLAUDE.md`, `AGENTS.md`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
+`bun run bundle` produces a `.mcpb` extension bundle for one-click install in Claude Desktop. `mcpb pack` reads `.mcpbignore`, not `.gitignore`, so every root path the bundle must not ship — source, tests, docs, caches, logs, agent docs, plugin manifests, gitignored local files — needs a root-anchored line there (`/docs/`, never `docs/`, which also strips `node_modules/*/docs/`); `lint:packaging` names each missing or unanchored line. Root `skills/` ships on purpose. The pack step is followed by `scripts/clean-mcpb.ts`, which prunes dev dependencies (`mcpb clean`) and strips four classes of `node_modules/**` content that root-anchored `.mcpbignore` patterns cannot reach: dependency-shipped agent docs — `framework-skills/`, `skills/`, `.claude/`, `.agents/`, `AGENTS.md`, and `CLAUDE.md` at a package's root, and `SKILL.md` anywhere (a `skills/` deeper in a package is runtime code and stays, such as the MCP SDK's `dist/ext/skills/`); platform-specific native bindings, which would otherwise lock the bundle to the platform it was packed on; node-gyp build output beside a `binding.gyp` (`config.gypi`, Makefiles, `obj.target/`, `.deps/`, object files and debug symbols), which records the packing machine's paths — compiled `*.node` addons stay; and build-only package files — the framework's `changelog/`, `scripts/`, `templates/`, and config bases (`biome.json`, `vitest.config.base.mjs`, `config/tsconfig.base.json`), and `better-sqlite3`'s `deps/` and `src/` C sources. MCPB is stdio-only — HTTP and Cloudflare Workers deployments are unaffected. Consumers who don't need it can delete `manifest.json` and `.mcpbignore`; `lint:packaging` skips cleanly.
 
 **Adding an env var requires both files:** `server.json` (registry discovery, `environmentVariables[]`) and `manifest.json` (bundle install UX, `mcp_config.env` + `user_config`). `lint:packaging` (run by `devcheck`) verifies the env var names match, that every `user_config` option is wired into `mcp_config.env` as `"X": "${user_config.X}"` (the host substitutes nothing else — `"${X}"` reaches the server as that literal string), and that an optional string option carries `"default": ""`.
 
